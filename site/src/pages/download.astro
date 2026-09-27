@@ -1,0 +1,74 @@
+---
+import Base from "../layouts/Base.astro";
+import Flower from "../components/Flower.astro";
+import { downloadUrl, href, releaseAsset, repo, version } from "../config";
+---
+
+<Base title="Download" description={`Download Daisy ${version} for macOS.`}>
+  <div class="wrap page">
+    <header class="page-head">
+      <Flower size={64} />
+      <h1>Download Daisy</h1>
+      <p>Version {version}, beta. Signed with Developer ID and notarized by Apple.</p>
+    </header>
+    <div class="download-panel">
+      <div class="verify">
+        <a class="btn" href={downloadUrl}>Download {releaseAsset}</a>
+        <p>Opens the latest release on GitHub. Install it on every Mac you want to share.</p>
+        <h2 class="section-sub">Install</h2>
+        <ol class="steps">
+          <li><div><h3>Open the zip</h3><p>Your browser usually unpacks it into Downloads.</p></div></li>
+          <li><div><h3>Move Daisy.app to Applications</h3><p>Then open it. Daisy appears in the menu bar.</p></div></li>
+          <li><div><h3>Follow Daisy's setup</h3><p>Allow Accessibility and Input Monitoring, then pair. <a href={href("/docs/getting-started/")}>Getting started</a> walks through it.</p></div></li>
+        </ol>
+      </div>
+      <div>
+        <h2 class="section-sub">Requirements</h2>
+        <dl class="spec-list">
+          <dt>Macs</dt><dd>Apple silicon</dd>
+          <dt>macOS</dt><dd>26 or later</dd>
+          <dt>Swipes</dt><dd>macOS 27 on the Mac with the trackpad</dd>
+          <dt>Network</dt><dd>Both Macs reachable on the same network</dd>
+          <dt>Account</dt><dd>None</dd>
+        </dl>
+      </div>
+    </div>
+
+    <section class="section" id="verify" aria-labelledby="verify-title">
+      <div class="section-head">
+        <h2 id="verify-title">Verify your download</h2>
+        <p>Every release is built by GitHub Actions from a tagged commit, with SLSA Build Level 3 provenance and a GitHub artifact attestation. Either check proves the zip came from this project's release workflow.</p>
+      </div>
+      <div class="security">
+        <div class="verify">
+          <h3>With the GitHub CLI</h3>
+          <pre class="code"><code>gh attestation verify {releaseAsset} \
+  --repo misfitdev/daisy</code></pre>
+        </div>
+        <div class="verify">
+          <h3>With slsa-verifier</h3>
+          <pre class="code"><code>slsa-verifier verify-artifact {releaseAsset} \
+  --provenance-path {releaseAsset}.intoto.jsonl \
+  --source-uri github.com/misfitdev/daisy \
+  --source-tag v{version}</code></pre>
+        </div>
+      </div>
+      <p class="text-links"><a href={href("/docs/releasing/")}>How releases are built</a><a href={`${repo}/releases`}>All releases</a></p>
+    </section>
+  </div>
+</Base>
+
+<style>
+  .section-sub {
+    font-size: var(--step-title);
+    margin-top: var(--space-4);
+    margin-bottom: var(--space-2);
+  }
+  .download-panel > div > .section-sub:first-child {
+    margin-top: 0;
+  }
+  .page .section {
+    padding-bottom: 0;
+    margin-top: var(--space-5);
+  }
+</style>

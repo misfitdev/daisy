@@ -1,0 +1,45 @@
+---
+import Base from "../../layouts/Base.astro";
+import { docs } from "../../lib/docs.mjs";
+import { href } from "../../config";
+
+const blurbs: Record<string, string> = {
+  "getting-started": "Install Daisy, allow it, pair two Macs and cross your first edge.",
+  trust: "How pairing works, how long trust lasts, and how to forget a Mac.",
+  "user-guide": "Everything the app does, trust and data, troubleshooting, and the optional command line.",
+  "how-it-works": "Driving and following Macs, the layers, and what happens at the edge.",
+  "security-model": "Security controls, trust boundaries, and key handling.",
+  protocol: "The wire format and the session, step by step.",
+  "macos-internals": "Permissions, the event tap, pointer pinning and swipes.",
+  releasing: "Signing, notarization and verifying a release.",
+};
+const groups = [
+  { name: "Use", items: [{ slug: "getting-started", title: "Getting started" }, { slug: "trust", title: "Trust and pairing" }, ...docs.filter((d) => d.group === "Use")] },
+  { name: "Understand", items: docs.filter((d) => d.group === "Understand") },
+  { name: "Contribute", items: docs.filter((d) => d.group === "Contribute") },
+];
+---
+
+<Base title="Docs" current="docs" description="Guides and reference for Daisy.">
+  <div class="wrap page">
+    <header class="page-head">
+      <h1>Docs</h1>
+      <p>Start with getting started. Everything after it is there when you want it.</p>
+    </header>
+    {groups.map((g) => (
+      <section class="doc-group" aria-labelledby={`g-${g.name}`}>
+        <h2 id={`g-${g.name}`}>{g.name}</h2>
+        <ul class="doc-list">
+          {g.items.map((d) => (
+            <li>
+              <a href={href(`/docs/${d.slug}/`)}>
+                <strong>{d.title}</strong>
+                <span>{blurbs[d.slug]}</span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))}
+  </div>
+</Base>

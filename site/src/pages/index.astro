@@ -1,0 +1,228 @@
+---
+import Base from "../layouts/Base.astro";
+import Desk from "../components/Desk.astro";
+import Flower from "../components/Flower.astro";
+import { features } from "../lib/status";
+import { chain, colors, flower } from "../lib/marks";
+import { href, repo, version } from "../config";
+
+// Flowers sit over the center of each equal column; the SVG scales uniformly with the row.
+const nodes = [0, 1, 2].map((k) => ({ x: ((k * 2 + 1) * 1240) / 6, y: 40 }));
+const movesSvg =
+  chain(nodes[0], nodes[1]).join("") +
+  chain(nodes[1], nodes[2]).join("") +
+  nodes.map((n) => `<g transform="translate(${n.x} ${n.y}) scale(1.1)">${flower(colors.yellow)}</g>`).join("");
+---
+
+<Base>
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="wrap">
+      <div class="hero-row">
+        <h1 id="hero-title"><span class="hero-line">One keyboard and trackpad.</span> <span class="coral-mark">Every Mac.</span></h1>
+        <div class="hero-action">
+          <p class="hero-lede">Daisy shares one Mac's keyboard, mouse and trackpad with all the Macs connected to the chain. No Apple ID, no iCloud, no account.</p>
+          <a class="btn" href={href("/download/")}>Download Daisy {version}</a>
+          <p class="hero-meta">Free and open source · Beta · macOS 26 or later · Apple silicon</p>
+        </div>
+      </div>
+    </div>
+    <Desk />
+  </section>
+
+  <div class="thread" data-thread>
+  <section class="section" aria-labelledby="status-title">
+    <div class="wrap">
+      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
+      <div class="section-head">
+        <h2 id="status-title">Features</h2>
+      </div>
+      <ul class="features" style={`--rows: ${Math.ceil(features.length / 2)}`}>
+        {features.map((f) => {
+          const available = f.status === "available";
+          return (
+          <li class:list={[{ "is-off": !available }]}>
+            <Flower size={30} state={available ? "connected" : "disconnected"} />
+            <div>
+              <strong>{f.title}</strong>
+              <span>{f.detail}</span>
+            </div>
+            {!available && <em>Planned</em>}
+          </li>
+          );
+        })}
+      </ul>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="setup-title">
+    <div class="wrap">
+      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
+      <div class="section-head">
+        <h2 id="setup-title">Set up in three moves</h2>
+        <p>Do it once on each Mac. After that, your Macs recognize each other.</p>
+      </div>
+      <svg class="moves-chain" viewBox="0 0 1240 80" aria-hidden="true" set:html={movesSvg} />
+      <div class="moves">
+        <div class="move">
+          <div class="move-node"><Flower size={56} /></div>
+          <h3>Install</h3>
+          <p>Download Daisy, open the zip and drag Daisy.app into Applications. Do the same on the other Mac.</p>
+        </div>
+        <div class="move">
+          <div class="move-node"><Flower size={56} /></div>
+          <h3>Allow</h3>
+          <p>Open Daisy. It lives in the menu bar and walks you through allowing Accessibility and Input Monitoring.</p>
+        </div>
+        <div class="move">
+          <div class="move-node"><Flower size={56} /></div>
+          <h3>Pair</h3>
+          <p>One Mac shows a code; type it on the other. Tell Daisy which side the other Mac sits on, then push the pointer through that edge.</p>
+        </div>
+      </div>
+      <img
+        class="setup-shot"
+        src={href("/screenshots/daisy-setup.png")}
+        width="1160"
+        height="1504"
+        loading="lazy"
+        decoding="async"
+        alt="Daisy settings with this system waiting for a peer, Host selected, and screen edge, trust, and permission controls."
+      />
+      <p class="text-links"><a href={href("/docs/getting-started/")}>Read the full getting-started guide</a></p>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="native-title">
+    <div class="wrap native">
+      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
+      <h2 id="native-title" class="native-statement">Both ends speak macOS, so keys, clicks and swipes arrive as themselves.</h2>
+      <div class="native-points">
+        <div>
+          <h3>Mac to Mac, by design</h3>
+          <p>Nothing is translated through another operating system. A three-finger swipe to the next Space on this Mac is a three-finger swipe to the next Space on that one.</p>
+        </div>
+        <div>
+          <h3>No account, anywhere</h3>
+          <p>Your Macs trust each other directly, through a one-time code. There is no sign-in, no cloud service and nothing to sync.</p>
+        </div>
+        <div>
+          <h3>You decide how long trust lasts</h3>
+          <p>Each Mac chooses: until it has been idle for 96 hours, for a number of days, for one session, or until you forget it. The stricter choice wins.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="security-title">
+    <div class="wrap">
+      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
+      <div class="section-head">
+        <h2 id="security-title">Paired, encrypted and verifiable</h2>
+        <p>Macs pair once with a one-time code. Every connection after that is encrypted and authenticated, and every release can be traced to its source.</p>
+      </div>
+      <ul class="facts">
+        <li>Connections use a Noise handshake with X25519, ChaCha20-Poly1305 and BLAKE2s.</li>
+        <li>Pairing runs SPAKE2 on a one-time six-digit code, so someone in the middle gets one guess per attempt: a one-in-a-million chance.</li>
+        <li>At most five unknown Macs may try in ten minutes, and pairing closes after the first success.</li>
+        <li>Releases are signed with Developer ID, notarized by Apple, and built with SLSA Build Level 3 provenance. <a href={href("/download/#verify")}>Verify your download.</a></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="closing-title">
+    <div class="wrap closing">
+      <span class="thread-end" data-thread-end aria-hidden="true"><Flower size={72} state="disconnected" /></span>
+      <h2 id="closing-title">Put your Macs anywhere and use them as one desk.</h2>
+      <div class="closing-actions">
+        <a class="btn" href={href("/download/")}>Download Daisy {version}</a>
+        <a class="btn btn-ghost" href={repo}>View on GitHub</a>
+      </div>
+      <p>Beta. Free and open source.</p>
+    </div>
+  </section>
+  </div>
+</Base>
+
+<script>
+  import { chainAlong } from "../lib/marks";
+
+  const thread = document.querySelector<HTMLElement>("[data-thread]")!;
+  const wide = matchMedia("(min-width: 1100px)");
+  const calm = matchMedia("(prefers-reduced-motion: reduce)");
+  let svg: SVGSVGElement | null = null;
+  let links: SVGGElement[] = [];
+  let flowers: HTMLElement[] = [];
+  let queued = false;
+
+  const centerOf = (el: Element, origin: DOMRect) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left - origin.left + r.width / 2, y: r.top - origin.top + r.height / 2 };
+  };
+
+  /** Lay one chain from flower to flower down the rail, ending at the Download flower. */
+  function build() {
+    svg?.remove();
+    svg = null;
+    links = [];
+    const nodes = [...thread.querySelectorAll<HTMLElement>("[data-thread-node]")];
+    const end = thread.querySelector<HTMLElement>("[data-thread-end]")!;
+    flowers = [...nodes, end];
+    if (!wide.matches) {
+      flowers.forEach((f) => f.classList.add("is-on"));
+      return;
+    }
+    const origin = thread.getBoundingClientRect();
+    const points = flowers.map((f) => centerOf(f, origin));
+    let markup = "";
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = points[i];
+      const b = points[i + 1];
+      markup += chainAlong([a, b], 40).join("");
+    }
+    const ns = "http://www.w3.org/2000/svg";
+    svg = document.createElementNS(ns, "svg");
+    svg.classList.add("thread-svg");
+    svg.setAttribute("width", String(origin.width));
+    svg.setAttribute("height", String(origin.height));
+    svg.setAttribute("aria-hidden", "true");
+    svg.innerHTML = markup;
+    thread.prepend(svg);
+    links = [...svg.querySelectorAll<SVGGElement>(".link")];
+    update();
+  }
+
+  /** Links arrive as they scroll into view; each flower lights once the chain reaches it. */
+  function update() {
+    queued = false;
+    const reach = innerHeight * 0.82;
+    if (calm.matches) {
+      links.forEach((l) => l.classList.add("is-in"));
+      flowers.forEach((f) => f.classList.add("is-on"));
+      return;
+    }
+    let lastIn = -Infinity;
+    for (const l of links) {
+      const top = l.getBoundingClientRect().top;
+      const on = top < reach;
+      l.classList.toggle("is-in", on);
+      if (on) lastIn = Math.max(lastIn, top);
+    }
+    for (const f of flowers) {
+      const r = f.getBoundingClientRect();
+      f.classList.toggle("is-on", r.top + r.height / 2 < reach && (links.length === 0 || lastIn >= r.top - 60));
+    }
+  }
+
+  const schedule = () => {
+    if (!queued) {
+      queued = true;
+      requestAnimationFrame(update);
+    }
+  };
+
+  addEventListener("scroll", schedule, { passive: true });
+  new ResizeObserver(() => build()).observe(thread);
+  wide.addEventListener("change", build);
+  document.fonts?.ready.then(build);
+  build();
+</script>

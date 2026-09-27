@@ -1,0 +1,84 @@
+---
+import "../styles/global.css";
+import Flower from "../components/Flower.astro";
+import { downloadUrl, href, repo, version } from "../config";
+
+interface Props {
+  title?: string;
+  description?: string;
+  current?: string;
+}
+const {
+  title,
+  description = "Share one keyboard, mouse and trackpad swipes between Macs on your network. No Apple ID, no iCloud, no account.",
+  current,
+} = Astro.props;
+const fullTitle = title ? `${title} · Daisy` : "Daisy · One keyboard and trackpad for every Mac";
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const og = new URL(href("/og.png"), Astro.site);
+const nav = [
+  { path: "/docs/", label: "Docs", key: "docs" },
+  { path: "/security/", label: "Security", key: "security" },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" href={href("/favicon.svg")} type="image/svg+xml" />
+    <meta name="theme-color" content="#F7F6F2" />
+    <meta name="color-scheme" content="light" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Daisy" />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={og} />
+    <meta property="og:image:alt" content="Daisy connects a flowing chain of Macs into one desk." />
+    <meta name="twitter:card" content="summary_large_image" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="wrap header-row">
+        <a class="brand" href={href("/")} aria-label="Daisy home">
+          <img class="brand-lockup" src={href("/brand/daisy-lockup.svg")} width="481" height="176" alt="" />
+        </a>
+        <nav aria-label="Main">
+          <ul class="nav-list">
+            {nav.map((n) => (
+              <li><a href={href(n.path)} aria-current={current === n.key ? "page" : undefined}>{n.label}</a></li>
+            ))}
+            <li><a href={repo}>GitHub</a></li>
+          </ul>
+        </nav>
+        <a class="btn btn-small" href={href("/download/")}>Download</a>
+      </div>
+    </header>
+    <main id="main">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <div class="wrap footer-row">
+        <div class="footer-brand">
+          <Flower size={36} />
+          <p>Daisy {version} beta. Mac to Mac, by design.</p>
+        </div>
+        <ul class="footer-links">
+          <li><a href={href("/download/")}>Download</a></li>
+          <li><a href={href("/docs/getting-started/")}>Getting started</a></li>
+          <li><a href={href("/docs/")}>Docs</a></li>
+          <li><a href={href("/security/")}>Security</a></li>
+          <li><a href={repo}>GitHub</a></li>
+          <li><a href={downloadUrl}>Releases</a></li>
+        </ul>
+        <p class="footer-legal">Licensed under Apache-2.0 or MIT, at your option.</p>
+      </div>
+    </footer>
+  </body>
+</html>

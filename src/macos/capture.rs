@@ -1,0 +1,457 @@
+//! Reading the keyboard and mouse on the Mac that drives.
+//!
+//! An event tap sees every input event before any app does. While this Mac
+//! has control, events pass through untouched; once the pointer crosses to
+//! the other Mac they are swallowed here and forwarded instead.
+
+// Apple's constant names, kept so they match the SDK headers
+#![allow(non_upper_case_globals)]
+
+use std::ffi::c_void;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc as std_mpsc};
+use std::thread::JoinHandle;
+
+use anyhow::{Result, anyhow};
+use tokio::sync::mpsc;
+
+use super::ffi::*;
+use super::swipe;
+use crate::input::{Along, Driver, Rect, Route, Side};
+use crate::protocol::Message;
+use crate::swipe::SwipeStep;
+
+// Every event, filtered in the callback. Private gesture events arrive only
+// with this mask; asking for their type bits alone delivered nothing.
+const EVENTS_OF_INTEREST: u64 = u64::MAX;
+
+/// A running event tap. Dropping it stops the tap and gives the pointer back
+/// to this Mac.
+pub struct Capture {
+    driver: Arc<Mutex<Driver>>,
+    cursor: Arc<Mutex<Cursor>>,
+    run_loop: RunLoop,
+    thread: Option<JoinHandle<()>>,
+}
+
+/// How far the pinned cursor may drift before it is warped back, in points.
+const HOLD_SLACK: f64 = 1.5;
+
+/// This Mac's cursor while the other Mac has control: hidden, and pinned
+/// where it crossed over. macOS 27 accepts but ignores detaching the cursor
+/// from the mouse, so pinning is done by warping it back as it drifts.
+#[derive(Default)]
+struct Cursor {
+    pinned: Option<CGPoint>,
+    // CGDisplayHideCursor counts calls, so every hide needs exactly one show
+    hidden: bool,
+    // how often holding the cursor needed a warp, for diagnosing freezes
+    held: u64,
+    warped: u64,
+}
+
+impl Cursor {
+    fn freeze(&mut self, at: CGPoint) {
+        // SAFETY: plain values. Hiding re-attaches the cursor to the mouse,
+        // so it must come before detaching.
+        unsafe {
+            if self.hidden {
+                0
+            } else {
+                self.hidden = true;
+                CGDisplayHideCursor(CGMainDisplayID())
+            };
+            CGAssociateMouseAndMouseCursorPosition(false);
+        }
+        self.pinned = Some(at);
+        self.held = 0;
+        self.warped = 0;
+    }
+
+    fn thaw(&mut self, move_to: Option<CGPoint>) {
+        // SAFETY: plain values
+        unsafe {
+            if let Some(point) = move_to {
+                CGWarpMouseCursorPosition(point);
+            }
+            CGAssociateMouseAndMouseCursorPosition(true);
+            if self.hidden {
+                CGDisplayShowCursor(CGMainDisplayID());
+                self.hidden = false;
+            }
+        }
+        self.pinned = None;
+    }
+
+    // If freezing did not take, put the cursor back each time it moves.
+    fn hold(&mut self, location: CGPoint) {
+        let Some(pinned) = self.pinned else { return };
+        self.held += 1;
+        // warps land on the pixel grid, so allow a little slack or every event warps
+        if (location.x - pinned.x).abs() > HOLD_SLACK || (location.y - pinned.y).abs() > HOLD_SLACK {
+            // SAFETY: plain value
+            unsafe { CGWarpMouseCursorPosition(pinned) };
+            self.warped += 1;
+        }
+    }
+}
+
+// Owned by the tap thread; only ever handed to CFRunLoopStop, which may be
+// called from any thread.
+struct RunLoop(CFRunLoopRef);
+unsafe impl Send for RunLoop {}
+
+struct Context {
+    driver: Arc<Mutex<Driver>>,
+    cursor: Arc<Mutex<Cursor>>,
+    messages: mpsc::Sender<Message>,
+    overflow: Arc<AtomicBool>,
+    tap: CFMachPortRef,
+}
+
+impl Context {
+    fn send(&self, message: Message) -> bool {
+        if self.messages.try_send(message).is_ok() {
+            true
+        } else {
+            self.recover_local();
+            false
+        }
+    }
+
+    fn stop_for_contention(&self) {
+        self.overflow.store(true, Ordering::Release);
+    }
+
+    fn cursor_or_recover(&self) -> Option<std::sync::MutexGuard<'_, Cursor>> {
+        match try_lock(&self.cursor) {
+            Some(cursor) => Some(cursor),
+            None => {
+                self.recover_local();
+                None
+            }
+        }
+    }
+
+    fn recover_local(&self) {
+        if let Some(mut driver) = try_lock(&self.driver) {
+            driver.reclaim();
+        }
+        if let Some(mut cursor) = try_lock(&self.cursor) {
+            cursor.thaw(None);
+        }
+        self.overflow.store(true, Ordering::Release);
+    }
+}
+
+impl Capture {
+    /// Start tapping input. `side` is where the other Mac sits; forwarded
+    /// input and crossings are sent on `messages`.
+    pub fn start(screen: Rect, side: Side, messages: mpsc::Sender<Message>) -> Result<(Self, Arc<AtomicBool>)> {
+        allow_background_cursor_changes();
+        std::hint::black_box(swipe::can_recognize());
+        let driver = Arc::new(Mutex::new(Driver::new(screen, side)));
+        let cursor = Arc::new(Mutex::new(Cursor::default()));
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let (ready, started) = std_mpsc::channel();
+
+        let (thread_driver, thread_cursor) = (driver.clone(), cursor.clone());
+        let thread_overflow = overflowed.clone();
+        let thread = std::thread::Builder::new()
+            .name("input tap".into())
+            .spawn(move || run_tap(thread_driver, thread_cursor, messages, thread_overflow, ready))?;
+
+        let run_loop = started
+            .recv()
+            .map_err(|_| anyhow!("the input tap thread exited early"))?
+            .map_err(|error| anyhow!(error))?;
+
+        Ok((
+            Self {
+                driver,
+                cursor,
+                run_loop,
+                thread: Some(thread),
+            },
+            overflowed,
+        ))
+    }
+
+    /// The other Mac handed control back at `along`.
+    pub fn leave(&self, along: Along) {
+        let point = lock(&self.driver).leave(along);
+        lock(&self.cursor).thaw(Some(CGPoint { x: point.0, y: point.1 }));
+    }
+}
+
+/// Lets this background app hide and freeze the cursor, and stops macOS
+/// briefly ignoring the mouse after each warp.
+fn allow_background_cursor_changes() {
+    // SAFETY: the string is created and released here; the other calls take plain values
+    unsafe {
+        let key = CFStringCreateWithCString(
+            std::ptr::null(),
+            c"SetsCursorInBackground".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
+        if !key.is_null() {
+            let connection = _CGSDefaultConnection();
+            CGSSetConnectionProperty(connection, connection, key, kCFBooleanTrue);
+            CFRelease(key);
+        }
+        let source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+        if !source.is_null() {
+            CGEventSourceSetLocalEventsSuppressionInterval(source, 0.0);
+            CFRelease(source.cast_const());
+        }
+    }
+}
+
+impl crate::share::Pointer for Capture {
+    fn leave(&mut self, along: Along) {
+        Capture::leave(self, along);
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        lock(&self.driver).reclaim();
+        lock(&self.cursor).thaw(None);
+        // SAFETY: the run loop belongs to the tap thread, which is still
+        // joinable; stopping it from another thread is allowed
+        unsafe { CFRunLoopStop(self.run_loop.0) };
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn run_tap(
+    driver: Arc<Mutex<Driver>>,
+    cursor: Arc<Mutex<Cursor>>,
+    messages: mpsc::Sender<Message>,
+    overflow: Arc<AtomicBool>,
+    ready: std_mpsc::Sender<std::result::Result<RunLoop, String>>,
+) {
+    let context = Box::into_raw(Box::new(Context {
+        driver,
+        cursor,
+        messages,
+        overflow,
+        tap: std::ptr::null_mut(),
+    }));
+
+    // SAFETY: context lives until after the run loop stops below, and the
+    // callback is the only other code that touches it
+    unsafe {
+        let tap = CGEventTapCreate(
+            kCGHIDEventTap,
+            kCGHeadInsertEventTap,
+            kCGEventTapOptionDefault,
+            EVENTS_OF_INTEREST,
+            on_event,
+            context.cast(),
+        );
+        if tap.is_null() {
+            drop(Box::from_raw(context));
+            let _ = ready.send(Err(
+                "macOS refused the input tap: grant Daisy Accessibility and Input Monitoring (`daisy permissions --request`)"
+                    .into(),
+            ));
+            return;
+        }
+        (*context).tap = tap;
+
+        let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+        let run_loop = CFRunLoopGetCurrent();
+        CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
+        CGEventTapEnable(tap, true);
+        let _ = ready.send(Ok(RunLoop(run_loop)));
+
+        CFRunLoopRun();
+
+        CGEventTapEnable(tap, false);
+        CFMachPortInvalidate(tap);
+        CFRelease(source.cast_const());
+        CFRelease(tap.cast_const());
+        drop(Box::from_raw(context));
+    }
+}
+
+extern "C" fn on_event(_proxy: *mut c_void, event_type: u32, event: CGEventRef, user_info: *mut c_void) -> CGEventRef {
+    // a panic must not unwind into CoreGraphics; on any failure, let the event through
+    let keep = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: user_info is the Context installed with this tap, alive until the tap is gone
+        let context = unsafe { &*(user_info as *const Context) };
+        handle(context, event_type, event)
+    }))
+    .unwrap_or(true);
+
+    if keep { event } else { std::ptr::null_mut() }
+}
+
+/// Returns whether this Mac should still receive the event.
+fn handle(context: &Context, event_type: u32, event: CGEventRef) -> bool {
+    if event_type == kCGEventTapDisabledByTimeout || event_type == kCGEventTapDisabledByUserInput {
+        // macOS turns off taps it thinks are too slow; turn it back on
+        // SAFETY: the tap outlives every callback it delivers
+        unsafe { CGEventTapEnable(context.tap, true) };
+        return true;
+    }
+
+    if swipe::is_gesture_event(event) {
+        return handle_gesture(context, event);
+    }
+
+    // SAFETY: event is valid for the duration of the callback
+    let location = unsafe { CGEventGetLocation(event) };
+    // SAFETY: event is valid for the duration of the callback
+    let route = unsafe {
+        let integer = |field| CGEventGetIntegerValueField(event, field);
+        let double = |field| CGEventGetDoubleValueField(event, field);
+        let Some(mut driver) = try_lock(&context.driver) else {
+            context.stop_for_contention();
+            return true;
+        };
+        match event_type {
+            kCGEventMouseMoved | kCGEventLeftMouseDragged | kCGEventRightMouseDragged | kCGEventOtherMouseDragged => {
+                driver.motion(
+                    (location.x, location.y),
+                    (double(kCGMouseEventDeltaX), double(kCGMouseEventDeltaY)),
+                )
+            }
+            kCGEventLeftMouseDown | kCGEventRightMouseDown | kCGEventOtherMouseDown => driver.button(
+                integer(kCGMouseEventButtonNumber) as u8,
+                true,
+                integer(kCGMouseEventClickState) as u8,
+            ),
+            kCGEventLeftMouseUp | kCGEventRightMouseUp | kCGEventOtherMouseUp => driver.button(
+                integer(kCGMouseEventButtonNumber) as u8,
+                false,
+                integer(kCGMouseEventClickState) as u8,
+            ),
+            kCGEventKeyDown | kCGEventKeyUp => driver.key(
+                integer(kCGKeyboardEventKeycode) as u16,
+                event_type == kCGEventKeyDown,
+                integer(kCGKeyboardEventAutorepeat) != 0,
+                CGEventGetFlags(event),
+            ),
+            kCGEventFlagsChanged => driver.modifiers(integer(kCGKeyboardEventKeycode) as u16, CGEventGetFlags(event)),
+            kCGEventScrollWheel => driver.scroll(
+                double(kCGScrollWheelEventPointDeltaAxis2),
+                double(kCGScrollWheelEventPointDeltaAxis1),
+            ),
+            _ => Route::Local,
+        }
+    };
+
+    match route {
+        Route::Local => true,
+        Route::Drop => false,
+        Route::Enter { along } => {
+            // hide and pin the pointer here while it moves on the other Mac
+            let Some(mut cursor) = context.cursor_or_recover() else {
+                return true;
+            };
+            cursor.freeze(location);
+            drop(cursor);
+            !context.send(Message::Enter { along })
+        }
+        Route::Forward(event) => {
+            if matches!(event, crate::input::InputEvent::Motion { .. }) {
+                let Some(mut cursor) = context.cursor_or_recover() else {
+                    return true;
+                };
+                cursor.hold(location);
+            }
+            !context.send(Message::Input { event })
+        }
+        Route::Reclaim => {
+            if let Some(mut cursor) = try_lock(&context.cursor) {
+                cursor.thaw(None);
+            } else {
+                context.stop_for_contention();
+            }
+            context.send(Message::Reclaim);
+            false
+        }
+    }
+}
+
+// Swipes act on this Mac while it has control. Otherwise they are recognized,
+// forwarded, and swallowed, so this Mac's Spaces stay put.
+fn handle_gesture(context: &Context, event: CGEventRef) -> bool {
+    let Some(mut driver) = try_lock(&context.driver) else {
+        context.stop_for_contention();
+        return true;
+    };
+    // before macOS 27 swipes cannot be read, so while the other Mac has
+    // control they are only kept from acting here
+    let step = swipe::can_recognize()
+        .then(|| swipe::dock_event(event))
+        .flatten()
+        .and_then(|dock| SwipeStep::from_dock(&dock));
+    let Some(step) = step else {
+        // companion events go wherever the swipe they belong to goes
+        return driver.swipe_is_local();
+    };
+    let route = driver.swipe(step);
+    drop(driver);
+    match route {
+        Route::Forward(event) => !context.send(Message::Input { event }),
+        Route::Local => true,
+        _ => false,
+    }
+}
+
+fn lock<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // a panic while holding the lock leaves the state usable; keep going
+    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn try_lock<T>(state: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+    match state.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_contention_reclaims_remote_driver() {
+        let driver = Arc::new(Mutex::new(Driver::new(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 500.0,
+                height: 500.0,
+            },
+            Side::Left,
+        )));
+        assert!(matches!(
+            lock(&driver).motion((0.0, 250.0), (-3.0, 0.0)),
+            Route::Enter { .. }
+        ));
+
+        let cursor = Arc::new(Mutex::new(Cursor::default()));
+        let (messages, _receiver) = mpsc::channel(1);
+        let overflow = Arc::new(AtomicBool::new(false));
+        let context = Context {
+            driver: driver.clone(),
+            cursor,
+            messages,
+            overflow: overflow.clone(),
+            tap: std::ptr::null_mut(),
+        };
+
+        let _held = lock(&context.cursor);
+        assert!(context.cursor_or_recover().is_none());
+        assert!(!lock(&driver).is_remote());
+        assert!(overflow.load(Ordering::Acquire));
+    }
+}

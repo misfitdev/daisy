@@ -1,0 +1,45 @@
+---
+import Base from "./Base.astro";
+import { docs } from "../lib/docs.mjs";
+import { href } from "../config";
+
+interface Props {
+  title: string;
+  description?: string;
+  slug: string;
+  lede?: string;
+}
+const { title, description, slug, lede } = Astro.props;
+const guides = [
+  { slug: "getting-started", title: "Getting started", group: "Use" },
+  { slug: "trust", title: "Trust and pairing", group: "Use" },
+];
+const all = [...guides, ...docs];
+const groups = ["Use", "Understand", "Contribute"].map((g) => ({ name: g, items: all.filter((d) => d.group === g) }));
+---
+
+<Base title={title} description={description} current="docs">
+  <div class="wrap page docs-layout">
+    <nav class="docs-nav" aria-label="Documentation">
+      {groups.map((g) => (
+        <>
+          <h2>{g.name}</h2>
+          <ul>
+            {g.items.map((d) => (
+              <li><a href={href(`/docs/${d.slug}/`)} aria-current={d.slug === slug ? "page" : undefined}>{d.title}</a></li>
+            ))}
+          </ul>
+        </>
+      ))}
+    </nav>
+    <article>
+      <header class="page-head">
+        <h1>{title}</h1>
+        {lede && <p>{lede}</p>}
+      </header>
+      <div class="prose">
+        <slot />
+      </div>
+    </article>
+  </div>
+</Base>

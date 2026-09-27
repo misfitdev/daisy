@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Cargo
+/target/
+
+# Beads keeps its database and runtime state locally. The passive issue export
+# is the only cross-clone source of truth.
+.dolt/
+*.db
+.beads-credential-key
+.beads.gate.lock
+.beads/*
+!.beads/README.md
+!.beads/issues.jsonl
+
+# Agent and design-tool working state. Keep the durable Impeccable config,
+# design tokens, and surface briefs; discard reviews, prompts, and local state.
+.claude/
+.codex/
+.serena/
+.impeccable/*
+!.impeccable/config.json
+!.impeccable/design.json
+!.impeccable/surfaces/
+!.impeccable/surfaces/*.md
+
+# Astro
+/site/.astro/
+/site/dist/
+/site/node_modules/

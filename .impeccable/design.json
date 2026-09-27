@@ -1,0 +1,480 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-26T20:00:00Z",
+  "title": "Design System: Daisy",
+  "extensions": {
+    "colorMeta": {
+      "paper": {
+        "role": "neutral",
+        "displayName": "Daisy Paper",
+        "canonical": "#F7F6F2",
+        "tonalRamp": [
+          "#2E2D2A",
+          "#474641",
+          "#62615B",
+          "#807F78",
+          "#A7A69F",
+          "#CBCAC4",
+          "#E9E8E3",
+          "#F7F6F2"
+        ]
+      },
+      "paper-raised": {
+        "role": "neutral",
+        "displayName": "Paper Raised",
+        "canonical": "#EFEEE9",
+        "tonalRamp": [
+          "#2D2C29",
+          "#46453F",
+          "#615F59",
+          "#7E7D76",
+          "#A5A49D",
+          "#C9C8C1",
+          "#E6E5DF",
+          "#EFEEE9"
+        ]
+      },
+      "paper-pressed": {
+        "role": "neutral",
+        "displayName": "Paper Pressed",
+        "canonical": "#E6E5DF",
+        "tonalRamp": [
+          "#2C2B28",
+          "#45443E",
+          "#5F5E58",
+          "#7D7C75",
+          "#A3A29B",
+          "#C7C6BF",
+          "#E6E5DF",
+          "#F3F2EE"
+        ]
+      },
+      "surface-white": {
+        "role": "neutral",
+        "displayName": "Surface White",
+        "canonical": "#FFFFFF",
+        "tonalRamp": [
+          "#262626",
+          "#3F3F3F",
+          "#5A5A5A",
+          "#777777",
+          "#9E9E9E",
+          "#C6C6C6",
+          "#E8E8E8",
+          "#FFFFFF"
+        ]
+      },
+      "rule": {
+        "role": "neutral",
+        "displayName": "Rule",
+        "canonical": "#DDDCD5",
+        "tonalRamp": [
+          "#2B2A27",
+          "#44433E",
+          "#5E5D57",
+          "#7B7A73",
+          "#A2A199",
+          "#C3C2BA",
+          "#DDDCD5",
+          "#F0EFEA"
+        ]
+      },
+      "graphite": {
+        "role": "neutral",
+        "displayName": "Graphite Petal",
+        "canonical": "#2E3235",
+        "tonalRamp": [
+          "#151719",
+          "#1F2224",
+          "#2E3235",
+          "#454B4F",
+          "#60686E",
+          "#7F888E",
+          "#ABB1B5",
+          "#DDE0E2"
+        ]
+      },
+      "secondary-ink": {
+        "role": "neutral",
+        "displayName": "Secondary Ink",
+        "canonical": "#4F565B",
+        "tonalRamp": [
+          "#1A1D1F",
+          "#272B2E",
+          "#363C40",
+          "#4F565B",
+          "#6A7379",
+          "#8C9499",
+          "#B6BBBE",
+          "#E0E2E4"
+        ]
+      },
+      "code-muted": {
+        "role": "neutral",
+        "displayName": "Code Muted",
+        "canonical": "#6A7379",
+        "tonalRamp": [
+          "#1D2123",
+          "#2B3033",
+          "#3D4447",
+          "#535B60",
+          "#6A7379",
+          "#8C9499",
+          "#B3B9BC",
+          "#DDE0E2"
+        ]
+      },
+      "anodized-gray": {
+        "role": "neutral",
+        "displayName": "Anodized Link",
+        "canonical": "#737D84",
+        "tonalRamp": [
+          "#22282C",
+          "#323A3F",
+          "#465158",
+          "#5A666D",
+          "#737D84",
+          "#91999E",
+          "#B1B7BB",
+          "#D6D9DB"
+        ]
+      },
+      "connection-yellow": {
+        "role": "primary",
+        "displayName": "Connection Yellow",
+        "canonical": "#FFD447",
+        "tonalRamp": [
+          "#3B2D00",
+          "#594400",
+          "#7A5E00",
+          "#A17B00",
+          "#C89B00",
+          "#FFD447",
+          "#FFE37D",
+          "#FFF2C2"
+        ]
+      },
+      "coral-annotation": {
+        "role": "secondary",
+        "displayName": "Coral Annotation",
+        "canonical": "#FF6B5E",
+        "tonalRamp": [
+          "#421714",
+          "#64241F",
+          "#8A312B",
+          "#B7443B",
+          "#DE574D",
+          "#FF6B5E",
+          "#FF9A90",
+          "#FFD0CC"
+        ]
+      },
+      "disconnected-gray": {
+        "role": "neutral",
+        "displayName": "Disconnected Gray",
+        "canonical": "#A3A7AA",
+        "tonalRamp": [
+          "#2B2D2E",
+          "#414345",
+          "#5A5D5F",
+          "#75797B",
+          "#8D9194",
+          "#A3A7AA",
+          "#C4C7C9",
+          "#E4E5E6"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Native Display",
+        "purpose": "Short brand statements and the home headline; the custom Daisy wordmark remains artwork."
+      },
+      "headline": {
+        "displayName": "Native Headline",
+        "purpose": "Section heads, the native statement, and closing statements."
+      },
+      "body": {
+        "displayName": "Native Body",
+        "purpose": "Plain product and usage copy at a 65–75ch measure."
+      },
+      "label": {
+        "displayName": "Native Label",
+        "purpose": "Compact macOS controls and explicit state labels."
+      },
+      "mono": {
+        "displayName": "System Mono",
+        "purpose": "Code blocks and inline code on white or Paper Raised surfaces."
+      }
+    },
+    "shadows": [
+      {
+        "name": "app-icon-tile",
+        "value": "0 8px 24px rgba(46, 50, 53, 0.10)",
+        "purpose": "Soft native depth for the app-icon tile only; never apply to the flower or chain."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-color",
+        "value": "160ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Optional connected-to-disconnected color transition; reduced motion may switch instantly."
+      },
+      {
+        "name": "web-ease-out",
+        "value": "200ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Website hover and press transitions on links, buttons, and desk controls; reduced motion collapses it."
+      },
+      {
+        "name": "display-spring",
+        "value": "stiffness 340, damping ratio 0.7, magnet 56 units",
+        "purpose": "Desk displays spring to place, snap to a neighbour within 56 units, and settle with a small overshoot; the loop sleeps once settled."
+      },
+      {
+        "name": "chain-rope",
+        "value": "gravity 700, damping 0.985, slack ~0.4%, re-link past ~1.5%",
+        "purpose": "Desk chains as Verlet ropes of rigid closed links that rest nearly straight and re-link rather than stretch."
+      },
+      {
+        "name": "chain-pull",
+        "value": "~22ms per joint",
+        "purpose": "On a control crossing, a pull passes joint by joint toward the target, whose flower blooms."
+      },
+      {
+        "name": "thread-link-in",
+        "value": "opacity 0.35s, scale 0.55 to 1 over 0.5s, cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Thread links scale in place as they scroll into view and retract on scroll back; reduced motion shows them complete."
+      },
+      {
+        "name": "thread-flower-connect",
+        "value": "center fill 0.5s, petals rotate 22.5deg over 0.6s, cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "A thread flower turns gray to yellow and turns its petals when the chain reaches it."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "stack",
+        "value": "900px"
+      },
+      {
+        "name": "compact",
+        "value": "640px"
+      },
+      {
+        "name": "desk-live",
+        "value": "1024px"
+      },
+      {
+        "name": "thread-rail",
+        "value": "1100px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Connected Menu Status",
+      "kind": "custom",
+      "refersTo": "menu-status-connected",
+      "description": "The flower alone; yellow center is the only connected-state cue.",
+      "html": "<span class=\"ds-menu-flower is-connected\" aria-label=\"Connected\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><g class=\"petals\"><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(45 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(90 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(135 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(180 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(225 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(270 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(315 12 12)\"/></g><circle class=\"center\" cx=\"12\" cy=\"12\" r=\"2.7\"/></svg></span>",
+      "css": ".ds-menu-flower { display: inline-flex; width: 24px; height: 24px; } .ds-menu-flower svg { width: 100%; height: 100%; overflow: visible; } .ds-menu-flower .petals { fill: #737D84; } .ds-menu-flower .center { fill: #FFD447; transition: fill 160ms cubic-bezier(0.22, 1, 0.36, 1); }"
+    },
+    {
+      "name": "Disconnected Menu Status",
+      "kind": "custom",
+      "refersTo": "menu-status-disconnected",
+      "description": "The identical flower silhouette with a gray center and no link ears.",
+      "html": "<span class=\"ds-menu-flower is-disconnected\" aria-label=\"Disconnected\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><g class=\"petals\"><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(45 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(90 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(135 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(180 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(225 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(270 12 12)\"/><ellipse cx=\"12\" cy=\"5\" rx=\"2.1\" ry=\"4\" transform=\"rotate(315 12 12)\"/></g><circle class=\"center\" cx=\"12\" cy=\"12\" r=\"2.7\"/></svg></span>",
+      "css": ".ds-menu-flower { display: inline-flex; width: 24px; height: 24px; } .ds-menu-flower svg { width: 100%; height: 100%; overflow: visible; } .ds-menu-flower .petals { fill: #737D84; } .ds-menu-flower .center { fill: #A3A7AA; transition: fill 160ms cubic-bezier(0.22, 1, 0.36, 1); }"
+    },
+    {
+      "name": "Horizontal Daisy Chain Node",
+      "kind": "custom",
+      "refersTo": "daisy-chain-node-horizontal",
+      "description": "A centered flower with the nearest curved U-link bowls facing it.",
+      "html": "<span class=\"ds-chain-node\"><svg viewBox=\"0 0 220 80\" role=\"img\" aria-label=\"Daisy chain node\"><path class=\"link\" d=\"M40 18H55C75 18 75 62 55 62H40\"/><path class=\"link\" d=\"M180 18H165C145 18 145 62 165 62H180\"/><g class=\"flower\" transform=\"translate(110 40)\"><ellipse cy=\"-15\" rx=\"4.5\" ry=\"10\"/><ellipse cy=\"-15\" rx=\"4.5\" ry=\"10\" transform=\"rotate(45)\"/><ellipse cy=\"-15\" rx=\"4.5\" ry=\"10\" transform=\"rotate(90)\"/><ellipse cy=\"-15\" rx=\"4.5\" ry=\"10\" transform=\"rotate(135)\"/><ellipse cy=\"-15\" rx=\"4.5\" ry=\"10\" transform=\"rotate(180)\"/><ellipse cy=\"-15\" rx=\"4.5\" ry=\"10\" transform=\"rotate(225)\"/><ellipse cy=\"-15\" rx=\"4.5\" ry=\"10\" transform=\"rotate(270)\"/><ellipse cy=\"-15\" rx=\"4.5\" ry=\"10\" transform=\"rotate(315)\"/><circle class=\"center\" r=\"7\"/></g></svg></span>",
+      "css": ".ds-chain-node { display: inline-flex; width: 220px; max-width: 100%; } .ds-chain-node svg { width: 100%; height: auto; } .ds-chain-node .link { fill: none; stroke: #737D84; stroke-width: 9; stroke-linecap: round; stroke-linejoin: round; } .ds-chain-node .flower { fill: #2E3235; } .ds-chain-node .center { fill: #FFD447; }"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Graphite pill for the one main action, such as Download.",
+      "html": "<a class=\"ds-btn\" href=\"#\">Download 0.1.0</a>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; gap: 0.6em; padding: 0.85rem 1.35rem; border-radius: 999px; background: #2E3235; color: #F7F6F2; font: 600 1rem/1.1 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; text-decoration: none; border: 0; cursor: pointer; transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-btn:hover { background: #1D2023; } .ds-btn:active { transform: translateY(1px); } .ds-btn:focus-visible { outline: 2px solid #2E3235; outline-offset: 3px; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Transparent pill with an inset hairline for secondary actions.",
+      "html": "<a class=\"ds-btn-ghost\" href=\"#\">Read the docs</a>",
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; padding: 0.85rem 1.35rem; border-radius: 999px; background: transparent; color: #2E3235; box-shadow: inset 0 0 0 1px #C7C8C4; font: 600 1rem/1.1 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; text-decoration: none; transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-btn-ghost:hover { background: #EFEEE9; } .ds-btn-ghost:focus-visible { outline: 2px solid #2E3235; outline-offset: 3px; }"
+    },
+    {
+      "name": "Planned Chip",
+      "kind": "chip",
+      "refersTo": "chip-planned",
+      "description": "Graphite pill marking a feature that is planned, not shipped.",
+      "html": "<span class=\"ds-chip\">Planned</span>",
+      "css": ".ds-chip { display: inline-block; font: 600 0.72rem/1.2 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; padding: 0.25em 0.55em; border-radius: 999px; background: #2E3235; color: #F7F6F2; }"
+    },
+    {
+      "name": "Code Block",
+      "kind": "card",
+      "refersTo": "code-block",
+      "description": "White code surface with monochrome highlighting: graphite, Secondary Ink, Code Muted.",
+      "html": "<pre class=\"ds-code\"><span class=\"c\"># verify the release</span>\n<span class=\"k\">shasum</span> -a 256 <span class=\"s\">Daisy-0.1.0.zip</span></pre>",
+      "css": ".ds-code { margin: 0; padding: 1.1rem 1.25rem; background: #FFFFFF; border: 1px solid #DDDCD5; border-radius: 12px; overflow-x: auto; font: 0.875rem/1.6 ui-monospace, 'SF Mono', Menlo, monospace; color: #2E3235; } .ds-code .k { color: #2E3235; } .ds-code .s { color: #4F565B; } .ds-code .c { color: #6A7379; }"
+    },
+    {
+      "name": "Header Navigation",
+      "kind": "nav",
+      "refersTo": "nav",
+      "description": "Secondary Ink label links; the current page is graphite and underlined.",
+      "html": "<ul class=\"ds-nav\"><li><a href=\"#\" aria-current=\"page\">Docs</a></li><li><a href=\"#\">Security</a></li><li><a href=\"#\">Roadmap</a></li></ul>",
+      "css": ".ds-nav { display: flex; gap: 1.5rem; list-style: none; margin: 0; padding: 0; font: 500 0.9375rem/1.2 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-nav a { color: #4F565B; text-decoration: none; padding-block: 6px; text-underline-offset: 0.22em; } .ds-nav a:hover, .ds-nav a[aria-current=page] { color: #2E3235; } .ds-nav a[aria-current=page] { text-decoration: underline; text-decoration-color: #2E3235; } .ds-nav a:focus-visible { outline: 2px solid #2E3235; outline-offset: 3px; border-radius: 4px; }"
+    },
+    {
+      "name": "Coral Display Phrase",
+      "kind": "custom",
+      "refersTo": "display",
+      "description": "One display phrase per page underlined in coral; the text stays graphite.",
+      "html": "<h1 class=\"ds-display\">One keyboard and trackpad. <span class=\"ds-coral\">Every Mac.</span></h1>",
+      "css": ".ds-display { margin: 0; font: 600 clamp(2.5rem, 1.2rem + 3.2vw, 4.5rem)/1.02 -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif; letter-spacing: -0.03em; color: #2E3235; } .ds-coral { text-decoration: underline; text-decoration-color: #FF6B5E; text-decoration-thickness: 0.09em; text-underline-offset: 0.12em; text-decoration-skip-ink: none; }"
+    },
+    {
+      "name": "Placeholder Art",
+      "kind": "custom",
+      "refersTo": "placeholder",
+      "description": "Stand-in for artwork awaiting the image pass, at the final aspect ratio.",
+      "html": "<figure class=\"ds-ph\" role=\"img\" aria-label=\"Daisy menu-bar icon beside the clock\" style=\"aspect-ratio: 16 / 9\"><figcaption aria-hidden=\"true\"><span class=\"ds-ph-tag\">Placeholder</span><span class=\"ds-ph-subject\">Menu bar, connected</span><span class=\"ds-ph-spec\">16:9 · 1600×900</span><span class=\"ds-ph-alt\">Alt: Daisy menu-bar icon beside the clock</span></figcaption></figure>",
+      "css": ".ds-ph { margin: 0; width: 100%; border: 1px dashed #B3B6B6; border-radius: 14px; background: repeating-linear-gradient(135deg, transparent 0 14px, rgba(46, 50, 53, 0.045) 14px 15px), #EFEEE9; display: grid; place-items: center; padding: 1.5rem; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; } .ds-ph figcaption { display: grid; gap: 0.35rem; justify-items: center; text-align: center; max-width: 46ch; color: #4F565B; font-size: 0.9375rem; } .ds-ph-tag { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em; padding: 0.25em 0.6em; border-radius: 999px; border: 1px dashed #9EA2A3; } .ds-ph-subject { font-weight: 600; color: #2E3235; } .ds-ph-spec { font-variant-numeric: tabular-nums; } .ds-ph-alt { font-size: 0.85rem; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Open Daisy Chain",
+    "overview": "Daisy turns separate Macs into one quiet, continuous workspace. A centered flower gives each Mac equal weight, while repeated fixed-size U links imply an open-ended chain. Warm off-white, graphite, matte anodized gray, precise connection yellow, and restrained coral keep complexity optional and status immediate. The website's vector marks are interim drawings of these rules; production artwork replaces the shapes, not the rules.",
+    "keyCharacteristics": [
+      "One centered Daisy node per Mac.",
+      "Open-ended chains built from repeating fixed-size U links that may turn and flow at angles.",
+      "Flat matte metal links, never black or glossy.",
+      "Color-only connected and disconnected menu-bar states.",
+      "A flower-only app icon for clean small-scale recognition."
+    ],
+    "rules": [
+      {
+        "section": "Colors",
+        "name": "The Yellow Signal Rule",
+        "body": "Yellow appears only at the center of a connected Daisy."
+      },
+      {
+        "section": "Colors",
+        "name": "The Matte Metal Rule",
+        "body": "U links use one flat anodized-gray value with no sheen, highlight, gradient, gloss, or simulated texture."
+      },
+      {
+        "section": "Colors",
+        "name": "The Coral Restraint Rule",
+        "body": "Coral is a secondary editorial accent, never a link, field, or status color."
+      },
+      {
+        "section": "Colors",
+        "name": "The Coral Underline Rule",
+        "body": "Coral never fills text: it measures 2.6:1 on Daisy Paper. Emphasize at most one display phrase per page with a thick coral underline (thickness 0.09em, offset 0.12em, skip-ink off) beneath graphite text."
+      },
+      {
+        "section": "Colors",
+        "name": "The Secondary Ink Rule",
+        "body": "Secondary text is Secondary Ink (6.9:1 on paper), never Anodized Link, which measures 3.9:1 and fails AA for body text. Anodized gray is for links, strokes, and marks."
+      },
+      {
+        "section": "Colors",
+        "name": "The Monochrome Code Rule",
+        "body": "Code highlighting uses no hue: keywords, functions, parameters, and plain text in graphite; strings and constants in Secondary Ink; comments and punctuation in Code Muted (4.8:1 on white, 4.5:1 on paper, so valid only on the white code surface)."
+      },
+      {
+        "section": "Typography",
+        "name": "The Native Voice Rule",
+        "body": "Product UI uses the macOS system typeface; custom display lettering belongs to the Daisy wordmark."
+      },
+      {
+        "section": "Elevation",
+        "name": "The Flat Chain Rule",
+        "body": "Links never gain depth, bevels, inner shadows, or glow."
+      },
+      {
+        "section": "Components",
+        "name": "The Flowing Chain Rule",
+        "body": "A chain may change direction from link to link; every turn uses rotated, overlapping copies of the same U geometry, never a smooth connector or distorted link."
+      },
+      {
+        "section": "Components",
+        "name": "The Chain Spacing Rule",
+        "body": "A run between two flowers alternates ⊂⊃⊂⊃ with an even link count, so the link nearest each flower has its bowl toward that flower. Facing tips overlap about 6 units and back-to-back bowls about 5. When the distance is not an exact fit, tighten every joint equally by up to 14 units so the run reaches from flower to flower; past that, drop a pair. Keep about 44 units of clearance around each flower. Links stay one flat color so overlapping facing tips close into ovals; shading or a second color would expose the seam."
+      },
+      {
+        "section": "Components",
+        "name": "The Placeholder Rule",
+        "body": "Artwork awaiting the image pass ships as a placeholder figure at its final aspect ratio, never an invented stand-in image. It has a dashed #B3B6B6 border, 14px corners, and a faint 135° hairline hatch over Paper Raised, centering a caption stack: a dashed Placeholder pill, the subject in semibold graphite, the ratio and pixel size in tabular figures, and the intended alt text. The figure is role=\"img\", labelled with that alt text. A missing wordmark uses the same dashed, hatched treatment at its final size."
+      },
+      {
+        "section": "Components",
+        "name": "The Rigid Link Rule",
+        "body": "Each segment of a moving chain is one closed link: a ⊂⊃ pair at fixed spacing, drawn along the segment's own direction. Joints sit where neighbouring bowls overlap, so the chain never opens at a bend, and no link ever stretches, skews, or tapers in motion."
+      },
+      {
+        "section": "Components",
+        "name": "The Taut Chain Rule",
+        "body": "A resting chain hangs nearly straight from flower to flower, with about 0.4% slack under gravity 700 and damping 0.985. When displays move and the slack passes about 1.5%, or the span outgrows the chain, the chain re-links to a new link count instead of drooping or stretching."
+      },
+      {
+        "section": "Components",
+        "name": "The Pull Rule",
+        "body": "When control crosses to another Mac, a pull passes along the chain joint by joint, about 22ms apart, and the target flower blooms. The pull moves links; it never lengthens them."
+      },
+      {
+        "section": "Components",
+        "name": "The Magnet Spring Rule",
+        "body": "Arranged displays move on springs (stiffness 340, damping ratio 0.7), snap magnetically to a neighbour within 56 units, and settle with a small overshoot. The view eases to the new bounds and follows a display while it is dragged. The animation loop sleeps once everything has settled."
+      },
+      {
+        "section": "Components",
+        "name": "The Connect-on-Arrival Rule",
+        "body": "A thread flower starts disconnected, with a Disconnected Gray center. When the chain reaches it, the center turns Connection Yellow and the petals rotate 22.5°. The yellow still obeys the Yellow Signal Rule: it means that section's flower is connected. Links scale in place from 0.55 to full size as they scroll into view and retract on scroll back; they never stretch along the path."
+      },
+      {
+        "section": "Components",
+        "name": "The Complete Thread Rule",
+        "body": "With reduced motion the thread shows complete: every link in place and every flower connected. Below 1100px the rail and section flowers are absent, and the Download flower shows connected."
+      }
+    ],
+    "dos": [
+      "Center one flower within every depicted display.",
+      "Keep every U link identical in size, weight, color, and corner character.",
+      "Aim every curved bowl toward its adjacent flower.",
+      "Create chain length through overlapping repetition.",
+      "Let chain paths bend and flow by rotating whole links at each turn.",
+      "Use the flower alone where icon scale cannot carry the chain cleanly.",
+      "Treat the approved comp as the north star while allowing production art to improve contours and optical spacing.",
+      "Set secondary text in Secondary Ink.",
+      "Mark missing artwork with the placeholder figure at its final aspect ratio.",
+      "Move chains as rigid closed links that re-link rather than stretch.",
+      "Light a thread flower only when the chain has reached it.",
+      "Show the thread and desk in their finished state when reduced motion is requested."
+    ],
+    "donts": [
+      "Reduce Daisy to two computers joined by one line.",
+      "Use hub-and-spoke, wireless arcs, network graphs, or settings imagery as the identity.",
+      "Stretch a U link into a cable, capsule, bar, or wavy connector.",
+      "Force every chain into a straight line or distort a link to fake a turn.",
+      "Point a link's open tips toward the flower.",
+      "Make links black, glossy, shaded, gradient-filled, coral, or yellow.",
+      "Add side-link ears to the menu-bar glyph or app icon.",
+      "Use a yellow field; yellow is reserved for connected centers.",
+      "Set text in coral or in anodized gray.",
+      "Add hue to code highlighting.",
+      "Open a chain at a bend or lengthen a link to absorb motion."
+    ]
+  }
+}

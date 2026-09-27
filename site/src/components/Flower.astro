@@ -1,0 +1,13 @@
+---
+import { colors, flower } from "../lib/marks";
+
+interface Props {
+  size?: number;
+  state?: "connected" | "disconnected";
+  class?: string;
+}
+const { size = 28, state = "connected", class: cls } = Astro.props;
+const svg = flower(state === "connected" ? colors.yellow : colors.gray);
+---
+
+<svg class={cls} width={size} height={size} viewBox="-32 -32 64 64" aria-hidden="true" set:html={svg} />

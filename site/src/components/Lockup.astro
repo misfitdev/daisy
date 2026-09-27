@@ -1,0 +1,11 @@
+---
+import { colors, flower, link } from "../lib/marks";
+
+interface Props {
+  class?: string;
+}
+// Nearest link on each side of the flower, bowls facing it: left ⊃, right ⊂.
+const svg = `<g transform="translate(-50 0) rotate(180)">${link()}</g><g transform="translate(50 0)">${link()}</g>${flower(colors.yellow)}`;
+---
+
+<svg class:list={["lockup-mark", Astro.props.class]} viewBox="-80 -32 160 64" aria-hidden="true" set:html={svg} />

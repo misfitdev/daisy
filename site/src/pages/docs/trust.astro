@@ -1,0 +1,33 @@
+---
+import Docs from "../../layouts/Docs.astro";
+import { href } from "../../config";
+---
+
+<Docs title="Trust and pairing" slug="trust" lede="Your Macs trust each other directly. You decide for how long." description="How Daisy pairing works, how long trust lasts, and how to forget a Mac.">
+  <h2>Pairing</h2>
+  <p>Pairing happens once per pair of Macs. One shows a six-digit code and you type it on the other. That code is used to prove, cryptographically, that both Macs are the ones you meant. It is never something to compare by eye.</p>
+  <p>Only Macs that are both set to pair can pair. After one success, pairing closes. From then on, the two Macs recognize each other without a code.</p>
+
+  <h2>How long trust lasts</h2>
+  <p>Each Mac keeps its own choice for every Mac it trusts. Both must still trust each other to connect, so the stricter choice wins.</p>
+  <table>
+    <thead>
+      <tr><th>Choice</th><th>Trusted until</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Until 4 Days Inactive (default)</td><td>96 hours pass without a connection. Staying connected renews it.</td></tr>
+      <tr><td>30 Days</td><td>30 days after pairing, however often the Macs connect.</td></tr>
+      <tr><td>This Session</td><td>The session ends. After an accidental drop, not a deliberate disconnect, the Macs may reconnect within 60 seconds.</td></tr>
+      <tr><td>Until I Forget</td><td>You forget it.</td></tr>
+    </tbody>
+  </table>
+  <p>When trust ends, the two Macs pair again with a new code.</p>
+
+  <h2>Forget a Mac</h2>
+  <p>Forget one Mac, several, or all of them. A session with a forgotten Mac ends within a second.</p>
+
+  <h2>Start over with a new key</h2>
+  <p>Each Mac has its own key. Replacing it means every Mac paired with it must pair again. Use this if you think a Mac's key has been copied.</p>
+
+  <p>The <a href={href("/docs/security-model/")}>security model</a> explains the cryptography, and <a href={href("/docs/user-guide/")}>User guide</a> covers the app and the optional command line.</p>
+</Docs>

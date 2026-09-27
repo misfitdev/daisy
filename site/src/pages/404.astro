@@ -1,0 +1,14 @@
+---
+import Base from "../layouts/Base.astro";
+import Flower from "../components/Flower.astro";
+import { href } from "../config";
+---
+
+<Base title="Not found">
+  <div class="wrap lost">
+    <Flower size={96} state="disconnected" />
+    <h1>Nothing past this edge</h1>
+    <p>That page does not exist. The pointer stays here.</p>
+    <a class="btn" href={href("/")}>Back to Daisy</a>
+  </div>
+</Base>

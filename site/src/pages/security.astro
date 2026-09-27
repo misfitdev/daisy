@@ -1,0 +1,179 @@
+---
+import Base from "../layouts/Base.astro";
+import { href, repo } from "../config";
+
+const controls = [
+  {
+    id: "crypto",
+    title: "Cryptography",
+    rows: [
+      ["Protocol", "Noise XX (Noise_XX_25519_ChaChaPoly_BLAKE2s), mutually authenticated, with ephemeral keys for forward secrecy"],
+      ["Key agreement", "X25519 (Curve25519 ECDH, 128-bit security level)"],
+      ["Encryption", "ChaCha20-Poly1305 AEAD, 256-bit keys"],
+      ["Hash", "BLAKE2s"],
+      ["Integrity and replay", "Every message authenticated; per-direction nonces reject altered, replayed and reordered messages"],
+      ["Version binding", "Protocol version bound into the handshake prologue"],
+    ],
+  },
+  {
+    id: "identity",
+    title: "Device identity",
+    rows: [
+      ["Identity key", "Long-term X25519 key pair per Mac"],
+      ["Storage", "Owner-only file (0600 in a 0700 directory); refused if readable by other users"],
+      ["Rotation", "Supported; invalidates every existing pairing"],
+    ],
+  },
+  {
+    id: "pairing",
+    title: "Pairing",
+    rows: [
+      ["Authentication", "SPAKE2 password-authenticated key exchange over the Ed25519 group, keyed by a one-time six-digit code"],
+      ["Key confirmation", "HMAC-SHA256 over the Noise handshake hash, role-labelled against reflection"],
+      ["Result", "Peer public key pinned after mutual confirmation"],
+      ["Guessing resistance", "One online guess per attempt; at most five unknown-key attempts per ten minutes; window closes after the first success"],
+      ["Consent", "Both Macs must opt in; unknown keys are refused otherwise"],
+      ["Timeouts", "Handshake 15 seconds; pairing two minutes"],
+    ],
+  },
+  {
+    id: "trust",
+    title: "Trust lifecycle",
+    rows: [
+      ["Policies", "Idle expiry after 96 hours (default), fixed term in days, single session, or until revoked"],
+      ["Enforcement", "Each Mac enforces its own policy; a session requires mutual trust, so the stricter policy applies"],
+      ["Revocation", "Immediate from the app; within one second for changes made outside it; expired trust purged"],
+    ],
+  },
+  {
+    id: "input",
+    title: "Input safety",
+    rows: [
+      ["Local override", "Control-Option-Command-Escape returns control to the driving Mac"],
+      ["Liveness", "Sessions terminate after three seconds without traffic"],
+      ["Input release", "All held keys and buttons released whenever a session ends"],
+      ["Fail-safe", "Capture never blocks; on overload, input stays local and the session terminates"],
+    ],
+  },
+  {
+    id: "network",
+    title: "Network and data",
+    rows: [
+      ["Connections", "Direct TCP between paired Macs only (default port 24850, configurable bind address)"],
+      ["Data sent", "Mac name, public key, pairing and liveness messages, input events, control handoffs, and the clipboard when control crosses (switchable)"],
+      ["Data not sent", "No screen or file content"],
+      ["Third parties", "No accounts, telemetry, analytics, update checks, relays or cloud services"],
+    ],
+  },
+  {
+    id: "releases",
+    title: "Release integrity",
+    rows: [
+      ["Build", "Release workflow only, from a tagged commit"],
+      ["Signing", "Developer ID signed and notarized by Apple"],
+      ["Provenance", "SLSA Build Level 3 provenance and GitHub artifact attestation"],
+    ],
+  },
+];
+---
+
+<Base title="Security" current="security" description="The security controls built into Daisy.">
+  <div class="wrap page">
+    <header class="page-head">
+      <h1>Security</h1>
+      <p>Security controls implemented in Daisy.</p>
+    </header>
+
+    <div class="controls">
+      {controls.map((c) => (
+        <section class="control" aria-labelledby={`c-${c.id}`}>
+          <h2 id={`c-${c.id}`}>{c.title}</h2>
+          <dl class="spec">
+            {c.rows.map(([k, v]) => (
+              <>
+                <dt>{k}</dt>
+                <dd>{v}</dd>
+              </>
+            ))}
+          </dl>
+        </section>
+      ))}
+    </div>
+
+    <section class="control-links" aria-labelledby="c-more">
+      <h2 id="c-more">Further reading and reporting</h2>
+      <ul class="text-links">
+        <li><a href={href("/docs/security-model/")}>Security model</a></li>
+        <li><a href={href("/download/#verify")}>Verify a download</a></li>
+        <li><a href={`${repo}/security/advisories/new`}>Report a vulnerability</a></li>
+      </ul>
+    </section>
+  </div>
+</Base>
+
+<style>
+  .controls {
+    display: grid;
+    gap: 0;
+    border-top: 1px solid var(--rule);
+  }
+
+  .control {
+    display: grid;
+    grid-template-columns: minmax(0, 16rem) minmax(0, 1fr);
+    gap: var(--space-4);
+    padding-block: var(--space-4);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .control h2 {
+    font-size: var(--step-title);
+    letter-spacing: -0.01em;
+  }
+
+  .spec {
+    margin: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 13rem) minmax(0, 1fr);
+    gap: 0.75rem 1.5rem;
+  }
+
+  .spec dt {
+    font-weight: 600;
+  }
+
+  .spec dd {
+    margin: 0;
+    color: var(--ink-2);
+    max-width: 64ch;
+  }
+
+  .control-links {
+    margin-top: var(--space-5);
+  }
+
+  .control-links h2 {
+    font-size: var(--step-title);
+  }
+
+  .control-links ul {
+    list-style: none;
+    padding: 0;
+  }
+
+  @media (max-width: 900px) {
+    .control,
+    .spec {
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--space-2);
+    }
+
+    .spec {
+      gap: 0.2rem;
+    }
+
+    .spec dd + dt {
+      margin-top: 0.8rem;
+    }
+  }
+</style>

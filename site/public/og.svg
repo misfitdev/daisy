@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <title>Daisy — one keyboard and trackpad, every Mac</title>
+  <rect width="1200" height="630" fill="#F7F6F2"/>
+  <rect width="14" height="630" fill="#FF6B5E"/>
+  <image href="brand/daisy-lockup.svg" x="82" y="64" width="301" height="110"/>
+  <text x="82" y="286" fill="#2E3235" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="52" font-weight="700" letter-spacing="-2">
+    <tspan x="82">One keyboard and trackpad.</tspan>
+    <tspan x="82" dy="68" fill="#FF6B5E">Every Mac.</tspan>
+  </text>
+  <text x="84" y="438" fill="#4F565B" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="27">
+    Put your Macs anywhere and use them as one desk.
+  </text>
+  <g transform="translate(760 120) scale(.82)">
+    <g fill="#FFFFFF" stroke="#737D84" stroke-width="7">
+      <rect x="10" y="24" width="220" height="146" rx="17"/>
+      <rect x="270" width="220" height="146" rx="17"/>
+      <rect x="150" y="224" width="220" height="146" rx="17"/>
+    </g>
+    <g fill="none" stroke="#737D84" stroke-width="16">
+      <rect x="190" y="74" width="106" height="54" rx="27" transform="rotate(-9 243 101)"/>
+      <rect x="280" y="150" width="106" height="54" rx="27" transform="rotate(42 333 177)"/>
+    </g>
+    <defs>
+      <g id="flower">
+        <g fill="#2E3235">
+          <ellipse cy="-27" rx="9" ry="18"/><ellipse cy="-27" rx="9" ry="18" transform="rotate(45)"/>
+          <ellipse cy="-27" rx="9" ry="18" transform="rotate(90)"/><ellipse cy="-27" rx="9" ry="18" transform="rotate(135)"/>
+          <ellipse cy="-27" rx="9" ry="18" transform="rotate(180)"/><ellipse cy="-27" rx="9" ry="18" transform="rotate(225)"/>
+          <ellipse cy="-27" rx="9" ry="18" transform="rotate(270)"/><ellipse cy="-27" rx="9" ry="18" transform="rotate(315)"/>
+        </g>
+        <circle r="13" fill="#FFD447"/>
+      </g>
+    </defs>
+    <use href="#flower" transform="translate(120 97)"/>
+    <use href="#flower" transform="translate(380 73)"/>
+    <use href="#flower" transform="translate(260 297)"/>
+  </g>
+</svg>
