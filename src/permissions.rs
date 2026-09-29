@@ -67,6 +67,20 @@ pub fn request_input_monitoring() -> Access {
     input_monitoring()
 }
 
+/// The System Settings pane where the user switches Accessibility on.
+pub const ACCESSIBILITY_SETTINGS: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+/// The System Settings pane where the user switches Input Monitoring on.
+pub const INPUT_MONITORING_SETTINGS: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
+
+/// Where to send the user after asking. macOS shows each prompt only once;
+/// after that, asking does nothing, so a permission still missing afterwards
+/// has to be switched on in System Settings.
+pub fn settings_after_request(after: Access, pane: &'static str) -> Option<&'static str> {
+    (after != Access::Granted).then_some(pane)
+}
+
 // IOHIDRequestType and IOHIDAccessType from IOKit/hid/IOHIDLib.h
 const IOHID_REQUEST_LISTEN_EVENT: u32 = 1;
 const IOHID_ACCESS_GRANTED: u32 = 0;
@@ -110,6 +124,25 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_open_unless_the_request_granted_access() {
+        assert_eq!(settings_after_request(Access::Granted, ACCESSIBILITY_SETTINGS), None);
+        assert_eq!(
+            settings_after_request(Access::Denied, ACCESSIBILITY_SETTINGS),
+            Some(ACCESSIBILITY_SETTINGS)
+        );
+        assert_eq!(
+            settings_after_request(Access::Undetermined, INPUT_MONITORING_SETTINGS),
+            Some(INPUT_MONITORING_SETTINGS)
+        );
+    }
+
+    #[test]
+    fn settings_urls_name_the_privacy_panes() {
+        assert!(ACCESSIBILITY_SETTINGS.ends_with("Privacy_Accessibility"));
+        assert!(INPUT_MONITORING_SETTINGS.ends_with("Privacy_ListenEvent"));
+    }
 
     #[test]
     fn status_queries_do_not_crash() {
