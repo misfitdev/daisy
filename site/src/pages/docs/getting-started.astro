@@ -1,6 +1,6 @@
 ---
 import Docs from "../../layouts/Docs.astro";
-import { href, version } from "../../config";
+import { downloadUrl, href, version } from "../../config";
 ---
 
 <Docs title="Getting started" slug="getting-started" lede="From download to your first crossing, on two Macs, in a few minutes." description="Install Daisy, allow it, pair two Macs and cross your first edge.">
@@ -16,7 +16,7 @@ import { href, version } from "../../config";
     <li>
       <div>
         <h3>Download and install</h3>
-        <p><a href={href("/download/")}>Download Daisy {version}</a>, open the zip, and drag Daisy.app into Applications. Do the same on the other Mac.</p>
+        <p><a href={downloadUrl}>Download Daisy {version}</a>, open the zip, and drag Daisy.app into Applications. Do the same on the other Mac.</p>
       </div>
     </li>
     <li>

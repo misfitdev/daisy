@@ -4,7 +4,7 @@ import Desk from "../components/Desk.astro";
 import Flower from "../components/Flower.astro";
 import { features } from "../lib/status";
 import { chain, colors, flower } from "../lib/marks";
-import { href, repo, version } from "../config";
+import { downloadUrl, href, repo, version } from "../config";
 
 // Flowers sit over the center of each equal column; the SVG scales uniformly with the row.
 const nodes = [0, 1, 2].map((k) => ({ x: ((k * 2 + 1) * 1240) / 6, y: 40 }));
@@ -21,7 +21,7 @@ const movesSvg =
         <h1 id="hero-title"><span class="hero-line">One keyboard and trackpad.</span> <span class="coral-mark">Every Mac.</span></h1>
         <div class="hero-action">
           <p class="hero-lede">Daisy shares one Mac's keyboard, mouse and trackpad with all the Macs connected to the chain. No Apple ID, no iCloud, no account.</p>
-          <a class="btn" href={href("/download/")}>Download Daisy {version}</a>
+          <a class="btn" href={downloadUrl}>Download Daisy {version}</a>
           <p class="hero-meta">Free and open source · Beta · macOS 26 or later · Apple silicon</p>
         </div>
       </div>
@@ -134,7 +134,7 @@ const movesSvg =
       <span class="thread-end" data-thread-end aria-hidden="true"><Flower size={72} state="disconnected" /></span>
       <h2 id="closing-title">Put your Macs anywhere and use them as one desk.</h2>
       <div class="closing-actions">
-        <a class="btn" href={href("/download/")}>Download Daisy {version}</a>
+        <a class="btn" href={downloadUrl}>Download Daisy {version}</a>
         <a class="btn btn-ghost" href={repo}>View on GitHub</a>
       </div>
       <p>Beta. Free and open source.</p>

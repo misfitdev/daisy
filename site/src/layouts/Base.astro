@@ -1,7 +1,7 @@
 ---
 import "../styles/global.css";
 import Flower from "../components/Flower.astro";
-import { downloadUrl, href, repo, version } from "../config";
+import { downloadUrl, href, releasesUrl, repo, version } from "../config";
 
 interface Props {
   title?: string;
@@ -57,7 +57,7 @@ const nav = [
             <li><a href={repo}>GitHub</a></li>
           </ul>
         </nav>
-        <a class="btn btn-small" href={href("/download/")}>Download</a>
+        <a class="btn btn-small" href={downloadUrl}>Download</a>
       </div>
     </header>
     <main id="main">
@@ -75,7 +75,7 @@ const nav = [
           <li><a href={href("/docs/")}>Docs</a></li>
           <li><a href={href("/security/")}>Security</a></li>
           <li><a href={repo}>GitHub</a></li>
-          <li><a href={downloadUrl}>Releases</a></li>
+          <li><a href={releasesUrl}>Releases</a></li>
         </ul>
         <p class="footer-legal">Licensed under Apache-2.0 or MIT, at your option.</p>
       </div>
