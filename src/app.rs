@@ -13,10 +13,11 @@ use objc2_app_kit::{
     NSApplicationDelegate, NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControlStateValueMixed,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSImage, NSImageView, NSMenu, NSMenuItem, NSPopUpButton,
     NSSegmentStyle, NSSegmentSwitchTracking, NSSegmentedControl, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
-    NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
+    NSURL,
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
@@ -168,13 +169,21 @@ define_class!(
 
         #[unsafe(method(requestAccessibility:))]
         fn request_accessibility(&self, _sender: Option<&AnyObject>) {
-        permissions::request_accessibility();
+            let before = permissions::accessibility();
+            let after = permissions::request_accessibility();
+            open_settings(permissions::settings_after_request(before, after, permissions::ACCESSIBILITY_SETTINGS));
             self.refresh_permissions();
         }
 
         #[unsafe(method(requestInputMonitoring:))]
         fn request_input_monitoring(&self, _sender: Option<&AnyObject>) {
-            permissions::request_input_monitoring();
+            let before = permissions::input_monitoring();
+            let after = permissions::request_input_monitoring();
+            open_settings(permissions::settings_after_request(
+                before,
+                after,
+                permissions::INPUT_MONITORING_SETTINGS,
+            ));
             self.refresh_permissions();
         }
 
@@ -1160,6 +1169,13 @@ fn is_active(status: &Status) -> bool {
             | Status::Reconnecting { .. }
             | Status::Connected { .. }
     )
+}
+
+fn open_settings(pane: Option<&str>) {
+    let Some(pane) = pane else { return };
+    if let Some(url) = NSURL::URLWithString(&NSString::from_str(pane)) {
+        NSWorkspace::sharedWorkspace().openURL(&url);
+    }
 }
 
 fn permission_copy(name: &str, access: Access) -> String {
