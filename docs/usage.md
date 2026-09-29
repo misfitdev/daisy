@@ -26,7 +26,7 @@ On the first Mac:
 On the second Mac:
 
 1. Choose **Connect by Address**.
-2. Enter the waiting Mac's local name, such as `studio.local`, or its IP address.
+2. Choose the waiting Mac from **Nearby**, or enter its local name, such as `studio.local`, or its IP address. Nearby lists paired Macs by name and, while pairing is open, Macs waiting to pair.
 3. Choose the other role. Exactly one Mac must be the Host and the other must be the Guest.
 4. Click **Pair a New Peer**.
 
@@ -43,7 +43,7 @@ Connection and role are independent:
 - **Host** uses this Mac's keyboard and trackpad.
 - **Guest** receives input from the Host.
 
-Automatic discovery is planned; for now, enter the other Mac's address once. After that, the Mac that connects keeps the session going: when either Mac sleeps, wakes or changes network, it reconnects to the same address, repeats the encrypted handshake and checks that the same paired Mac answered. Waits between attempts roughly double from 1–2 seconds up to 10–20 seconds, randomized so two Macs do not retry in step, and it keeps trying until the other Mac is back. It stops when you stop sharing, when trust has ended, when a different Mac answers at that address, or on a local error such as Daisy's data folder not being writable. The first connection is not retried: if it fails, Daisy reports the error so a wrong address or a Mac that is not waiting is visible.
+A waiting Mac advertises itself with Bonjour, so the other can find it without an address. When a Mac is chosen from Nearby, Daisy finds it again on every connection, wherever its address has moved. The Mac that connects keeps the session going: when either Mac sleeps, wakes or changes network, it finds the other again (or uses the address entered), repeats the encrypted handshake and checks that the same paired Mac answered. Waits between attempts roughly double from 1–2 seconds up to 10–20 seconds, randomized so two Macs do not retry in step, and it keeps trying until the other Mac is back. It stops when you stop sharing, when trust has ended, when a different Mac answers at that address, or on a local error such as Daisy's data folder not being writable. The first connection is not retried: if it fails, Daisy reports the error so a wrong address or a Mac that is not waiting is visible.
 
 ## Move control
 
@@ -67,6 +67,10 @@ When control crosses, the clipboard goes with it. Copy on the Mac with the keybo
 - A large image is sent behind input, so the pointer never waits for it.
 
 Turn it off with **Share Clipboard** in the menu-bar flower. A Mac with it off neither sends its clipboard nor accepts one. From the command line, add `--no-clipboard` to `listen` or `connect`.
+
+## Discovery
+
+A waiting Mac advertises itself on the local network with Bonjour. The advertisement uses a random name and carries neither the Mac's name nor its key: only a paired Mac can recognise it, and a new advertisement cannot be linked to the last. To stop advertising, turn off **Discoverable on This Network** in the menu-bar flower, or add `--no-discovery` to `listen`. Connecting by name or address keeps working either way, including across networks Bonjour does not reach.
 
 ## Permissions
 

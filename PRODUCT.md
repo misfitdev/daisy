@@ -61,7 +61,7 @@ that trust lasts.
   revocation, keyboard and mouse input across a shared edge, basic scrolling,
   Spaces, Mission Control and application-window swipes, shake-to-locate on
   macOS 27, and the recovery chord.
-- Planned: Bonjour discovery. Automatic reconnection after sleep, wake and
+- Bonjour discovery of paired Macs is implemented. Automatic reconnection after sleep, wake and
   network changes is implemented; two-Mac verification remains. Clipboard sharing of text, rich text and images is implemented;
   two-Mac verification remains. Spatial positioning and chained connections
   among multiple Macs are future capabilities and must not be presented as

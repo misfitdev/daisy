@@ -34,7 +34,7 @@ export const features: Feature[] = [
   {
     title: "Peer auto-discovery",
     detail: "Daisy finds trusted Macs on your network without an address.",
-    status: "planned",
+    status: "available",
   },
   {
     title: "Automatic session recovery",

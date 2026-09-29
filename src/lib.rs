@@ -4,6 +4,7 @@
 pub mod app;
 pub mod clipboard;
 pub mod controller;
+pub mod discovery;
 pub mod identity;
 pub mod input;
 pub mod launcher;

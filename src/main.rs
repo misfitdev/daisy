@@ -54,6 +54,9 @@ enum Command {
         /// Do not share the clipboard when control crosses
         #[arg(long)]
         no_clipboard: bool,
+        /// Do not advertise this Mac with Bonjour while waiting
+        #[arg(long)]
+        no_discovery: bool,
     },
     /// Connect to another Mac
     Connect {
@@ -151,10 +154,12 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
             trust,
             drive,
             no_clipboard,
+            no_discovery,
         } => {
             let mut prompt = TerminalPrompt;
             let mut observer = TerminalObserver;
             let (_share_clipboard, clipboard) = tokio::sync::watch::channel(!no_clipboard);
+            let (_discoverable, discoverable) = tokio::sync::watch::channel(!no_discovery);
             service::listen(
                 service::SessionConfig {
                     identity,
@@ -163,6 +168,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     pairing: pair.then_some(trust),
                     drive,
                     clipboard: &clipboard,
+                    discoverable: &discoverable,
                 },
                 &bind,
                 port,
@@ -181,6 +187,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
             let mut prompt = TerminalPrompt;
             let mut observer = TerminalObserver;
             let (_share_clipboard, clipboard) = tokio::sync::watch::channel(!no_clipboard);
+            let (_discoverable, discoverable) = tokio::sync::watch::channel(false);
             service::connect(
                 service::SessionConfig {
                     identity,
@@ -189,8 +196,10 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     pairing: pair.then_some(trust),
                     drive,
                     clipboard: &clipboard,
+                    discoverable: &discoverable,
                 },
                 &address,
+                None,
                 &mut prompt,
                 &mut observer,
             )

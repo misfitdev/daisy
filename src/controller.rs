@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
+use crate::discovery;
 use crate::identity::{Identity, PublicKey};
 use crate::input::Side;
 use crate::pairing::{PairingCode, PairingPrompt};
@@ -35,6 +36,10 @@ pub enum Connection {
     },
     Connect {
         address: String,
+        /// The paired Mac's key when it was picked from those found on the
+        /// network; each attempt then finds it wherever it is now.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer: Option<String>,
     },
 }
 
@@ -76,6 +81,9 @@ pub struct AppSettings {
     /// Send and receive the clipboard when control crosses.
     #[serde(default = "default_share_clipboard")]
     pub share_clipboard: bool,
+    /// Advertise this Mac with Bonjour while it waits for a connection.
+    #[serde(default = "default_discoverable")]
+    pub discoverable: bool,
 }
 
 impl Default for AppSettings {
@@ -83,8 +91,13 @@ impl Default for AppSettings {
         Self {
             last_session: SessionSettings::default(),
             share_clipboard: default_share_clipboard(),
+            discoverable: default_discoverable(),
         }
     }
+}
+
+fn default_discoverable() -> bool {
+    true
 }
 
 fn default_share_clipboard() -> bool {
@@ -108,6 +121,8 @@ pub enum Command {
     Refresh,
     /// Turn clipboard sharing on or off, including for a running session.
     SetClipboard(bool),
+    /// Turn Bonjour advertising on or off, including while waiting.
+    SetDiscoverable(bool),
     Shutdown,
 }
 
@@ -166,6 +181,17 @@ pub enum Event {
         title: String,
         detail: String,
     },
+    /// Paired Macs, and Macs open to pairing, found on the network.
+    Nearby(Vec<Nearby>),
+}
+
+/// A Mac found on the network, as the interface shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nearby {
+    /// The paired Mac's name, or `None` for a Mac open to pairing.
+    pub name: Option<String>,
+    pub key: Option<PublicKey>,
+    pub address: String,
 }
 
 pub struct Handle {
@@ -235,6 +261,8 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     });
     let mut stored = settings.clone();
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
+    let (share_discoverable, discoverable) = watch::channel(stored.discoverable);
+    tokio::spawn(browse_nearby(home.clone(), events.clone()));
     if events
         .send(Event::Ready {
             settings,
@@ -271,6 +299,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 let session_name = name.clone();
                 let session_events = events.clone();
                 let session_clipboard = clipboard.clone();
+                let session_discoverable = discoverable.clone();
                 session = Some(tokio::spawn(async move {
                     run_session(
                         session_home,
@@ -278,6 +307,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                         settings,
                         allow_pairing,
                         session_clipboard,
+                        session_discoverable,
                         session_events,
                     )
                     .await;
@@ -346,6 +376,18 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     );
                 }
             }
+            Command::SetDiscoverable(on) => {
+                stored.discoverable = on;
+                share_discoverable.send_replace(on);
+                if let Err(error) = save_settings(&home, &stored) {
+                    tracing::error!(error = ?error, "discovery setting could not be saved");
+                    let _ = send_problem(
+                        &events,
+                        "Discovery setting could not be saved",
+                        "Check that Daisy can write its data folder, then try again.".to_owned(),
+                    );
+                }
+            }
             Command::Shutdown => {
                 if let Some(running) = session.take() {
                     running.abort();
@@ -356,12 +398,52 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     }
 }
 
+/// Reports the Macs found on the network whenever that set changes. Only
+/// paired Macs this one still trusts are named; others appear only while
+/// open to pairing.
+async fn browse_nearby(home: PathBuf, events: Sender<Event>) {
+    let mut browser = match discovery::Browser::start() {
+        Ok(browser) => browser,
+        Err(error) => {
+            tracing::warn!(error = format!("{error:#}"), "could not browse with Bonjour");
+            return;
+        }
+    };
+    loop {
+        let peers = list_peers(&home).unwrap_or_default();
+        let keys: Vec<PublicKey> = peers.iter().map(|peer| peer.key).collect();
+        let Some(found) = browser.next(&keys).await else {
+            return;
+        };
+        let mut nearby: Vec<Nearby> = found
+            .into_iter()
+            .map(|mac| match mac.seen {
+                discovery::Seen::Paired(key) => Nearby {
+                    name: peers.iter().find(|peer| peer.key == key).map(|peer| peer.name.clone()),
+                    key: Some(key),
+                    address: mac.address.to_string(),
+                },
+                discovery::Seen::Pairing => Nearby {
+                    name: None,
+                    key: None,
+                    address: mac.address.to_string(),
+                },
+            })
+            .collect();
+        nearby.sort_by(|a, b| (a.name.is_none(), &a.name, &a.address).cmp(&(b.name.is_none(), &b.name, &b.address)));
+        if events.send(Event::Nearby(nearby)).is_err() {
+            return;
+        }
+    }
+}
+
 async fn run_session(
     home: PathBuf,
     name: String,
     settings: SessionSettings,
     allow_pairing: bool,
     clipboard: watch::Receiver<bool>,
+    discoverable: watch::Receiver<bool>,
     events: Sender<Event>,
 ) {
     let result = async {
@@ -381,10 +463,14 @@ async fn run_session(
             pairing,
             drive: settings.drive,
             clipboard: &clipboard,
+            discoverable: &discoverable,
         };
         match settings.connection {
             Connection::Listen { bind, port } => service::listen(config, &bind, port, &mut prompt, &mut observer).await,
-            Connection::Connect { address } => service::connect(config, &address, &mut prompt, &mut observer).await,
+            Connection::Connect { address, peer } => {
+                let peer = peer.as_deref().and_then(PublicKey::from_hex);
+                service::connect(config, &address, peer, &mut prompt, &mut observer).await
+            }
         }
     }
     .await;
@@ -625,11 +711,13 @@ mod tests {
             last_session: SessionSettings {
                 connection: Connection::Connect {
                     address: "studio.local".to_owned(),
+                    peer: Some("00".repeat(32)),
                 },
                 drive: None,
                 trust: Policy::Days(30),
             },
             share_clipboard: false,
+            discoverable: false,
         };
         save_settings(directory.path(), &settings).unwrap();
         assert_eq!(load_settings(directory.path()).unwrap(), settings);
@@ -653,10 +741,12 @@ mod tests {
         .unwrap();
         let loaded = load_settings(directory.path()).unwrap();
         assert!(loaded.share_clipboard);
+        assert!(loaded.discoverable);
         assert_eq!(
             loaded.last_session.connection,
             Connection::Connect {
-                address: "studio.local".to_owned()
+                address: "studio.local".to_owned(),
+                peer: None,
             }
         );
     }
