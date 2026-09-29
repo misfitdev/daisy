@@ -27,9 +27,9 @@ Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes thro
    - On one, choose **Wait for a peer**. On the other, choose **Connect by Address** and enter the first one's network name, such as `studio.local`.
    - Choose **Host** where you will type and use the trackpad, and **Guest** on the other. On the Host, choose the edge where the Guest sits.
    - Click **Pair a New Peer** on both. Enter the six-digit code shown on one into the other.
-4. Click **Start Sharing**, then move the pointer through the chosen edge. The menu bar flower shows a yellow center while connected.
+4. Click **Start Sharing** on both, then move the pointer through the chosen edge. The menu bar flower shows a yellow center while connected.
 
-After pairing, they recognize each other; a new code is needed only when trust expires.
+After pairing, they recognize each other; a new code is needed only when trust ends.
 
 ## Trust
 
@@ -37,7 +37,7 @@ A pairing stays trusted until four days pass without a connection; regular use k
 
 ## Security
 
-Only paired devices can connect, and pairing requires consent on both sides. All traffic is encrypted. The pairing code works once and is never sent over the network, so it cannot be captured by anyone listening.
+Only paired devices can connect, and pairing requires consent on both sides. Input, clipboard contents and pairing messages are encrypted in transit. The pairing code works once and is never sent over the network, so it cannot be captured by anyone listening.
 
 The [security model](docs/security-model.md) describes the design in detail. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
