@@ -13,7 +13,7 @@ use objc2_app_kit::{
     NSApplicationDelegate, NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControlStateValueMixed,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSImage, NSImageView, NSMenu, NSMenuItem, NSPopUpButton,
     NSSegmentStyle, NSSegmentSwitchTracking, NSSegmentedControl, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
-    NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -77,6 +77,14 @@ define_class!(
     struct AppDelegate;
 
     unsafe impl NSObjectProtocol for AppDelegate {}
+
+    unsafe impl NSWindowDelegate for AppDelegate {
+        // Back to a menu-bar-only app once the window is gone.
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _notification: &NSNotification) {
+            NSApplication::sharedApplication(self.mtm()).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        }
+    }
 
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
@@ -381,6 +389,7 @@ impl AppDelegate {
             )
         };
         unsafe { window.setReleasedWhenClosed(false) };
+        window.setDelegate(Some(ProtocolObject::from_ref(self)));
         window.setTitle(&NSString::from_str("Daisy"));
         window.center();
         let content = window.contentView().expect("window has content view");
@@ -928,8 +937,12 @@ impl AppDelegate {
         let Some(window) = self.ivars().window.get() else {
             return;
         };
-        window.makeKeyAndOrderFront(None);
+        // A menu-bar-only app is never brought forward by macOS and is missing
+        // from the Dock and app switcher. While the window is open, Daisy
+        // runs as a regular app so it comes to the front and can be switched to.
         let app = NSApplication::sharedApplication(self.mtm());
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        window.makeKeyAndOrderFront(None);
         app.activate();
     }
 
