@@ -59,11 +59,11 @@ When trust ends, the Mac is forgotten and must pair again with a new code.
 Every release is built by GitHub Actions from a tagged commit, with SLSA Build Level 3 provenance and a GitHub artifact attestation. Either check proves the zip came from this repository's release workflow:
 
 ```bash
-gh attestation verify Daisy-0.1.0-macos-arm64.zip --repo misfitdev/daisy
+gh attestation verify Daisy-0.1.1-macos-arm64.zip --repo misfitdev/daisy
 
-slsa-verifier verify-artifact Daisy-0.1.0-macos-arm64.zip \
-  --provenance-path Daisy-0.1.0-macos-arm64.zip.intoto.jsonl \
-  --source-uri github.com/misfitdev/daisy --source-tag v0.1.0
+slsa-verifier verify-artifact Daisy-0.1.1-macos-arm64.zip \
+  --provenance-path Daisy-0.1.1-macos-arm64.zip.intoto.jsonl \
+  --source-uri github.com/misfitdev/daisy --source-tag v0.1.1
 ```
 
 ## Security
