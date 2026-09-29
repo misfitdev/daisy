@@ -1,90 +1,60 @@
 # Daisy
 
-Share one keyboard and mouse between Macs on your network, trackpad swipes included, with no Apple ID, iCloud or account of any kind.
+Daisy shares one keyboard and trackpad across the Macs on your desk. Move the pointer past the edge of one screen and it continues onto the next, with typing, clicks and trackpad swipes following it.
 
-Daisy is Mac-to-Mac only by design. Both ends speak macOS natively, so keys, clicks and swipes pass through as themselves instead of being translated through another operating system.
+Daisy needs no account and no cloud service. Connections run directly over your local network, and because both ends run macOS, input arrives exactly as it was entered.
 
-## Status
+## Current Status
 
-**Beta.** The native menu-bar app handles setup, pairing, permissions and daily control. Automatic discovery is still planned.
+Daisy is in beta. It supports:
 
-| Capability | Status |
-|---|---|
-| Native menu-bar setup, pairing, trust and connection control | Works |
-| Pairing, encrypted reconnects, per-Mac trust policies and forced revocation | Works |
-| Keyboard, mouse, clicks, double-clicks and drags across a shared screen edge | Works |
-| Trackpad and mouse-wheel scrolling | Works |
-| Spaces, Mission Control and application-window swipes | Verified end to end |
-| Shake to locate on the controlled Mac | Verified on macOS 27; macOS 26 visual verification remains |
-| Control-Option-Command-Escape recovery chord | Works |
-| Clipboard sharing of text, rich text and images when control crosses | Implemented; two-Mac verification remains |
-| Reconnecting after sleep, wake and network changes | Implemented; two-Mac verification remains |
-| Automatic discovery | Planned |
-| Positioned layouts and chained connections among many Macs | Planned |
+- Pointer movement, clicks, drags and typing across a shared screen edge
+- Scrolling, and swipes for Spaces, Mission Control and app windows
+- Clipboard sharing for text, rich text and images
+- Automatic reconnection after sleep or a network change
+- Pairing with a one-time code, managed from the menu bar
+- Immediate return of control with Control-Option-Command-Escape
 
-Requires macOS 26 or later on Apple silicon. Reading trackpad swipes requires macOS 27 on the driving Mac. See the [usage guide](docs/usage.md) for setup, recovery and version-specific behavior. The complete roadmap is in `.beads/issues.jsonl`.
+Planned: automatic discovery on the local network, and layouts that chain more than two screens.
 
-## Install
+Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes through requires macOS 27 on the Host.
 
-Download `Daisy-<version>-macos-arm64.zip` from [releases](https://github.com/misfitdev/daisy/releases), unzip it and move `Daisy.app` to `/Applications`. Releases are signed with Developer ID and notarized by Apple.
+## Getting Started
 
-Open `Daisy.app`. Daisy walks you through Accessibility and Input Monitoring; macOS grants both permissions to the signed app, not Terminal.
+1. Download the latest release from [Releases](https://github.com/misfitdev/daisy/releases), unzip it and move **Daisy.app** to Applications. Install it on both Macs.
+2. Open Daisy from the menu bar and grant Accessibility and Input Monitoring when prompted. macOS requires both before Daisy can read and send input.
+3. Pair them:
+   - On one, choose **Wait for a peer**. On the other, choose **Connect by Address** and enter the first one's network name, such as `studio.local`.
+   - Choose **Host** where you will type and use the trackpad, and **Guest** on the other. On the Host, choose the edge where the Guest sits.
+   - Click **Pair a New Peer** on both. Enter the six-digit code shown on one into the other.
+4. Click **Start Sharing**, then move the pointer through the chosen edge. The menu bar flower shows a yellow center while connected.
 
-## Pair two Macs
+After pairing, they recognize each other; a new code is needed only when trust expires.
 
-1. On one Mac, choose **Wait for a peer**. Choose **Host** if its keyboard and trackpad will be shared, or **Guest** if it will receive input, then click **Pair a New Peer**.
-2. On the other Mac, choose **Connect by Address**, enter the first Mac's local name such as `studio.local`, and choose the other role. Exactly one Mac is the Host. Then click **Pair a New Peer**.
-3. On the Host, choose the screen edge that leads to the Guest.
-4. Enter the six-digit code shown by the waiting Mac on the connecting Mac. The code is used directly by secure pairing; there is nothing to compare by eye.
+## Trust
 
-After pairing, choose **Start Sharing** on both Macs. Push through the configured screen edge to move control, and push back out of the far edge to return. The menu-bar flower has a yellow center while connected and a gray center otherwise.
-
-The [usage guide](docs/usage.md) covers roles, connection direction, permissions, trust, the optional CLI, troubleshooting, data locations and removal.
-
-### How long trust lasts
-
-Each Mac decides how long it trusts the other. Both must still trust each other to connect, so the stricter choice wins. Choose a policy while pairing or change it later from **Paired Peers** in the menu:
-
-| Policy | Trusted until |
-|---|---|
-| Until 4 days inactive (default) | 96 hours pass without a connection; staying connected renews it |
-| 30 days | 30 days after pairing, however often the Macs connect |
-| This session | The session ends; after an accidental drop, but not a deliberate disconnect, it may reconnect within 60 seconds |
-| Until I forget | You forget it |
-
-When trust ends, the Mac is forgotten and must pair again with a new code.
-
-## Verify a download
-
-Every release is built by GitHub Actions from a tagged commit, with SLSA Build Level 3 provenance and a GitHub artifact attestation. Either check proves the zip came from this repository's release workflow:
-
-```bash
-gh attestation verify Daisy-0.1.1-macos-arm64.zip --repo misfitdev/daisy
-
-slsa-verifier verify-artifact Daisy-0.1.1-macos-arm64.zip \
-  --provenance-path Daisy-0.1.1-macos-arm64.zip.intoto.jsonl \
-  --source-uri github.com/misfitdev/daisy --source-tag v0.1.1
-```
+A pairing stays trusted until four days pass without a connection; regular use keeps it active. Each side can choose a different duration under **Paired Peers**: 30 days, the current session only, or until removed. When the two sides differ, the shorter duration applies. After trust expires, pair again with a new code.
 
 ## Security
 
-Connections use encrypted Noise sessions. Unknown Macs can pair only while both sides explicitly allow pairing. The six-digit code is SPAKE2 input, not a value to compare visually.
+Only paired devices can connect, and pairing requires consent on both sides. All traffic is encrypted. The pairing code works once and is never sent over the network, so it cannot be captured by anyone listening.
 
-The [security model](docs/security-model.md) covers trust and failure containment. Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+The [security model](docs/security-model.md) describes the design in detail. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+Releases are built by GitHub Actions from tagged commits, signed with a Developer ID certificate and notarized by Apple. To confirm a download came from this repository:
+
+```bash
+gh attestation verify Daisy-0.1.1-macos-arm64.zip --repo misfitdev/daisy
+```
 
 ## Documentation
 
-- [Usage](docs/usage.md): installation, pairing, operation and troubleshooting
-- [Architecture](docs/architecture.md): roles, layers and threads
-- [Protocol](docs/protocol.md): wire format and session flow
-- [Security model](docs/security-model.md): what is protected, how and what is not
-- [macOS internals](docs/macos.md): permissions, event tap, pointer pinning and swipes
-- [Releasing](docs/releasing.md): signing, notarization and release verification
+- [Usage](docs/usage.md): setup, operation, troubleshooting and the command line
+- [Architecture](docs/architecture.md), [Protocol](docs/protocol.md) and [macOS internals](docs/macos.md)
+- [Releasing](docs/releasing.md): building, signing and verifying releases
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Coding agents should start with [AGENTS.md](AGENTS.md).
+To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Licensed under either the [Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.
+Daisy is available under the [Apache License 2.0](LICENSE-APACHE) or the [MIT license](LICENSE-MIT), at your option.
