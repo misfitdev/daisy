@@ -74,11 +74,16 @@ pub const ACCESSIBILITY_SETTINGS: &str =
 pub const INPUT_MONITORING_SETTINGS: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
 
-/// Where to send the user after asking. macOS shows each prompt only once;
-/// after that, asking does nothing, so a permission still missing afterwards
-/// has to be switched on in System Settings.
-pub fn settings_after_request(after: Access, pane: &'static str) -> Option<&'static str> {
-    (after != Access::Granted).then_some(pane)
+/// Where to send the user after asking, given the status `before` and
+/// `after` the request. macOS shows each prompt only once per app, and
+/// remembers that across launches; after that, asking does nothing, so a
+/// permission still missing has to be switched on in System Settings. While
+/// the one-time prompt is on screen (`before` was `Undetermined`), Settings
+/// stays closed. Accessibility never reports `Undetermined`, so for it
+/// Settings opens alongside a first-ever prompt rather than risk a button
+/// that does nothing.
+pub fn settings_after_request(before: Access, after: Access, pane: &'static str) -> Option<&'static str> {
+    (after != Access::Granted && before != Access::Undetermined).then_some(pane)
 }
 
 // IOHIDRequestType and IOHIDAccessType from IOKit/hid/IOHIDLib.h
@@ -126,15 +131,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_open_unless_the_request_granted_access() {
-        assert_eq!(settings_after_request(Access::Granted, ACCESSIBILITY_SETTINGS), None);
+    fn settings_open_once_the_prompt_can_no_longer_be_shown() {
+        use Access::*;
+        // macOS has asked before: the request does nothing, so Settings opens
         assert_eq!(
-            settings_after_request(Access::Denied, ACCESSIBILITY_SETTINGS),
-            Some(ACCESSIBILITY_SETTINGS)
+            settings_after_request(Denied, Denied, INPUT_MONITORING_SETTINGS),
+            Some(INPUT_MONITORING_SETTINGS)
         );
         assert_eq!(
-            settings_after_request(Access::Undetermined, INPUT_MONITORING_SETTINGS),
-            Some(INPUT_MONITORING_SETTINGS)
+            settings_after_request(Denied, Denied, ACCESSIBILITY_SETTINGS),
+            Some(ACCESSIBILITY_SETTINGS)
+        );
+    }
+
+    #[test]
+    fn the_first_prompt_is_left_to_answer() {
+        use Access::*;
+        assert_eq!(
+            settings_after_request(Undetermined, Denied, INPUT_MONITORING_SETTINGS),
+            None
+        );
+        assert_eq!(
+            settings_after_request(Undetermined, Undetermined, INPUT_MONITORING_SETTINGS),
+            None
+        );
+    }
+
+    #[test]
+    fn nothing_opens_once_access_is_granted() {
+        use Access::*;
+        assert_eq!(settings_after_request(Denied, Granted, ACCESSIBILITY_SETTINGS), None);
+        assert_eq!(
+            settings_after_request(Undetermined, Granted, INPUT_MONITORING_SETTINGS),
+            None
         );
     }
 
