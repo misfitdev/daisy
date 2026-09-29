@@ -530,6 +530,8 @@ fn recovery_for(error: &anyhow::Error) -> String {
         "Check the address. To use that Mac, pair with it on purpose.".to_owned()
     } else if message.contains("not paired") || message.contains("trust") {
         "Pair the systems again.".to_owned()
+    } else if message.contains("refused the input tap") {
+        "Quit and reopen Daisy. If it still fails, choose Reset Permissions in the Daisy menu.".to_owned()
     } else if message.contains("Permission") || message.contains("permission") {
         "Open Daisy and grant the missing macOS permission.".to_owned()
     } else if message.contains("not driving") || message.contains("set to drive") || message.contains("set as Host") {
@@ -670,6 +672,9 @@ mod tests {
             address: "studio.local".into(),
         });
         assert!(recovery_for(&changed).starts_with("Check the address"));
+
+        let tap = anyhow::anyhow!("macOS refused the input tap: Daisy needs Accessibility and Input Monitoring");
+        assert!(recovery_for(&tap).starts_with("Quit and reopen Daisy"));
 
         let roles = anyhow::anyhow!("the other system is not driving");
         assert_eq!(

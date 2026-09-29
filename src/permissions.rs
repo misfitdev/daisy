@@ -86,6 +86,35 @@ pub fn settings_after_request(before: Access, after: Access, pane: &'static str)
     (after != Access::Granted && before != Access::Undetermined).then_some(pane)
 }
 
+/// What a Mac needs to take part. The Guest only posts input, which takes
+/// Accessibility; the Host also reads the keyboard and trackpad, which takes
+/// Input Monitoring.
+pub fn ready(host: bool, accessibility: Access, input_monitoring: Access) -> bool {
+    accessibility == Access::Granted && (!host || input_monitoring == Access::Granted)
+}
+
+/// `tccutil` invocations that clear every Accessibility and Input Monitoring
+/// entry for `bundle_id`. macOS records a permission against the app's code
+/// signature, so an entry left by a differently signed copy shows as switched
+/// on yet does not apply to this one; clearing lets the prompts appear again.
+pub fn reset_commands(bundle_id: &str) -> [[String; 3]; 2] {
+    ["Accessibility", "ListenEvent"].map(|service| ["reset".to_owned(), service.to_owned(), bundle_id.to_owned()])
+}
+
+/// Clears this app's Accessibility and Input Monitoring entries.
+pub fn reset(bundle_id: &str) -> std::io::Result<()> {
+    for args in reset_commands(bundle_id) {
+        let status = std::process::Command::new("/usr/bin/tccutil").args(&args).status()?;
+        if !status.success() {
+            return Err(std::io::Error::other(format!(
+                "tccutil {} failed: {status}",
+                args.join(" ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 // IOHIDRequestType and IOHIDAccessType from IOKit/hid/IOHIDLib.h
 const IOHID_REQUEST_LISTEN_EVENT: u32 = 1;
 const IOHID_ACCESS_GRANTED: u32 = 0;
@@ -165,6 +194,30 @@ mod tests {
             settings_after_request(Undetermined, Granted, INPUT_MONITORING_SETTINGS),
             None
         );
+    }
+
+    #[test]
+    fn a_guest_needs_only_accessibility() {
+        use Access::*;
+        assert!(ready(false, Granted, Denied));
+        assert!(ready(false, Granted, Undetermined));
+        assert!(!ready(false, Denied, Granted));
+    }
+
+    #[test]
+    fn a_host_needs_both() {
+        use Access::*;
+        assert!(ready(true, Granted, Granted));
+        assert!(!ready(true, Granted, Denied));
+        assert!(!ready(true, Granted, Undetermined));
+        assert!(!ready(true, Denied, Granted));
+    }
+
+    #[test]
+    fn reset_clears_both_services_for_this_app_only() {
+        let commands = reset_commands("dev.misfit.daisy");
+        assert_eq!(commands[0], ["reset", "Accessibility", "dev.misfit.daisy"]);
+        assert_eq!(commands[1], ["reset", "ListenEvent", "dev.misfit.daisy"]);
     }
 
     #[test]
