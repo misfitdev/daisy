@@ -53,7 +53,9 @@ version of each system.
 ## Conventions and patterns
 
 - Wire enums (`protocol::Message`, `input::InputEvent`) are encoded by
-  variant position. Append variants; never reorder or remove them.
+  variant position. Within one protocol version, only append variants.
+  Reordering or removing a variant, or changing what one means, requires
+  raising `PROTOCOL` in `src/session.rs`; no old slots are kept.
 - Short codes are only safe as PAKE input. Never ask people to compare a code
   by eye as a security check; an attacker can grind keys until codes match.
 - The event-tap callback runs on every input event. It must never wait, perform

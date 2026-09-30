@@ -18,7 +18,7 @@ After the handshake the session splits into a sending half and a receiving half,
 
 ## Messages
 
-Messages are encoded with [postcard](https://github.com/jamesmunns/postcard), which identifies an enum variant by its position. **Variants are appended**: reordering or removing one makes peers on different versions misread each other, so it also raises the protocol version.
+Messages are encoded with [postcard](https://github.com/jamesmunns/postcard), which identifies an enum variant by its position. **Within one protocol version, variants are only appended.** Reordering or removing one, or changing what one means, raises the protocol version, and no old slots are kept.
 
 | Tag | Message | Sent by | Meaning |
 |---|---|---|---|
@@ -37,7 +37,7 @@ Messages are encoded with [postcard](https://github.com/jamesmunns/postcard), wh
 
 `generation` is the sender's latest claim. A message from an earlier generation is ignored, so input queued before a handoff never lands after it.
 
-`ClipboardPart`, carried by `Clipboard`, follows the same append-only rule. A snapshot of the clipboard is its items, each a `Begin`, its `Chunk`s and an `End` sharing an `id`, followed by `Done`:
+`ClipboardPart`, carried by `Clipboard`, follows the same rule. A snapshot of the clipboard is its items, each a `Begin`, its `Chunk`s and an `End` sharing an `id`, followed by `Done`:
 
 | Tag | Part | Fields |
 |---|---|---|
@@ -49,7 +49,7 @@ Messages are encoded with [postcard](https://github.com/jamesmunns/postcard), wh
 
 A snapshot holds a `Text` item, with an `Rtf` item when the copy has rich text, or a `Png` item. The receiver writes its pasteboard once, on `Done`, from the items that arrived whole. Text and rich text are limited to 4 MiB each and images to 32 MiB; a larger item is left out of the snapshot.
 
-`InputEvent`, carried by `Input`, follows the same append-only rule:
+`InputEvent`, carried by `Input`, follows the same rule:
 
 | Tag | Event | Fields |
 |---|---|---|

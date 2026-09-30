@@ -49,8 +49,8 @@ pub type Along = u16;
 
 /// One piece of input, forwarded from the driving system.
 ///
-/// Travels inside `protocol::Message`, so the same rule applies: append
-/// variants, never reorder or remove them.
+/// Travels inside `protocol::Message`, so the same rule applies: within one
+/// protocol version, only append variants.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InputEvent {
     /// Pointer motion in points, as the mouse or trackpad reported it.

@@ -1,8 +1,8 @@
 //! Messages exchanged inside an encrypted session.
 //!
-//! Encoded with postcard, which identifies enum variants by position:
-//! append new variants at the end and never reorder or remove existing ones,
-//! or peers on different versions will misread each other.
+//! Encoded with postcard, which identifies enum variants by position. Within
+//! one protocol version, only append variants; reordering or removing one, or
+//! changing its meaning, requires raising `session::PROTOCOL`.
 
 use serde::{Deserialize, Serialize};
 
@@ -68,8 +68,7 @@ pub enum Message {
 }
 
 /// A clipboard snapshot is its items, each a `Begin`, its `Chunk`s and an
-/// `End`, followed by `Done`. Same rule as `Message`: append variants, never
-/// reorder.
+/// `End`, followed by `Done`. Same rule as `Message`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClipboardPart {
     /// Starts one item; `len` is its full byte length and `id` ties its

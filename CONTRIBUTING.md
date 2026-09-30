@@ -46,7 +46,7 @@ Say in the pull request which macOS versions you tested and which system you wer
 
 [AGENTS.md](AGENTS.md) contains the rules that matter most for people and coding agents:
 
-- Wire enums are append-only: never reorder or remove a variant.
+- Wire enums are append-only within one protocol version. Reordering or removing a variant, or changing what one means, requires raising `PROTOCOL` in `src/session.rs`.
 - The event-tap callback must never block, start a process or panic.
 - Direction conventions are pinned to values recorded on hardware, not to each other.
 - A regression test for a fix must fail when the fix is removed.
