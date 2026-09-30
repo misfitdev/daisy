@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
-  <title>Daisy — one keyboard and trackpad, every Mac</title>
+  <title>Daisy — one keyboard and trackpad, every screen</title>
   <rect width="1200" height="630" fill="#F7F6F2"/>
   <rect width="14" height="630" fill="#FF6B5E"/>
   <image href="brand/daisy-lockup.svg" x="82" y="64" width="301" height="110"/>
   <text x="82" y="286" fill="#2E3235" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="52" font-weight="700" letter-spacing="-2">
     <tspan x="82">One keyboard and trackpad.</tspan>
-    <tspan x="82" dy="68" fill="#FF6B5E">Every Mac.</tspan>
+    <tspan x="82" dy="68" fill="#FF6B5E">Every screen.</tspan>
   </text>
   <text x="84" y="438" fill="#4F565B" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="27">
-    Put your Macs anywhere and use them as one desk.
+    Put your systems anywhere. Use them as one desk.
   </text>
   <g transform="translate(760 120) scale(.82)">
     <g fill="#FFFFFF" stroke="#737D84" stroke-width="7">

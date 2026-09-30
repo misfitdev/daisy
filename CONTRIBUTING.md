@@ -1,10 +1,10 @@
 # Contributing
 
-Thanks for helping. Daisy is small and opinionated: Mac to Mac only, no accounts, and no claim about hardware behavior without hardware evidence.
+Thanks for helping. Daisy is small and opinionated: Mac-to-Mac only, no accounts, and no claim about hardware behavior without hardware evidence.
 
 ## Setup
 
-You need an Apple-silicon Mac running macOS 26 or later, plus [mise](https://mise.jdx.dev).
+You need an Apple silicon system running macOS 26 or later, plus [mise](https://mise.jdx.dev).
 
 ```bash
 git clone https://github.com/misfitdev/daisy
@@ -33,14 +33,14 @@ mise exec -- actionlint
 
 ## Testing on hardware
 
-Tests cover decisions: crossing edges, releasing held keys, recognizing swipes, pairing and encryption. They cannot prove that macOS acts on captured or posted events, so changes to input, the pointer or swipes need a two-Mac run:
+Tests cover decisions: crossing edges, releasing held keys, recognizing swipes, pairing and encryption. They cannot prove that macOS acts on captured or posted events, so changes to input, the pointer or swipes need a run on two systems:
 
-1. Run `just app permissions --request` on each Mac, then grant Daisy Accessibility and Input Monitoring in System Settings. `just app` signs with your Apple Development certificate, which keeps permissions across rebuilds.
-2. On the Mac with the keyboard, run `just app listen --pair --drive left`, or use the side where the other Mac sits.
-3. On the other Mac, build the same commit and run `just app connect <first-mac>.local --pair`, then type the displayed code.
+1. Run `just app permissions --request` on each system, then grant Daisy Accessibility and Input Monitoring in System Settings. `just app` signs with your Apple Development certificate, which keeps permissions across rebuilds.
+2. On one system, run `just app listen --pair`.
+3. On the peer, build the same commit and run `just app connect <first-system>.local --pair --side right`, using the side where the first system's screen sits, then type the displayed code.
 4. Prefix either command with `RUST_LOG=daisy=debug` to see each side's decisions.
 
-Say in the pull request which macOS versions and roles you tested. Control-Option-Command-Escape takes control back if anything goes wrong.
+Say in the pull request which macOS versions you tested and which system you were using at each step. Control-Option-Command-Escape takes control back if anything goes wrong.
 
 ## Code
 

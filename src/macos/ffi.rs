@@ -62,8 +62,11 @@ pub const kCGMouseEventDeltaX: u32 = 4;
 pub const kCGMouseEventDeltaY: u32 = 5;
 pub const kCGKeyboardEventAutorepeat: u32 = 8;
 pub const kCGKeyboardEventKeycode: u32 = 9;
+pub const kCGEventSourceUserData: u32 = 42;
+pub const DAISY_EVENT_MARKER: i64 = 0x0044_4149_5359;
 pub const kCGScrollWheelEventPointDeltaAxis1: u32 = 96;
 pub const kCGScrollWheelEventPointDeltaAxis2: u32 = 97;
+pub const kCGScrollWheelEventMomentumPhase: u32 = 123;
 
 // CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions
 pub const kCGHIDEventTap: u32 = 0;

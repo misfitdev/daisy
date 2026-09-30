@@ -12,31 +12,31 @@ The Daisy setup window reports each grant and has a **Grant…** action for anyt
 
 ## The event tap
 
-The driving Mac taps input at the HID level before applications see it. It requests every event type and filters them itself because requesting only the private gesture types delivers nothing.
+Each system taps its own input at the HID level before applications see it. It requests every event type and filters them itself because requesting only the private gesture types delivers nothing.
 
-The callback runs for every input event on the Mac. It must never wait, perform I/O, start a process or panic into CoreGraphics. State acquisition and queue sends are nonblocking. Contention or queue overload passes the event through locally, reclaims local routing where possible and asks the runtime to end the session.
+The callback runs for every input event on the system. It must never wait, perform I/O, start a process or panic into CoreGraphics. State acquisition and queue sends are nonblocking. Contention or queue overload passes the event through locally, reclaims local routing where possible and asks the runtime to end the session.
 
 ## Pinning the pointer
 
-While the other Mac has control, the driving pointer should stay still. On macOS 27, `CGAssociateMouseAndMouseCursorPosition(false)` reports success but is ignored.
+While the peer has control, the local pointer should stay still. On macOS 27, `CGAssociateMouseAndMouseCursorPosition(false)` reports success but is ignored.
 
 Daisy therefore hides the pointer and warps it back to the crossing point whenever it drifts more than 1.5 points. Post-warp input delay is disabled. A background app may change the cursor only after setting the private `SetsCursorInBackground` WindowServer connection property.
 
 ## Clicks
 
-macOS 27 ignores synthetic clicks and drags without an event number. The following Mac numbers them starting just above the system's count. Click count comes from the driving Mac, so double-click timing follows its settings.
+macOS 27 ignores synthetic clicks and drags without an event number. The system replaying input numbers them starting just above the event count macOS keeps. Click count comes from the system sending input, so double-click timing follows its settings.
 
 ## Swipes
 
 Trackpad swipes that switch Spaces or open Mission Control arrive as private `DockControl` events (type 30), each followed by a companion gesture event (type 29), not as public gesture events. The field layout is confined to `src/macos/swipe.rs`.
 
-The driving Mac forwards each swipe step: beginning, progress, ending velocity or cancellation. A swipe stays with the Mac that had control when it began.
+The system in use forwards each swipe step: beginning, progress, ending velocity or cancellation. A swipe stays with the system that had control when it began.
 
-- **macOS 27 follower:** replays a live synthetic swipe, so progress follows the fingers and can pause, reverse or cancel. Each step carries a serialized raw IOHID queue element in CGEvent field 4205. Dock ignores steps posted back to back, so a poster task spaces them by at least 16 ms and coalesces stale progress. A swipe still underway when control leaves or the session ends is cancelled.
+- **macOS 27 replay:** the peer replays a live synthetic swipe, so progress follows the fingers and can pause, reverse or cancel. Each step carries a serialized raw IOHID queue element in CGEvent field 4205. Dock ignores steps posted back to back, so a poster task spaces them by at least 16 ms and coalesces stale progress. A swipe still underway when control leaves or the session ends is cancelled.
 
 Real-trackpad end-to-end verification covered live replay, including progress, pullback, cancellation and completion.
 
-On synthetic input, Dock decides by the direction of the last movement rather than distance: a held swipe released anywhere completes, while one pulled back stays. The ignored hardware test `the_dock_follows_a_replayed_swipe` exercises this on a Mac with a Space to the right.
+On synthetic input, Dock decides by the direction of the last movement rather than distance: a held swipe released anywhere completes, while one pulled back stays. The ignored hardware test `the_dock_follows_a_replayed_swipe` exercises this on a system with a Space to the right.
 
 Direction signs were measured on hardware:
 
@@ -51,6 +51,6 @@ Real and synthetic signs are opposite on both axes. Tests pin recorded values be
 
 macOS enlarges the pointer when physical input shakes it, but the system detector ignores posted motion. This was confirmed on macOS 27 by sampling `CGSGetCursorScale` through 200 synthetic shake events: the scale remained 1.0.
 
-The following Mac therefore detects shake in replayed motion through `src/shake.rs`: five quick reversals within one second, each stroke at least 80 points and under 200 ms, horizontally or vertically. It grows the pointer toward four times its configured size through private `CGSSetCursorScale`, then shrinks it within about one third of a second.
+The system replaying input therefore detects shake in replayed motion through `src/shake.rs`: five quick reversals within one second, each stroke at least 80 points and under 200 ms, horizontally or vertically. It grows the pointer toward four times its configured size through private `CGSSetCursorScale`, then shrinks it within about one third of a second.
 
-The behavior follows the Mac's “Shake mouse pointer to locate” setting and Accessibility pointer size. Pointer scale outlives the process that changed it, so Daisy restores the configured size when magnification ends, when the session ends and whenever any Daisy command starts. macOS 27 replay and forced-termination recovery are verified; visual verification on a macOS 26 follower remains tracked in `mn-96q`.
+The behavior follows that system's “Shake mouse pointer to locate” setting and Accessibility pointer size. Pointer scale outlives the process that changed it, so Daisy restores the configured size when magnification ends, when the session ends and whenever any Daisy command starts. macOS 27 replay and forced-termination recovery are verified; visual verification on macOS 26 remains tracked in `mn-96q`.

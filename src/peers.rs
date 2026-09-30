@@ -1,8 +1,8 @@
-//! Macs this one has paired with, pinned by public key, and how long each
+//! Peers this system has paired with, pinned by public key, and how long each
 //! stays trusted.
 //!
 //! The file is the only copy. Every change locks it, reads it, and writes it
-//! back, so a running Daisy never restores a Mac that another process
+//! back, so a running Daisy never restores a peer that another process
 //! forgot, and every change drops trust that has expired.
 
 use std::fs::{self, File, OpenOptions};
@@ -17,14 +17,14 @@ use serde::{Deserialize, Serialize};
 use crate::identity::PublicKey;
 use crate::trust::{self, ONCE_GRACE, Policy, Timestamp};
 
-/// How often a running session renews its Mac's last seen time. Well under
-/// `ONCE_GRACE`, so another process never prunes a "once" Mac mid-session.
+/// How often a running session renews its peer's last seen time. Well under
+/// `ONCE_GRACE`, so another process never prunes a "once" peer mid-session.
 const RENEW_EVERY: Duration = Duration::from_secs(20);
-/// How often a running session checks that its Mac is still trusted.
+/// How often a running session checks that its peer is still trusted.
 const CHECK_EVERY: Duration = Duration::from_secs(1);
 const _: () = assert!(RENEW_EVERY.as_secs() * 2 < ONCE_GRACE.as_secs());
 
-const HEADER: &str = "# Macs this one trusts. Change with `daisy trust` and `daisy forget`.\n\n";
+const HEADER: &str = "# Peers this system trusts. Change with `daisy trust` and `daisy forget`.\n\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Peer {
@@ -33,6 +33,9 @@ pub struct Peer {
     pub policy: Policy,
     pub paired_at: Timestamp,
     pub last_seen: Timestamp,
+    pub side: crate::input::Side,
+    /// When `side` was chosen; the later choice wins when two systems disagree.
+    pub side_chosen: Timestamp,
 }
 
 impl Peer {
@@ -54,11 +57,11 @@ impl Peer {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Forgotten {
     pub removed: usize,
-    /// Selectors that matched no paired Mac.
+    /// Selectors that matched no peer.
     pub unmatched: Vec<String>,
 }
 
-/// Paired Macs, kept in `peers.toml`.
+/// Peers, kept in `peers.toml`.
 #[derive(Debug, Clone)]
 pub struct PeerStore {
     path: PathBuf,
@@ -66,41 +69,19 @@ pub struct PeerStore {
 }
 
 impl PeerStore {
-    /// The store in `home`, moving over pairs from the earlier one line per
-    /// Mac format, which trusted forever, under the default policy.
+    /// The peers and their screen relations in `home`.
     pub fn open(home: &Path) -> Result<Self> {
-        let store = Self {
+        Ok(Self {
             path: home.join("peers.toml"),
             lock: home.join("peers.lock"),
-        };
-        let legacy = home.join("peers");
-        if legacy.exists() {
-            let _lock = store.lock()?;
-            if !store.path.exists() {
-                let now = trust::now();
-                let peers = read_legacy(&legacy)?
-                    .into_iter()
-                    .map(|(key, name)| Peer {
-                        name,
-                        key,
-                        policy: Policy::default(),
-                        paired_at: now,
-                        last_seen: now,
-                    })
-                    .collect::<Vec<_>>();
-                store.write(&peers)?;
-            }
-            fs::remove_file(&legacy).with_context(|| format!("removing {}", legacy.display()))?;
-        }
-        Ok(store)
+        })
     }
 
-    /// Paired Macs still trusted at `now`, dropping any whose trust ended.
     pub fn list(&self, now: Timestamp) -> Result<Vec<Peer>> {
         self.update(now, |peers| peers.clone())
     }
 
-    /// The paired Mac with `key`, if this Mac still trusts it.
+    /// The peer with `key`, if this system still trusts it.
     pub fn trusted(&self, key: &PublicKey, now: Timestamp) -> Result<Option<Peer>> {
         Ok(self.list(now)?.into_iter().find(|peer| peer.key == *key))
     }
@@ -117,11 +98,13 @@ impl PeerStore {
                 policy,
                 paired_at: now,
                 last_seen: now,
+                side: crate::input::Side::Right,
+                side_chosen: 0,
             });
         })
     }
 
-    /// Record a session with `key` at `now`. Never adds a Mac: returns
+    /// Record a session with `key` at `now`. Never adds a peer: returns
     /// whether it is still trusted.
     pub fn renew(&self, key: &PublicKey, now: Timestamp) -> Result<bool> {
         self.update(now, |peers| match peers.iter_mut().find(|peer| peer.key == *key) {
@@ -133,7 +116,30 @@ impl PeerStore {
         })
     }
 
-    /// Change the policy of every Mac matching `selector`. Returns how many
+    /// Persist this system's half of the shared screen relation with a peer.
+    /// Record a side chosen on this system; choosing the current side again
+    /// changes nothing.
+    pub fn set_side(&self, key: &PublicKey, side: crate::input::Side) -> Result<()> {
+        let now = trust::now();
+        self.update(now, |peers| {
+            if let Some(peer) = peers.iter_mut().find(|peer| peer.key == *key && peer.side != side) {
+                peer.side = side;
+                peer.side_chosen = now;
+            }
+        })
+    }
+
+    /// Record the side both systems agreed on, and when it was chosen.
+    pub fn agree_side(&self, key: &PublicKey, side: crate::input::Side, chosen: Timestamp) -> Result<()> {
+        self.update(trust::now(), |peers| {
+            if let Some(peer) = peers.iter_mut().find(|peer| peer.key == *key) {
+                peer.side = side;
+                peer.side_chosen = chosen;
+            }
+        })
+    }
+
+    /// Change the policy of every peer matching `selector`. Returns how many
     /// matched, and those still trusted: one whose new policy has already
     /// run out is forgotten.
     pub fn set_policy(&self, selector: &str, policy: Policy, now: Timestamp) -> Result<(usize, Vec<Peer>)> {
@@ -153,7 +159,7 @@ impl PeerStore {
         Ok((matched.len(), still))
     }
 
-    /// Stop trusting every Mac matching any of `selectors`, by name or
+    /// Stop trusting every peer matching any of `selectors`, by name or
     /// fingerprint. A running session with one ends within `CHECK_EVERY`.
     pub fn forget(&self, selectors: &[String], now: Timestamp) -> Result<Forgotten> {
         self.update(now, |peers| {
@@ -171,7 +177,7 @@ impl PeerStore {
         })
     }
 
-    /// Stop trusting every Mac. Returns how many there were.
+    /// Stop trusting every peer. Returns how many there were.
     pub fn forget_all(&self, now: Timestamp) -> Result<usize> {
         self.update(now, |peers| {
             let removed = peers.len();
@@ -192,7 +198,7 @@ impl PeerStore {
         })
     }
 
-    /// Resolves, with the reason, once this Mac stops trusting `key` while a
+    /// Resolves, with the reason, once this system stops trusting `key` while a
     /// session with it runs: it was forgotten, or its deadline passed.
     /// Renews its last seen time meanwhile.
     pub async fn watch(&self, key: PublicKey, name: &str) -> anyhow::Error {
@@ -203,16 +209,16 @@ impl PeerStore {
             let now = trust::now();
             let peer = match self.read() {
                 Ok(peers) => peers.into_iter().find(|peer| peer.key == key),
-                Err(error) => return error.context("checking this Mac's trust in the other"),
+                Err(error) => return error.context("checking this system's trust in the peer"),
             };
             match peer {
-                None => return anyhow!("{name} was forgotten on this Mac"),
+                None => return anyhow!("{name} was forgotten on this system"),
                 Some(peer) if peer.is_expired(true, now) => {
                     return anyhow!("trust in {name} ended: it was trusted {}", peer.policy.describe());
                 }
                 Some(_) if renewed.elapsed() >= RENEW_EVERY => {
                     if let Err(error) = self.renew(&key, now) {
-                        return error.context("renewing trust in the other Mac");
+                        return error.context("renewing trust in the peer");
                     }
                     renewed = tokio::time::Instant::now();
                 }
@@ -224,7 +230,7 @@ impl PeerStore {
     fn update<T>(&self, now: Timestamp, change: impl FnOnce(&mut Vec<Peer>) -> T) -> Result<T> {
         let _lock = self.lock()?;
         let before = self.read()?;
-        // no session counts as live here: a running one keeps its own Mac
+        // no session counts as live here: a running one keeps its own peer
         // fresh by renewing it well within the shortest window
         let unexpired = |peers: &mut Vec<Peer>| peers.retain(|peer| !peer.is_expired(false, now));
         let mut peers = before.clone();
@@ -269,6 +275,8 @@ impl PeerStore {
                     policy: entry.trust,
                     paired_at: entry.paired_at,
                     last_seen: entry.last_seen,
+                    side: entry.side,
+                    side_chosen: entry.side_chosen,
                 })
             })
             .collect()
@@ -284,6 +292,8 @@ impl PeerStore {
                     trust: peer.policy,
                     paired_at: peer.paired_at,
                     last_seen: peer.last_seen,
+                    side: peer.side,
+                    side_chosen: peer.side_chosen,
                 })
                 .collect(),
         };
@@ -305,8 +315,8 @@ impl PeerStore {
     }
 }
 
-/// A running session with a paired Mac. Dropping it records how the session
-/// ended: a "once" Mac is forgotten, unless the connection dropped
+/// A running session with a peer. Dropping it records how the session
+/// ended: a "once" peer is forgotten, unless the connection dropped
 /// unexpectedly, which leaves `ONCE_GRACE` to reconnect.
 pub struct Visit<'a> {
     store: &'a PeerStore,
@@ -352,22 +362,8 @@ struct Entry {
     trust: Policy,
     paired_at: Timestamp,
     last_seen: Timestamp,
-}
-
-fn read_legacy(path: &Path) -> Result<Vec<(PublicKey, String)>> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut peers = Vec::new();
-    for (index, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (hex, name) = line.split_once(' ').unwrap_or((line, ""));
-        let key =
-            PublicKey::from_hex(hex).ok_or_else(|| anyhow!("{}:{}: not a public key", path.display(), index + 1))?;
-        peers.push((key, name.trim().to_owned()));
-    }
-    Ok(peers)
+    side: crate::input::Side,
+    side_chosen: Timestamp,
 }
 
 #[cfg(test)]
@@ -393,6 +389,35 @@ mod tests {
     }
 
     #[test]
+    fn paired_screen_relation_survives_reopening_and_renewal() {
+        let (store, dir) = store();
+        let now = trust::now();
+        store.pin(key(1), "Studio", Policy::Forever, now).unwrap();
+        store.set_side(&key(1), crate::input::Side::Above).unwrap();
+        store.renew(&key(1), now).unwrap();
+        let reopened = PeerStore::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.trusted(&key(1), now).unwrap().unwrap().side,
+            crate::input::Side::Above
+        );
+    }
+
+    #[test]
+    fn choosing_the_same_side_again_keeps_when_it_was_chosen() {
+        let (store, _dir) = store();
+        let now = trust::now();
+        store.pin(key(1), "Studio", Policy::Forever, now).unwrap();
+        store.agree_side(&key(1), crate::input::Side::Left, 7).unwrap();
+        store.set_side(&key(1), crate::input::Side::Left).unwrap();
+        let peer = store.trusted(&key(1), now).unwrap().unwrap();
+        assert_eq!((peer.side, peer.side_chosen), (crate::input::Side::Left, 7));
+        store.set_side(&key(1), crate::input::Side::Above).unwrap();
+        let peer = store.trusted(&key(1), now).unwrap().unwrap();
+        assert_eq!(peer.side, crate::input::Side::Above);
+        assert!(peer.side_chosen >= now);
+    }
+
+    #[test]
     fn missing_file_is_empty() {
         let (store, _dir) = store();
         assert!(store.list(NOW).unwrap().is_empty());
@@ -401,11 +426,11 @@ mod tests {
     #[test]
     fn pinned_peers_survive_reopening() {
         let (store, dir) = store();
-        store.pin(key(1), "Studio Mac", Policy::Days(30), NOW).unwrap();
+        store.pin(key(1), "Studio", Policy::Days(30), NOW).unwrap();
 
         let reopened = PeerStore::open(dir.path()).unwrap();
         let peer = reopened.trusted(&key(1), NOW).unwrap().unwrap();
-        assert_eq!(peer.name, "Studio Mac");
+        assert_eq!(peer.name, "Studio");
         assert_eq!(peer.policy, Policy::Days(30));
         assert_eq!((peer.paired_at, peer.last_seen), (NOW, NOW));
     }
@@ -459,14 +484,14 @@ mod tests {
     }
 
     #[test]
-    fn renewing_never_adds_a_mac() {
+    fn renewing_never_adds_a_peer() {
         let (store, _dir) = store();
         assert!(!store.renew(&key(1), NOW).unwrap());
         assert!(store.list(NOW).unwrap().is_empty());
     }
 
     #[test]
-    fn a_forgotten_mac_stays_forgotten_by_a_running_session() {
+    fn a_forgotten_peer_stays_forgotten_by_a_running_session() {
         let (store, dir) = store();
         store.pin(key(1), "studio", Policy::Forever, NOW).unwrap();
         let visit = store.visit(key(1)).unwrap();
@@ -535,7 +560,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn watching_ends_when_the_mac_is_forgotten() {
+    async fn watching_ends_when_the_peer_is_forgotten() {
         let (store, _dir) = store();
         store.pin(key(1), "studio", Policy::Forever, NOW).unwrap();
         let forget = async {
@@ -544,22 +569,6 @@ mod tests {
         };
         let (reason, ()) = tokio::join!(store.watch(key(1), "studio"), forget);
         assert!(reason.to_string().contains("forgotten"), "{reason}");
-    }
-
-    #[test]
-    fn old_peer_files_move_over_under_the_default_policy() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("peers"),
-            format!("# daisy paired peers\n{} studio mini\n", key(1).to_hex()),
-        )
-        .unwrap();
-
-        let store = PeerStore::open(dir.path()).unwrap();
-        let peers = store.list(trust::now()).unwrap();
-        assert_eq!(names(&peers), ["studio mini"]);
-        assert_eq!(peers[0].policy, Policy::Idle);
-        assert!(!dir.path().join("peers").exists());
     }
 
     #[test]

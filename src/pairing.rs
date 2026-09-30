@@ -1,9 +1,9 @@
 //! Deciding whether to trust the key at the other end of a session.
 //!
-//! Macs that have paired recognize each other's pinned keys and go straight
-//! to work. Otherwise, and only when both sides opt in, they pair: the Mac
+//! Systems that have paired recognize each other's pinned keys and go straight
+//! to work. Otherwise, and only when both sides opt in, they pair: the system
 //! that accepted the connection shows a one-time code, and it is typed on
-//! the Mac that opened it. Both run SPAKE2 keyed by the code, then prove
+//! the system that opened it. Both run SPAKE2 keyed by the code, then prove
 //! they derived the same key over this session's handshake hash.
 //!
 //! An attacker in the middle has a different handshake with each side and
@@ -33,7 +33,7 @@ const MAX_PEER_NAME_CHARS: usize = 80;
 const SPAKE_IDENTITY: &[u8] = b"daisy pairing v1";
 const CONFIRMATION_LABEL: &[u8] = b"daisy pairing confirmation v1";
 
-/// Six digit one-time code, shown on one Mac and typed on the other.
+/// Six digit one-time code, shown on one system and typed on the other.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PairingCode(u32);
 
@@ -76,7 +76,7 @@ impl fmt::Debug for PairingCode {
     }
 }
 
-/// How the person at this Mac takes part in pairing.
+/// How the person at this system takes part in pairing.
 pub trait PairingPrompt {
     /// Show `code` so it can be typed on `peer`.
     fn show_code(&mut self, code: &PairingCode, peer: &str);
@@ -87,15 +87,15 @@ pub trait PairingPrompt {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trust {
-    /// Both Macs already had each other's keys pinned.
+    /// Both sides already had each other's keys pinned.
     AlreadyPaired,
-    /// The Macs paired during this session and pinned each other's keys.
+    /// The two sides paired during this session and pinned each other's keys.
     NewlyPaired,
 }
 
 /// Settle whether the peer is trusted, pairing if needed and allowed.
 ///
-/// A Mac whose trust has expired counts as unpaired. Pairing pins the peer
+/// A peer whose trust has expired counts as unpaired. Pairing pins the peer
 /// under `policy`. Returns the peer's name on success. On any failure
 /// nothing is pinned and the session must be dropped.
 pub async fn establish_trust<S, P>(
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn peer_names_are_safe_for_terminal_output() {
-        assert_eq!(safe_peer_name("\u{1b}[31mBad\nMac\r"), "[31mBad Mac");
+        assert_eq!(safe_peer_name("\u{1b}[31mBad\nName\r"), "[31mBad Name");
         assert_eq!(safe_peer_name("\0\n\t"), "Peer");
         assert_eq!(safe_peer_name(&"x".repeat(100)).chars().count(), 80);
     }
@@ -301,14 +301,14 @@ mod tests {
         }
     }
 
-    /// A Mac under test: its key, its paired peers, and the person at it.
-    struct Mac {
+    /// A party under test: its key, its paired peers, and the person at it.
+    struct Party {
         identity: Identity,
         peers: PeerStore,
         _dir: tempfile::TempDir,
     }
 
-    impl Mac {
+    impl Party {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
             Self {
@@ -319,7 +319,7 @@ mod tests {
         }
     }
 
-    async fn sessions(connecting: &Mac, accepting: &Mac) -> (Channel<DuplexStream>, Channel<DuplexStream>) {
+    async fn sessions(connecting: &Party, accepting: &Party) -> (Channel<DuplexStream>, Channel<DuplexStream>) {
         let (a, b) = duplex(1 << 17);
         let (left, right) = tokio::join!(
             Channel::initiate(a, &connecting.identity),
@@ -328,11 +328,11 @@ mod tests {
         (left.unwrap(), right.unwrap())
     }
 
-    /// Run trust negotiation on both Macs at once, with the typed code
+    /// Run trust negotiation on both parties at once, with the typed code
     /// either copied from the other screen or supplied as a wrong guess.
     async fn negotiate(
-        connecting: &mut Mac,
-        accepting: &mut Mac,
+        connecting: &mut Party,
+        accepting: &mut Party,
         allow: (bool, bool),
         typed: Option<PairingCode>,
     ) -> (Result<(String, Trust)>, Result<(String, Trust)>, usize, usize) {
@@ -377,8 +377,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn correct_code_pairs_both_macs() {
-        let (mut laptop, mut studio) = (Mac::new(), Mac::new());
+    async fn correct_code_pairs_both_systems() {
+        let (mut laptop, mut studio) = (Party::new(), Party::new());
         let (left, right, _, _) = negotiate(&mut laptop, &mut studio, (true, true), None).await;
 
         assert_eq!(left.unwrap(), ("studio".to_owned(), Trust::NewlyPaired));
@@ -404,8 +404,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paired_macs_reconnect_without_prompting() {
-        let (mut laptop, mut studio) = (Mac::new(), Mac::new());
+    async fn paired_peers_reconnect_without_prompting() {
+        let (mut laptop, mut studio) = (Party::new(), Party::new());
         let (left, right, _, _) = negotiate(&mut laptop, &mut studio, (true, true), None).await;
         assert!(left.is_ok() && right.is_ok(), "setup pairing failed");
 
@@ -417,7 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_code_pairs_nothing() {
-        let (mut laptop, mut studio) = (Mac::new(), Mac::new());
+        let (mut laptop, mut studio) = (Party::new(), Party::new());
         let guess = PairingCode::parse("000000").unwrap();
         let (left, right, _, _) = negotiate(&mut laptop, &mut studio, (true, true), Some(guess)).await;
 
@@ -441,7 +441,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_peer_is_refused_without_pairing_mode() {
-        let (mut laptop, mut studio) = (Mac::new(), Mac::new());
+        let (mut laptop, mut studio) = (Party::new(), Party::new());
         for allow in [(false, true), (true, false), (false, false)] {
             let (left, right, left_calls, right_calls) = negotiate(&mut laptop, &mut studio, allow, None).await;
             assert!(left.unwrap_err().to_string().contains("not paired"));
@@ -461,7 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_sided_forget_requires_pairing_again() {
-        let (mut laptop, mut studio) = (Mac::new(), Mac::new());
+        let (mut laptop, mut studio) = (Party::new(), Party::new());
         let (left, right, _, _) = negotiate(&mut laptop, &mut studio, (true, true), None).await;
         assert!(left.is_ok() && right.is_ok(), "setup pairing failed");
         studio.peers.forget(&["laptop".to_owned()], trust::now()).unwrap();
@@ -476,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_trust_requires_pairing_again() {
-        let (mut laptop, mut studio) = (Mac::new(), Mac::new());
+        let (mut laptop, mut studio) = (Party::new(), Party::new());
         let (left, right, _, _) = negotiate(&mut laptop, &mut studio, (true, true), None).await;
         assert!(left.is_ok() && right.is_ok(), "setup pairing failed");
 

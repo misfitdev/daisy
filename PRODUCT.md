@@ -18,18 +18,18 @@ The product is macOS only; no other operating system is in scope. Impeccable has
 
 ## Users
 
-Daisy is for people who use multiple Macs on the same network, commonly a
+Daisy is for people who use multiple macOS systems on the same network, commonly a
 laptop and one or more desktop systems, and want one keyboard and trackpad to
 move among them. They should not need to understand networking, cryptographic
 keys, or terminal commands.
 
 ## Product Purpose
 
-Daisy shares one Mac's keyboard, mouse, and trackpad gestures with other
-Macs on the same network without an Apple ID, iCloud, or any other account. The
-product vision is a workspace that can extend across as many Macs as practical
+Daisy shares one system's keyboard, mouse, and trackpad gestures with peers
+on the same network without an Apple ID, iCloud, or any other account. The
+product vision is a workspace that can extend across as many systems as practical
 limits permit. Success means someone installs it, grants the required
-permissions, pairs their Macs, and then moves among them by pushing the pointer
+permissions, pairs their systems, and then moves among them by pushing the pointer
 through screen edges, including Spaces, Mission Control, and
 application-window swipes.
 
@@ -38,46 +38,46 @@ application-window swipes.
 Daisy is Mac-to-Mac only by design. Both ends speak macOS natively, so keys,
 clicks, and trackpad gestures pass through as themselves instead of being
 translated through another operating system. Trust is established directly
-between two Macs with a one-time pairing code, and each Mac controls how long
-that trust lasts.
+between two systems with a one-time pairing code, and each system controls how
+long that trust lasts.
 
 ## Operating Context
 
-- Macs are arranged around the driving Mac, and the user identifies which edge
-  leads to each neighboring system.
-- The Host owns the keyboard and trackpad; the Guest receives input. These are
-  lightweight setup roles, not permanent device identities. Network connection
-  direction and control direction are independent.
+- The user chooses on each system which edge leads to its peer. The two systems
+  keep one shared arrangement; when they disagree, the most recent choice wins.
+- Both systems capture and replay input. Physical use of either system takes
+  control there immediately; connection direction is independent of input
+  ownership.
 - First run requires Accessibility and Input Monitoring permission for
-  `Daisy.app` on both Macs.
-- During pairing, one Mac displays a code and the user enters it on the other.
-- Control-Option-Command-Escape immediately returns control to the driving Mac.
+  `Daisy.app` on both systems.
+- During pairing, one system displays a code and the user enters it on the other.
+- Control-Option-Command-Escape immediately returns control to the system the
+  user is at.
 - The current beta is app-first. Terminal commands remain available for
   diagnostics, automation and advanced networking.
 
 ## Capabilities and Constraints
 
-- Working: pairing, encrypted reconnects, per-Mac trust policies with forced
+- Working: pairing, encrypted reconnects, per-peer trust policies with forced
   revocation, keyboard and mouse input across a shared edge, basic scrolling,
   Spaces, Mission Control and application-window swipes, shake-to-locate on
   macOS 27, and the recovery chord.
-- Bonjour discovery of paired Macs is implemented. Automatic reconnection after sleep, wake and
-  network changes is implemented; two-Mac verification remains. Clipboard sharing of text, rich text and images is implemented;
-  two-Mac verification remains. Spatial positioning and chained connections
-  among multiple Macs are future capabilities and must not be presented as
+- Bonjour discovery of paired peers is implemented. Automatic reconnection after sleep, wake and
+  network changes is implemented; two-system verification remains. Clipboard sharing of text, rich text and images is implemented;
+  two-system verification remains. Spatial positioning and chained connections
+  among multiple systems are future capabilities and must not be presented as
   working today.
-- Capturing trackpad swipes requires macOS 27 on the driving Mac.
-- Shake-to-locate still needs visual verification on a macOS 26 follower.
+- Capturing trackpad swipes requires macOS 27 on the system whose trackpad is
+  used.
+- Shake-to-locate still needs visual verification on macOS 26.
 - Pairing codes are safe only as PAKE input. Never ask people to compare a code
   by eye as a security check.
-- Both Macs enforce their own trust policy, so the stricter policy wins. When
-  trust ends, the Macs must pair again.
-- Current setup labels are **Host** and **Guest**. Host supplies input; Guest
-  receives it. Keep this choice visually and conceptually subordinate: it is a
-  session role, and positioned multi-Mac chains should make it less important
-  over time. Technical internals may still use driving and following.
+- Both systems enforce their own trust policy, so the stricter policy wins. When
+  trust ends, the systems must pair again.
+- Setup pairs nearby peers automatically and asks where the other screen sits.
+  An optional address remains for networks without Bonjour. There is no input-role selector.
 - Product terminology: **this system** for the local computer and **peer** for
-  another computer. **Host** and **Guest** appear only in the role selector.
+  another computer. Input ownership follows physical use and is not a permanent device identity.
   Pair, trust, forget and recovery chord remain the user-facing action terms.
 
 ## Brand Commitments
@@ -86,7 +86,7 @@ that trust lasts.
 - Voice: plain, direct, and concise; state what works and what does not without
   hype.
 - The identity must portray seamless shared connectivity between macOS systems:
-  separate Macs behaving like one continuous workspace.
+  separate systems behaving like one continuous workspace.
 - The visual system must scale beyond a pair toward an effectively unbounded
   fabric within practical limits. Do not reduce the identity to two devices
   joined by a single line or to a central hub with subordinate nodes.

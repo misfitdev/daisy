@@ -1,7 +1,8 @@
 //! Connection orchestration shared by the CLI and native menu-bar app.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -23,8 +24,8 @@ use crate::trust::{self, Policy};
 
 pub const DEFAULT_PORT: u16 = 24850;
 
-/// How long reaching the other Mac may take before it counts as unreachable;
-/// a sleeping Mac otherwise holds a connection attempt for over a minute.
+/// How long reaching the peer may take before it counts as unreachable;
+/// a sleeping peer otherwise holds a connection attempt for over a minute.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const TRUST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -34,14 +35,94 @@ const INPUT_QUEUE_CAPACITY: usize = 1024;
 
 type Pairing = Option<Policy>;
 
+/// Both peers listen and browse. Paired keys choose one connection opener;
+/// anonymous pairing beacons use their random nonces for the same election.
+pub async fn automatic<P, O>(config: SessionConfig<'_>, prompt: &mut P, observer: &mut O) -> Result<()>
+where
+    P: PairingPrompt + Send,
+    O: ServiceObserver + Send,
+{
+    let listener = TcpListener::bind(("0.0.0.0", DEFAULT_PORT)).await?;
+    let mut browser = discovery::Browser::start()?;
+    let mut pairing = PairingGate::new(config.pairing);
+    let mut discoverable = config.discoverable.clone();
+    let mut first_seen: HashMap<[u8; discovery::NONCE_LEN], tokio::time::Instant> = HashMap::new();
+    loop {
+        observer.waiting(
+            config.name,
+            config.identity.public_key(),
+            DEFAULT_PORT,
+            config.pairing.filter(|_| pairing.is_open()),
+        );
+        let advertiser = advertise(&config, DEFAULT_PORT, &pairing, *discoverable.borrow_and_update());
+        let mut scan = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    let (stream, address) = result?;
+                    stream.set_nodelay(true)?;
+                    drop(advertiser);
+                    match answer(stream, &config, &mut pairing, prompt, observer).await {
+                        Ok(peer) => observer.disconnected(&peer),
+                        Err(error) => observer.connection_failed(&address.to_string(), &error),
+                    }
+                    break;
+                }
+                changed = browser.changed() => {
+                    if !changed { anyhow::bail!("Bonjour browsing stopped"); }
+                }
+                Ok(()) = discoverable.changed() => break,
+                _ = scan.tick() => {
+                    if pairing.policy.is_some() && !pairing.is_open() && !pairing.closed {
+                        pairing.close();
+                        observer.pairing_closed();
+                        break;
+                    }
+                    let keys: Vec<_> = config.peers.list(trust::now())?.iter().map(|p| p.key).collect();
+                    let own = config.identity.public_key();
+                    let mut found = browser.current(&keys);
+                    found.sort_by_key(|heard| heard.election);
+                    let now = tokio::time::Instant::now();
+                    first_seen.retain(|election, _| found.iter().any(|heard| heard.election == *election));
+                    for heard in &found { first_seen.entry(heard.election).or_insert(now); }
+                    let election = advertiser.as_ref().map(|a| a.election);
+                    let candidate = found.into_iter().find(|heard| {
+                        let seen_for = now - first_seen[&heard.election];
+                        discovery::opens_connection(own, election, heard, pairing.is_open(), seen_for)
+                    });
+                    if let Some(heard) = candidate {
+                        // wait out the grace again, so two systems that both
+                        // connected do not keep colliding
+                        first_seen.remove(&heard.election);
+                        let mut expected = match heard.seen { discovery::Seen::Paired(key) => Some(key), discovery::Seen::Pairing => None };
+                        let pairing_candidate = expected.is_none();
+                        let attempt = SessionConfig { pairing: pairing.for_peer(expected.is_some()), ..config };
+                        let address = heard.address.to_string();
+                        observer.connecting(&address, peer_name(config.peers, expected).as_deref());
+                        drop(advertiser);
+                        let (_, result) = connect_once(attempt, &address, &mut expected, prompt, observer).await;
+                        if pairing_candidate && expected.is_some() { pairing.completed = true; }
+                        if let Err(error) = result { observer.connection_failed(&address, &error); }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Receives human-readable state changes without taking part in protocol logic.
 pub trait ServiceObserver {
     fn waiting(&mut self, _name: &str, _key: PublicKey, _port: u16, _pairing: Pairing) {}
-    fn connecting(&mut self, _address: &str) {}
+    /// `peer` names a paired peer, when it is known which one this is.
+    fn connecting(&mut self, _address: &str, _peer: Option<&str>) {}
     /// The connection could not be made or was lost; trying again after `wait`.
-    fn reconnecting(&mut self, _address: &str, _wait: Duration) {}
+    fn reconnecting(&mut self, _address: &str, _peer: Option<&str>, _wait: Duration) {}
     fn paired(&mut self, _peer: &str, _key: PublicKey, _policy: Policy) {}
-    fn connected(&mut self, _peer: &str, _key: PublicKey, _drive: Option<Side>) {}
+    fn connected(&mut self, _peer: &str, _key: PublicKey, _side: Side) {}
+    /// Latency or who has control changed in the running session.
+    fn link(&mut self, _peer: &str, _link: crate::control::Link) {}
     fn disconnected(&mut self, _peer: &str) {}
     fn pairing_closed(&mut self) {}
     fn connection_failed(&mut self, _address: &str, _error: &anyhow::Error) {}
@@ -60,10 +141,15 @@ pub struct SessionConfig<'a> {
     pub peers: &'a PeerStore,
     pub name: &'a str,
     pub pairing: Option<Policy>,
-    pub drive: Option<Side>,
-    /// Whether this Mac shares its clipboard; may change mid-session.
+    /// Where a newly paired peer sits.
+    pub side: Side,
+    /// Also apply `side` to a peer paired before, as a new choice. Taken by
+    /// the first session, so a reconnect cannot override a later choice
+    /// made on the peer.
+    pub choose_side: &'a AtomicBool,
+    /// Whether this system shares its clipboard; may change mid-session.
     pub clipboard: &'a watch::Receiver<bool>,
-    /// Whether a waiting Mac advertises itself with Bonjour.
+    /// Whether a waiting system advertises itself with Bonjour.
     pub discoverable: &'a watch::Receiver<bool>,
 }
 
@@ -120,7 +206,7 @@ impl PairingGate {
     }
 }
 
-/// Wait for Macs to connect until the future is cancelled.
+/// Wait for peers to connect until the future is cancelled.
 pub async fn listen<P, O>(
     config: SessionConfig<'_>,
     bind: &str,
@@ -173,11 +259,11 @@ where
     }
 }
 
-/// Connect to the Mac at `address` and keep the session going: once a session
+/// Connect to the peer at `address` and keep the session going: once a session
 /// has run, reconnect and run the handshake again whenever it drops. The
-/// first connection is not retried, so a wrong address or a Mac not set up
+/// first connection is not retried, so a wrong address or a peer not set up
 /// yet is reported. Stops on anything a retry cannot fix: trust ended, a
-/// different Mac answering, or a local or setup error. Only the first
+/// different system answering, or a local or setup error. Only the first
 /// connection may pair; reconnecting never does.
 pub async fn connect<P, O>(
     config: SessionConfig<'_>,
@@ -190,10 +276,10 @@ where
     P: PairingPrompt + Send,
     O: ServiceObserver + Send,
 {
-    // a Mac chosen from those found on the network is already paired: check its key from the start
+    // a peer chosen from those found on the network is already paired: check its key from the start
     let mut expected = peer;
     let mut started = false;
-    // what to call the other Mac while reconnecting: where it was last reached
+    // what to call the peer while reconnecting: where it was last reached
     let mut last_reached = connect_address(address);
     let mut waits = reconnect::waits();
     loop {
@@ -203,7 +289,7 @@ where
         };
         let result = match locate(expected, address).await {
             Ok(address) => {
-                observer.connecting(&address);
+                observer.connecting(&address, peer_name(config.peers, expected).as_deref());
                 last_reached.clone_from(&address);
                 let (lasted, result) = connect_once(attempt, &address, &mut expected, prompt, observer).await;
                 started |= lasted.is_some();
@@ -215,10 +301,10 @@ where
             Err(error) => Err(error),
         };
         match result {
-            // the other Mac ended the session; wait for it to come back
+            // the peer ended the session; wait for it to come back
             Ok(()) => {}
             // Until a session has worked, a failure is more likely a wrong
-            // address or a Mac not set up yet than a network blip: say so.
+            // address or a peer not set up yet than a network blip: say so.
             Err(error) if !started => return Err(error),
             Err(error) if reconnect::retryable(&error) => {
                 tracing::info!(error = format!("{error:#}"), "connection lost; reconnecting");
@@ -226,12 +312,23 @@ where
             Err(error) => return Err(error),
         }
         let wait = waits.next().unwrap_or(Duration::from_secs(10));
-        observer.reconnecting(&last_reached, wait);
+        observer.reconnecting(&last_reached, peer_name(config.peers, expected).as_deref(), wait);
         tokio::time::sleep(wait).await;
     }
 }
 
-/// This Mac's Bonjour advertisement while waiting, if allowed. A failure to
+/// The side chosen for this start, for the first session only.
+fn take_side_choice(config: &SessionConfig<'_>) -> Option<Side> {
+    config.choose_side.swap(false, Ordering::AcqRel).then_some(config.side)
+}
+
+/// The name of the paired peer with `key`, if there is one.
+fn peer_name(peers: &PeerStore, key: Option<PublicKey>) -> Option<String> {
+    let key = key?;
+    peers.trusted(&key, trust::now()).ok().flatten().map(|peer| peer.name)
+}
+
+/// This system's Bonjour advertisement while waiting, if allowed. A failure to
 /// advertise is logged, not fatal: connecting by name or address still works.
 fn advertise(config: &SessionConfig<'_>, port: u16, pairing: &PairingGate, allowed: bool) -> Option<Advertiser> {
     if !allowed {
@@ -242,11 +339,11 @@ fn advertise(config: &SessionConfig<'_>, port: u16, pairing: &PairingGate, allow
         .ok()
 }
 
-/// How long each attempt looks for a paired Mac on the network before
+/// How long each attempt looks for a peer on the network before
 /// falling back to the saved address.
 const FIND_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Where to reach the Mac this attempt: found with Bonjour when its key is
+/// Where to reach the peer this attempt: found with Bonjour when its key is
 /// known, otherwise the saved name or address.
 async fn locate(peer: Option<PublicKey>, saved: &str) -> Result<String> {
     if let Some(key) = peer
@@ -256,7 +353,7 @@ async fn locate(peer: Option<PublicKey>, saved: &str) -> Result<String> {
     }
     if saved.trim().is_empty() {
         return Err(Unreachable {
-            address: "the paired Mac".to_owned(),
+            address: "the peer".to_owned(),
             source: std::io::ErrorKind::NotFound.into(),
         }
         .into());
@@ -265,12 +362,12 @@ async fn locate(peer: Option<PublicKey>, saved: &str) -> Result<String> {
 }
 
 /// Pairing is offered only until a session has started; reconnecting to that
-/// Mac never pairs, so a stranger at the same address cannot slip in.
+/// peer never pairs, so a stranger at the same address cannot slip in.
 fn pairing_for_attempt(pairing: Pairing, reconnecting: bool) -> Pairing {
     if reconnecting { None } else { pairing }
 }
 
-/// One connection: reach the Mac, run the Noise handshake, settle trust, and
+/// One connection: reach the peer, run the Noise handshake, settle trust, and
 /// run the session until it ends. Returns how long the session ran, if it
 /// started, with how it ended.
 async fn connect_once<P, O>(
@@ -304,7 +401,7 @@ where
             }
             .into());
         }
-        let (peer, _) = tokio::time::timeout(
+        let (peer, trust_status) = tokio::time::timeout(
             TRUST_TIMEOUT,
             settle_trust(
                 &mut channel,
@@ -317,9 +414,22 @@ where
         )
         .await
         .context("pairing or trust negotiation timed out")??;
+        if trust_status == Trust::NewlyPaired {
+            config
+                .peers
+                .agree_side(&channel.remote_key(), config.side, trust::now())?;
+        }
         *expected = Some(channel.remote_key());
         let started = tokio::time::Instant::now();
-        let session = run_session(channel, config.peers, &peer, config.drive, config.clipboard, observer).await;
+        let session = run_session(
+            channel,
+            config.peers,
+            &peer,
+            take_side_choice(&config),
+            config.clipboard,
+            observer,
+        )
+        .await;
         lasted = Some(started.elapsed());
         observer.disconnected(&peer);
         session
@@ -351,11 +461,24 @@ where
     .await
     .context("pairing or trust negotiation timed out")??;
     let pairing_was_open = pairing.is_open();
+    if trust_status == Trust::NewlyPaired {
+        config
+            .peers
+            .agree_side(&channel.remote_key(), config.side, trust::now())?;
+    }
     pairing.paired(trust_status);
     if pairing_was_open && !pairing.is_open() {
         observer.pairing_closed();
     }
-    run_session(channel, config.peers, &peer, config.drive, config.clipboard, observer).await?;
+    run_session(
+        channel,
+        config.peers,
+        &peer,
+        take_side_choice(config),
+        config.clipboard,
+        observer,
+    )
+    .await?;
     Ok(peer)
 }
 
@@ -381,10 +504,10 @@ where
 }
 
 async fn run_session<S, O>(
-    channel: Channel<S>,
+    mut channel: Channel<S>,
     peers: &PeerStore,
     peer: &str,
-    drive: Option<Side>,
+    chosen_side: Option<Side>,
     clipboard: &watch::Receiver<bool>,
     observer: &mut O,
 ) -> Result<()>
@@ -393,39 +516,65 @@ where
     O: ServiceObserver + Send,
 {
     let screen = macos::screen_bounds()?;
-    let mut sharing = Sharing::new(Pasteboard, clipboard.clone());
+    let initiator = channel.role() == crate::session::Role::Initiator;
     let key = channel.remote_key();
+    if let Some(side) = chosen_side {
+        peers.set_side(&key, side)?;
+    }
+    let local = peers
+        .trusted(&key, trust::now())?
+        .map_or((Side::Right, 0), |peer| (peer.side, peer.side_chosen));
+    channel
+        .send(&crate::protocol::Message::Layout {
+            side: local.0,
+            chosen: local.1,
+        })
+        .await?;
+    let remote = match tokio::time::timeout(Duration::from_secs(5), channel.recv())
+        .await
+        .context("the peer did not send its screen arrangement")??
+    {
+        crate::protocol::Message::Layout { side, chosen } => (side, chosen),
+        _ => anyhow::bail!("the peer runs a different version of Daisy; update Daisy on both systems"),
+    };
+    let (side, chosen) = crate::control::agreed_side(initiator, local, remote);
+    peers.agree_side(&key, side, chosen)?;
+    let mut sharing = Sharing::new(Pasteboard, clipboard.clone());
     let mut visit = peers.visit(key)?;
-    observer.connected(peer, key, drive);
-
-    let result = match drive {
-        Some(side) => {
-            let (messages, input) = mpsc::channel(INPUT_QUEUE_CAPACITY);
-            let (mut capture, overflowed) = Capture::start(screen, side, messages)?;
-            let until = async {
-                tokio::select! {
-                    error = peers.watch(key, peer) => error,
-                    _ = async {
-                        loop {
-                            if overflowed.load(Ordering::Acquire) {
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    } => anyhow::anyhow!("local input queue overloaded; control was reclaimed"),
+    observer.connected(peer, key, side);
+    let control = std::sync::Arc::new(crate::control::SharedControl::new(initiator));
+    let mut link = control.watch_link();
+    let mut injector = Injector::new();
+    let (messages, input) = mpsc::channel(INPUT_QUEUE_CAPACITY);
+    let (mut capture, overflowed) = Capture::start(screen, side, messages, control.clone())?;
+    let until = async {
+        tokio::select! {
+            error = peers.watch(key, peer) => error,
+            _ = async {
+                loop {
+                    if overflowed.load(Ordering::Acquire) { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            };
-            share::drive(channel, side, input, &mut capture, &mut sharing, until).await
+            } => anyhow::anyhow!("local input queue overloaded; control was reclaimed"),
         }
-        None => {
-            share::follow(
-                channel,
-                screen,
-                &mut Injector::new(),
-                &mut sharing,
-                peers.watch(key, peer),
-            )
-            .await
+    };
+    let session = share::together(
+        channel,
+        share::SharedLayout { screen, side, control },
+        input,
+        &mut capture,
+        &mut injector,
+        &mut sharing,
+        until,
+    );
+    tokio::pin!(session);
+    let result = loop {
+        tokio::select! {
+            result = &mut session => break result,
+            Ok(()) = link.changed() => {
+                let current = *link.borrow_and_update();
+                observer.link(peer, current);
+            }
         }
     };
     if let Err(error) = &result
@@ -501,7 +650,7 @@ mod tests {
     }
 
     impl ServiceObserver for Recorded {
-        fn reconnecting(&mut self, address: &str, wait: Duration) {
+        fn reconnecting(&mut self, address: &str, _peer: Option<&str>, wait: Duration) {
             self.waits.push(wait);
             self.reconnecting_to.push(address.to_owned());
         }
@@ -516,33 +665,48 @@ mod tests {
         }
     }
 
-    struct Mac {
+    struct System {
         _home: tempfile::TempDir,
         identity: Identity,
         peers: PeerStore,
     }
 
-    fn mac() -> Mac {
+    fn system() -> System {
         let home = tempfile::tempdir().unwrap();
         let peers = PeerStore::open(home.path()).unwrap();
-        Mac {
+        System {
             identity: Identity::generate().unwrap(),
             peers,
             _home: home,
         }
     }
 
-    fn config<'a>(mac: &'a Mac, clipboard: &'a watch::Receiver<bool>) -> SessionConfig<'a> {
+    fn config<'a>(system: &'a System, clipboard: &'a watch::Receiver<bool>) -> SessionConfig<'a> {
         let discoverable: &'a watch::Receiver<bool> = Box::leak(Box::new(watch::channel(false).1));
         SessionConfig {
-            identity: &mac.identity,
-            peers: &mac.peers,
+            identity: &system.identity,
+            peers: &system.peers,
             name: "Laptop",
             pairing: None,
-            drive: None,
+            side: Side::Right,
+            choose_side: Box::leak(Box::new(AtomicBool::new(false))),
             clipboard,
             discoverable,
         }
+    }
+
+    #[test]
+    fn a_chosen_side_applies_to_the_first_session_only() {
+        let system = system();
+        let clipboard = watch::channel(true).1;
+        let chosen = AtomicBool::new(true);
+        let config = SessionConfig {
+            side: Side::Above,
+            choose_side: &chosen,
+            ..config(&system, &clipboard)
+        };
+        assert_eq!(take_side_choice(&config), Some(Side::Above));
+        assert_eq!(take_side_choice(&config), None);
     }
 
     #[test]
@@ -553,7 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_mac_that_was_never_reached_is_reported_not_retried() {
+    async fn a_peer_that_was_never_reached_is_reported_not_retried() {
         let mut prompt = NoCodes;
         // a port that was just free: nothing is listening on it
         let port = TcpListener::bind("127.0.0.1:0")
@@ -562,7 +726,7 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let here = mac();
+        let here = system();
         let clipboard = watch::channel(true).1;
         let mut observer = Recorded::default();
         let address = format!("127.0.0.1:{port}");
@@ -576,11 +740,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_that_drops_is_reconnected() {
+    async fn a_trusted_connection_dropped_during_layout_is_reconnected() {
         let mut prompt = NoCodes;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let (here, there) = (mac(), mac());
+        let (here, there) = (system(), system());
         let now = trust::now();
         here.peers
             .pin(there.identity.public_key(), "Studio", Policy::Idle, now)
@@ -591,17 +755,13 @@ mod tests {
             .unwrap();
         let clipboard = watch::channel(true).1;
         let mut observer = Recorded::default();
-        // the other Mac takes the Host role and hangs up; then takes the next connection
+        // A trusted peer closes during layout agreement, then accepts again.
         let server = async {
             let mut sessions = 0;
             while sessions < 2 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut channel = Channel::respond(stream, &there.identity).await.unwrap();
                 establish_trust(&mut channel, &there.peers, "Studio", false, Policy::Idle, &mut NoCodes)
-                    .await
-                    .unwrap();
-                channel
-                    .send(&crate::protocol::Message::Drive { side: Side::Left })
                     .await
                     .unwrap();
                 sessions += 1;
@@ -613,7 +773,9 @@ mod tests {
             Duration::from_secs(8),
             connect(config(&here, &clipboard), &address, None, &mut prompt, &mut observer),
         );
-        let (sessions, _) = tokio::join!(server, client);
+        let (sessions, _) = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(server, client) })
+            .await
+            .unwrap();
         assert_eq!(sessions, 2);
         assert!(!observer.waits.is_empty());
         assert!(
@@ -623,15 +785,15 @@ mod tests {
         );
     }
 
-    // Uses the real network stack: the waiting Mac advertises with Bonjour
+    // Uses the real network stack: the waiting system advertises with Bonjour
     // and the other finds it from its key alone, with no address.
     #[tokio::test]
     #[ignore = "uses the local network; run by hand with --ignored"]
-    async fn a_paired_mac_is_found_and_connected_without_an_address() {
+    async fn a_paired_peer_is_found_and_connected_without_an_address() {
         let mut prompt = NoCodes;
         let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (here, there) = (mac(), mac());
+        let (here, there) = (system(), system());
         let now = trust::now();
         here.peers
             .pin(there.identity.public_key(), "Studio", Policy::Idle, now)
@@ -663,22 +825,22 @@ mod tests {
         );
         let (peer, _) = tokio::time::timeout(Duration::from_secs(12), async { tokio::join!(server, client) })
             .await
-            .expect("the paired Mac was never reached");
+            .expect("the peer was never reached");
         assert_eq!(peer, "Laptop");
     }
 
     #[tokio::test]
-    async fn a_mac_that_no_longer_trusts_this_one_stops_the_retries() {
+    async fn a_peer_that_no_longer_trusts_this_one_stops_the_retries() {
         let mut prompt = NoCodes;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let there = mac();
+        let there = system();
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
             let mut channel = Channel::respond(stream, &there.identity).await.unwrap();
             let _ = establish_trust(&mut channel, &there.peers, "Studio", false, Policy::Idle, &mut NoCodes).await;
         };
-        let here = mac();
+        let here = system();
         let clipboard = watch::channel(true).1;
         let mut observer = Recorded::default();
         let client = tokio::time::timeout(
@@ -692,17 +854,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_different_mac_at_the_address_is_refused() {
+    async fn a_different_peer_at_the_address_is_refused() {
         let mut prompt = NoCodes;
         let mut observer = Recorded::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let impostor = mac();
+        let impostor = system();
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
             let _ = Channel::respond(stream, &impostor.identity).await;
         };
-        let here = mac();
+        let here = system();
         let clipboard = watch::channel(true).1;
         let mut expected = Some(Identity::generate().unwrap().public_key());
         let client = connect_once(

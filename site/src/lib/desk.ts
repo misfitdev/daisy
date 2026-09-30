@@ -32,7 +32,7 @@ const MIN_OVERLAP = 90;
 const BEZEL: Record<Kind, number> = { desktop: 13, laptop: 11 };
 
 export function initialState(): DeskState {
-  const home: Screen = { id: "a", kind: "desktop", x: 0, y: 0, w: 620, h: 360, label: "This Mac", planned: false };
+  const home: Screen = { id: "a", kind: "desktop", x: 0, y: 0, w: 620, h: 360, label: "This system", planned: false };
   const laptop: Screen = { id: "b", kind: "laptop", x: 620 + GAP, y: 40, w: 470, h: 300, label: "Laptop", planned: false };
   const inner = interior(home);
   return {
@@ -90,7 +90,7 @@ export type Step =
 
 /**
  * Move the pointer by a delta inside the active screen. Pushing through an
- * edge with a Mac beyond it moves control there; a held button never crosses.
+ * edge with a peer beyond it moves control there; a held button never crosses.
  * One neighbor on an edge maps proportionally, as the product does today.
  */
 export function step(state: DeskState, dx: number, dy: number, held: boolean): Step {
@@ -165,7 +165,7 @@ export function step(state: DeskState, dx: number, dy: number, held: boolean): S
   return { kind: "crossed", from, to: target.id };
 }
 
-/** Control-Option-Command-Escape: control returns to the Mac with the keyboard. */
+/** Control-Option-Command-Escape: control returns to the system you are at. */
 export function reclaim(state: DeskState): string | null {
   if (state.active === state.home) return null;
   const from = state.active;
@@ -253,7 +253,7 @@ export function snap(state: DeskState, id: string, x: number, y: number, origin:
 export function addScreen(state: DeskState): Screen | null {
   if (state.screens.length >= MAX_SCREENS) return null;
   const id = String.fromCharCode(97 + state.screens.length);
-  const s: Screen = { id, kind: "desktop", x: 0, y: 0, w: 500, h: 300, label: "Another Mac · planned", planned: true };
+  const s: Screen = { id, kind: "desktop", x: 0, y: 0, w: 500, h: 300, label: "Another system · planned", planned: true };
   const last = state.screens[state.screens.length - 1];
   const order = [last, ...state.screens.filter((o) => o !== last)];
   for (const o of order) {
@@ -276,7 +276,7 @@ export function addScreen(state: DeskState): Screen | null {
   return null;
 }
 
-/** Where the other Macs sit relative to the Mac with the keyboard. */
+/** Where the peers sit relative to the system you are at. */
 export function homeSides(state: DeskState): Side[] {
   const home = byId(state, state.home);
   return state.screens.flatMap((o) => {

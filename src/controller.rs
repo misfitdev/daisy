@@ -8,6 +8,7 @@ use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
@@ -21,45 +22,31 @@ use crate::input::Side;
 use crate::pairing::{PairingCode, PairingPrompt};
 use crate::peers::{Peer, PeerStore};
 use crate::service::{self, ServiceObserver};
+use crate::session::{Mismatch, SessionError};
 use crate::trust::{self, Policy};
 
 const SETTINGS_FILE: &str = "settings.toml";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum Connection {
-    Listen {
-        #[serde(default = "default_bind")]
-        bind: String,
-        #[serde(default = "default_port")]
-        port: u16,
-    },
+    #[default]
+    Automatic,
     Connect {
         address: String,
-        /// The paired Mac's key when it was picked from those found on the
+        /// The peer's key when it was picked from those found on the
         /// network; each attempt then finds it wherever it is now.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer: Option<String>,
     },
 }
 
-impl Default for Connection {
-    fn default() -> Self {
-        Self::Listen {
-            bind: default_bind(),
-            port: service::DEFAULT_PORT,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSettings {
     #[serde(flatten)]
     pub connection: Connection,
-    /// `Some` means this system drives the peer through that edge.
-    /// `None` means this system follows the peer.
-    #[serde(default)]
-    pub drive: Option<Side>,
+    /// Where the peer sits relative to this system.
+    pub side: Side,
     #[serde(default)]
     pub trust: Policy,
 }
@@ -68,7 +55,7 @@ impl Default for SessionSettings {
     fn default() -> Self {
         Self {
             connection: Connection::default(),
-            drive: Some(Side::Right),
+            side: Side::Right,
             trust: Policy::default(),
         }
     }
@@ -81,7 +68,7 @@ pub struct AppSettings {
     /// Send and receive the clipboard when control crosses.
     #[serde(default = "default_share_clipboard")]
     pub share_clipboard: bool,
-    /// Advertise this Mac with Bonjour while it waits for a connection.
+    /// Advertise this system with Bonjour while it waits for a connection.
     #[serde(default = "default_discoverable")]
     pub discoverable: bool,
 }
@@ -109,6 +96,8 @@ pub enum Command {
     Start {
         settings: SessionSettings,
         allow_pairing: bool,
+        /// The screen edge was chosen for this start, rather than left as saved.
+        side_chosen: bool,
     },
     Stop,
     Forget {
@@ -133,19 +122,23 @@ pub enum Status {
     Waiting {
         port: u16,
         pairing: bool,
+        /// The one paired peer, when there is exactly one to wait for.
+        looking_for: Option<String>,
     },
     Connecting {
         address: String,
+        peer: Option<String>,
     },
     /// The connection was lost or could not be made; trying again in `wait`.
     Reconnecting {
         address: String,
+        peer: Option<String>,
         wait: std::time::Duration,
     },
     Connected {
         peer: String,
         key: PublicKey,
-        drive: Option<Side>,
+        side: Side,
     },
     Problem {
         summary: String,
@@ -181,14 +174,16 @@ pub enum Event {
         title: String,
         detail: String,
     },
-    /// Paired Macs, and Macs open to pairing, found on the network.
+    /// Peers, and systems open to pairing, found on the network.
     Nearby(Vec<Nearby>),
+    /// Latency or who has control changed in the running session.
+    Link(crate::control::Link),
 }
 
-/// A Mac found on the network, as the interface shows it.
+/// A system found on the network, as the interface shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nearby {
-    /// The paired Mac's name, or `None` for a Mac open to pairing.
+    /// The peer's name, or `None` for a system open to pairing.
     pub name: Option<String>,
     pub key: Option<PublicKey>,
     pub address: String,
@@ -241,7 +236,7 @@ pub fn spawn(home: PathBuf, name: String) -> Result<Handle> {
 
 async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedReceiver<Command>, events: Sender<Event>) {
     let first_run = !home.join(SETTINGS_FILE).exists();
-    let settings = load_settings(&home).unwrap_or_else(|error| {
+    let mut settings = load_settings(&home).unwrap_or_else(|error| {
         tracing::error!(error = ?error, "saved setup could not be read");
         let _ = send_problem(
             &events,
@@ -259,6 +254,14 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
         );
         Vec::new()
     });
+    let arranged = match &settings.last_session.connection {
+        Connection::Connect { peer: Some(key), .. } => peers.iter().find(|p| p.key.to_hex() == *key),
+        _ if peers.len() == 1 => peers.first(),
+        _ => None,
+    };
+    if let Some(side) = arranged.map(|peer| peer.side) {
+        settings.last_session.side = side;
+    }
     let mut stored = settings.clone();
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
     let (share_discoverable, discoverable) = watch::channel(stored.discoverable);
@@ -280,6 +283,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             Command::Start {
                 settings,
                 allow_pairing,
+                side_chosen,
             } => {
                 if let Some(running) = session.take() {
                     running.abort();
@@ -301,11 +305,15 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 let session_clipboard = clipboard.clone();
                 let session_discoverable = discoverable.clone();
                 session = Some(tokio::spawn(async move {
+                    let start = Start {
+                        settings,
+                        allow_pairing,
+                        side_chosen,
+                    };
                     run_session(
                         session_home,
                         session_name,
-                        settings,
-                        allow_pairing,
+                        start,
                         session_clipboard,
                         session_discoverable,
                         session_events,
@@ -398,27 +406,27 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     }
 }
 
-/// How often the Nearby list re-reads which Macs are trusted, so a Mac
+/// How often the Nearby list re-reads which peers are trusted, so a peer
 /// forgotten, re-trusted, newly paired or expired is shown correctly even
 /// when the network is quiet.
 const NEARBY_TRUST_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The Nearby list for the Macs heard on the network, given this Mac's
-/// paired Macs now. Only trusted Macs are named; others appear only while
+/// The Nearby list for the systems heard on the network, given this system's
+/// peers now. Only trusted peers are named; others appear only while
 /// open to pairing.
 fn nearby(found: Vec<discovery::Found>, peers: &[Peer]) -> Vec<Nearby> {
     let mut nearby: Vec<Nearby> = found
         .into_iter()
-        .map(|mac| match mac.seen {
+        .map(|heard| match heard.seen {
             discovery::Seen::Paired(key) => Nearby {
                 name: peers.iter().find(|peer| peer.key == key).map(|peer| peer.name.clone()),
                 key: Some(key),
-                address: mac.address.to_string(),
+                address: heard.address.to_string(),
             },
             discovery::Seen::Pairing => Nearby {
                 name: None,
                 key: None,
-                address: mac.address.to_string(),
+                address: heard.address.to_string(),
             },
         })
         .collect();
@@ -426,8 +434,8 @@ fn nearby(found: Vec<discovery::Found>, peers: &[Peer]) -> Vec<Nearby> {
     nearby
 }
 
-/// Reports the Macs found on the network whenever that list changes, from
-/// either the network or this Mac's trust.
+/// Reports the systems found on the network whenever that list changes, from
+/// either the network or this system's trust.
 async fn browse_nearby(home: PathBuf, events: Sender<Event>) {
     let mut browser = match discovery::Browser::start() {
         Ok(browser) => browser,
@@ -456,20 +464,33 @@ async fn browse_nearby(home: PathBuf, events: Sender<Event>) {
     }
 }
 
+/// One press of Start, as `Command::Start` carries it.
+struct Start {
+    settings: SessionSettings,
+    allow_pairing: bool,
+    side_chosen: bool,
+}
+
 async fn run_session(
     home: PathBuf,
     name: String,
-    settings: SessionSettings,
-    allow_pairing: bool,
+    start: Start,
     clipboard: watch::Receiver<bool>,
     discoverable: watch::Receiver<bool>,
     events: Sender<Event>,
 ) {
+    let Start {
+        settings,
+        allow_pairing,
+        side_chosen,
+    } = start;
     let result = async {
         let identity = Identity::load_or_create(&home.join("identity"))?;
         let peers = PeerStore::open(&home)?;
+        let choose_side = AtomicBool::new(side_chosen);
         let mut prompt = ControllerPrompt { events: events.clone() };
         let mut observer = ControllerObserver {
+            told_version: None,
             events: events.clone(),
             home: home.clone(),
             waiting: None,
@@ -480,12 +501,13 @@ async fn run_session(
             peers: &peers,
             name: &name,
             pairing,
-            drive: settings.drive,
+            side: settings.side,
+            choose_side: &choose_side,
             clipboard: &clipboard,
             discoverable: &discoverable,
         };
         match settings.connection {
-            Connection::Listen { bind, port } => service::listen(config, &bind, port, &mut prompt, &mut observer).await,
+            Connection::Automatic => service::automatic(config, &mut prompt, &mut observer).await,
             Connection::Connect { address, peer } => {
                 let peer = peer.as_deref().and_then(PublicKey::from_hex);
                 service::connect(config, &address, peer, &mut prompt, &mut observer).await
@@ -500,7 +522,10 @@ async fn run_session(
         }
         Err(error) => {
             tracing::error!(error = ?error, "connection session stopped");
-            let _ = send_problem(&events, "Connection stopped", recovery_for(&error));
+            let _ = match version_copy(&home, &error) {
+                Some((title, detail)) => send_problem(&events, &title, detail),
+                None => send_problem(&events, "Connection stopped", recovery_for(&error)),
+            };
         }
     }
 }
@@ -532,53 +557,71 @@ impl PairingPrompt for ControllerPrompt {
 }
 
 struct ControllerObserver {
+    /// The version mismatch last reported, so a retry does not repeat it.
+    told_version: Option<(String, String)>,
     events: Sender<Event>,
     home: PathBuf,
     waiting: Option<(u16, bool)>,
 }
 
+impl ControllerObserver {
+    fn send_waiting(&self, port: u16, pairing: bool) {
+        let peers = list_peers(&self.home).unwrap_or_default();
+        let looking_for = match peers.as_slice() {
+            [only] => Some(only.name.clone()),
+            _ => None,
+        };
+        let _ = self.events.send(Event::Status(Status::Waiting {
+            port,
+            pairing,
+            looking_for,
+        }));
+    }
+}
+
 impl ServiceObserver for ControllerObserver {
     fn waiting(&mut self, _name: &str, _key: PublicKey, port: u16, pairing: Option<Policy>) {
         self.waiting = Some((port, pairing.is_some()));
-        let _ = self.events.send(Event::Status(Status::Waiting {
-            port,
-            pairing: pairing.is_some(),
-        }));
+        self.send_waiting(port, pairing.is_some());
     }
 
-    fn connecting(&mut self, address: &str) {
+    fn connecting(&mut self, address: &str, peer: Option<&str>) {
         let _ = self.events.send(Event::Status(Status::Connecting {
             address: address.to_owned(),
+            peer: peer.map(str::to_owned),
         }));
     }
 
-    fn reconnecting(&mut self, address: &str, wait: std::time::Duration) {
+    fn reconnecting(&mut self, address: &str, peer: Option<&str>, wait: std::time::Duration) {
         let _ = self.events.send(Event::Status(Status::Reconnecting {
             address: address.to_owned(),
+            peer: peer.map(str::to_owned),
             wait,
         }));
     }
 
-    fn connected(&mut self, peer: &str, key: PublicKey, drive: Option<Side>) {
+    fn link(&mut self, _peer: &str, link: crate::control::Link) {
+        let _ = self.events.send(Event::Link(link));
+    }
+
+    fn connected(&mut self, peer: &str, key: PublicKey, side: Side) {
         let _ = self.events.send(Event::Status(Status::Connected {
             peer: peer.to_owned(),
             key,
-            drive,
+            side,
         }));
     }
 
     fn disconnected(&mut self, _peer: &str) {
         if let Some((port, pairing)) = self.waiting {
-            let _ = self.events.send(Event::Status(Status::Waiting { port, pairing }));
+            self.send_waiting(port, pairing);
         }
     }
 
     fn pairing_closed(&mut self) {
         if let Some((port, _)) = self.waiting {
             self.waiting = Some((port, false));
-            let _ = self
-                .events
-                .send(Event::Status(Status::Waiting { port, pairing: false }));
+            self.send_waiting(port, false);
         }
     }
 
@@ -594,6 +637,15 @@ impl ServiceObserver for ControllerObserver {
 
     fn connection_failed(&mut self, address: &str, error: &anyhow::Error) {
         tracing::warn!(address, error = ?error, "incoming connection ended");
+        if let Some(copy) = version_copy(&self.home, error) {
+            // automatic mode retries every few seconds; say it once
+            if self.told_version.as_ref() != Some(&copy) {
+                self.told_version = Some(copy.clone());
+                let (title, detail) = copy;
+                let _ = self.events.send(Event::Notice { title, detail });
+            }
+            return;
+        }
         let _ = self.events.send(Event::Notice {
             title: "A peer could not connect".to_owned(),
             detail: format!(
@@ -629,18 +681,48 @@ fn set_trust(home: &Path, selector: &str, policy: Policy) -> Result<(String, Vec
     Ok((peer, store.list(trust::now())?))
 }
 
+/// What to tell a person when the peer runs another protocol version: a
+/// title, and which versions run where and which system to update.
+fn version_copy(home: &Path, error: &anyhow::Error) -> Option<(String, String)> {
+    let mismatch = error
+        .chain()
+        .find_map(|cause| match cause.downcast_ref::<SessionError>() {
+            Some(SessionError::VersionMismatch(mismatch)) => Some(mismatch),
+            _ => None,
+        })?;
+    let name = PeerStore::open(home)
+        .and_then(|peers| peers.trusted(&mismatch.peer_key, trust::now()))
+        .ok()
+        .flatten()
+        .map(|peer| peer.name);
+    Some(mismatch_copy(mismatch, name.as_deref()))
+}
+
+fn mismatch_copy(mismatch: &Mismatch, name: Option<&str>) -> (String, String) {
+    let peer = name.unwrap_or("The peer");
+    let title = format!("{peer} runs a different version of Daisy");
+    let update = if mismatch.update_here() {
+        "this system".to_owned()
+    } else {
+        name.unwrap_or("the peer").to_owned()
+    };
+    let detail = format!(
+        "{peer} runs Daisy {} (protocol {}). This system runs Daisy {} (protocol {}). Update Daisy on {update} to connect.",
+        mismatch.peer.app, mismatch.peer.protocol, mismatch.local.app, mismatch.local.protocol
+    );
+    (title, detail)
+}
+
 fn recovery_for(error: &anyhow::Error) -> String {
     let message = format!("{error:#}");
-    if message.contains("different Mac answered") {
-        "Check the address. To use that Mac, pair with it on purpose.".to_owned()
+    if message.contains("different system answered") {
+        "Check the address. To use that system, pair with it on purpose.".to_owned()
     } else if message.contains("not paired") || message.contains("trust") {
         "Pair the systems again.".to_owned()
     } else if message.contains("refused the input tap") {
         "Quit and reopen Daisy. If it still fails, choose Reset Permissions in the Daisy menu.".to_owned()
     } else if message.contains("Permission") || message.contains("permission") {
         "Open Daisy and grant the missing macOS permission.".to_owned()
-    } else if message.contains("not driving") || message.contains("set to drive") || message.contains("set as Host") {
-        "Choose Host on exactly one system and Guest on the other.".to_owned()
     } else if message.contains("connecting") {
         "Check that the other system is awake, waiting, and on the same network.".to_owned()
     } else {
@@ -705,27 +787,22 @@ fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
     Ok(())
 }
 
-fn default_bind() -> String {
-    "0.0.0.0".to_owned()
-}
-
-const fn default_port() -> u16 {
-    service::DEFAULT_PORT
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn nearby_names_only_trusted_macs() {
+    fn nearby_names_only_trusted_peers() {
         let studio = Identity::generate().unwrap().public_key();
         let address: std::net::SocketAddr = "192.168.1.9:24850".parse().unwrap();
         let found = vec![discovery::Found {
+            election: [0; 16],
             seen: discovery::Seen::Paired(studio),
             address,
         }];
         let peer = Peer {
+            side: Side::Right,
+            side_chosen: 0,
             name: "Studio".into(),
             key: studio,
             policy: Policy::Idle,
@@ -735,7 +812,7 @@ mod tests {
         let list = nearby(found.clone(), &[peer]);
         assert_eq!(list[0].name.as_deref(), Some("Studio"));
         assert_eq!(list[0].address, "192.168.1.9:24850");
-        // a key that is no longer among the paired Macs is never named
+        // a key that is no longer among the peers is never named
         assert_eq!(nearby(found, &[])[0].name, None);
     }
     use std::os::unix::fs::PermissionsExt;
@@ -745,7 +822,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let defaults = load_settings(directory.path()).unwrap();
         assert_eq!(defaults, AppSettings::default());
-        assert_eq!(defaults.last_session.drive, Some(Side::Right));
+        assert_eq!(defaults.last_session.side, Side::Right);
         assert_eq!(defaults.last_session.trust, Policy::Idle);
 
         let settings = AppSettings {
@@ -754,7 +831,7 @@ mod tests {
                     address: "studio.local".to_owned(),
                     peer: Some("00".repeat(32)),
                 },
-                drive: None,
+                side: Side::Right,
                 trust: Policy::Days(30),
             },
             share_clipboard: false,
@@ -773,23 +850,38 @@ mod tests {
     }
 
     #[test]
-    fn settings_saved_before_clipboard_sharing_load_with_it_on() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::write(
-            directory.path().join(SETTINGS_FILE),
-            "[last_session]\nmode = \"connect\"\naddress = \"studio.local\"\n",
-        )
-        .unwrap();
-        let loaded = load_settings(directory.path()).unwrap();
-        assert!(loaded.share_clipboard);
-        assert!(loaded.discoverable);
+    fn a_version_mismatch_says_which_system_to_update() {
+        use crate::session::Version;
+        let mismatch = Mismatch {
+            peer_key: Identity::generate().unwrap().public_key(),
+            peer: Version {
+                protocol: 3,
+                app: "0.1.3".to_owned(),
+            },
+            local: Version {
+                protocol: 2,
+                app: "0.1.2".to_owned(),
+            },
+        };
+        let (title, detail) = mismatch_copy(&mismatch, Some("Studio"));
+        assert_eq!(title, "Studio runs a different version of Daisy");
         assert_eq!(
-            loaded.last_session.connection,
-            Connection::Connect {
-                address: "studio.local".to_owned(),
-                peer: None,
-            }
+            detail,
+            "Studio runs Daisy 0.1.3 (protocol 3). This system runs Daisy 0.1.2 (protocol 2). Update Daisy on this system to connect."
         );
+        let newer_here = Mismatch {
+            peer: mismatch.local.clone(),
+            local: mismatch.peer.clone(),
+            ..mismatch
+        };
+        let (title, detail) = mismatch_copy(&newer_here, None);
+        assert_eq!(title, "The peer runs a different version of Daisy");
+        assert!(detail.ends_with("Update Daisy on the peer to connect."));
+
+        let wrapped = anyhow::Error::from(SessionError::VersionMismatch(Box::new(newer_here))).context("connecting");
+        let home = tempfile::tempdir().unwrap();
+        assert!(version_copy(home.path(), &wrapped).is_some());
+        assert!(version_copy(home.path(), &anyhow::anyhow!("connecting failed")).is_none());
     }
 
     #[test]
@@ -806,23 +898,17 @@ mod tests {
 
         let tap = anyhow::anyhow!("macOS refused the input tap: Daisy needs Accessibility and Input Monitoring");
         assert!(recovery_for(&tap).starts_with("Quit and reopen Daisy"));
-
-        let roles = anyhow::anyhow!("the other system is not driving");
-        assert_eq!(
-            recovery_for(&roles),
-            "Choose Host on exactly one system and Guest on the other."
-        );
     }
 
     #[tokio::test]
     async fn closing_pairing_prompt_cancels_pairing() {
         let (events, received) = mpsc::channel();
         let mut prompt = ControllerPrompt { events };
-        let answer = prompt.ask_code("Studio Mac");
+        let answer = prompt.ask_code("Studio");
         let Event::AskPairingCode { peer, reply } = received.recv().unwrap() else {
             panic!("expected a pairing-code request");
         };
-        assert_eq!(peer, "Studio Mac");
+        assert_eq!(peer, "Studio");
         drop(reply);
 
         assert!(answer.await.is_err());
@@ -836,6 +922,7 @@ mod tests {
             .unwrap()
             .public_key();
         let mut observer = ControllerObserver {
+            told_version: None,
             events,
             home: directory.path().to_owned(),
             waiting: None,

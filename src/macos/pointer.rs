@@ -6,9 +6,14 @@
 //! repairs a pointer left large by a crash.
 
 use std::ffi::{CStr, c_void};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use objc2::sel;
+use objc2_app_kit::NSCursor;
+use objc2_foundation::NSObjectNSThreadPerformAdditions;
 
 use super::ffi::*;
 use crate::shake::{HOLD, Zoom};
@@ -33,6 +38,7 @@ impl Magnifier {
         let thread = thread::Builder::new()
             .name("daisy-pointer".into())
             .spawn(move || {
+                super::set_cursor_in_background();
                 while requests.recv().is_ok() {
                     if !magnify(&requests) {
                         break;
@@ -88,10 +94,33 @@ fn magnify(requests: &mpsc::Receiver<()>) -> bool {
         let shaking = now - last_shake < HOLD;
         set_scale(zoom.step(shaking, now - last_frame));
         last_frame = now;
+        // macOS keeps its own enlarged pointer an arrow; apps would otherwise
+        // swap in their hand or I-beam as it passes over them
+        if !zoom.at_rest() && MAIN_RUN_LOOP.load(Ordering::Acquire) {
+            hold_arrow();
+        }
         if !shaking && zoom.at_rest() {
             return true;
         }
     }
+}
+
+/// Whether the main thread runs an AppKit run loop. Work queued for the main
+/// thread without one is never run or freed.
+static MAIN_RUN_LOOP: AtomicBool = AtomicBool::new(false);
+
+/// Call just before the main thread starts its AppKit run loop.
+pub fn main_run_loop_starting() {
+    MAIN_RUN_LOOP.store(true, Ordering::Release);
+}
+
+/// Shows the arrow cursor, whichever app is under the pointer. Frequent calls
+/// win over apps that set their own cursor as it moves.
+fn hold_arrow() {
+    let arrow = NSCursor::arrowCursor();
+    // SAFETY: `set` takes no argument; AppKit runs it on the main thread,
+    // where cursor changes belong
+    unsafe { arrow.performSelectorOnMainThread_withObject_waitUntilDone(sel!(set), None, false) };
 }
 
 /// Put the pointer back to the size chosen in Accessibility settings.

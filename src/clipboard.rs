@@ -53,7 +53,7 @@ fn limit(kind: ClipboardKind) -> usize {
     }
 }
 
-/// Decides whether this Mac's clipboard goes out when control crosses, and
+/// Decides whether this system's clipboard goes out when control crosses, and
 /// turns it into parts.
 #[derive(Debug, Default)]
 pub struct Outbox {
@@ -197,14 +197,14 @@ impl Inbox {
     }
 }
 
-/// One Mac's side of clipboard sharing in a session: this Mac's clipboard,
+/// One side of clipboard sharing in a session: this system's clipboard,
 /// what it has sent and received, and whether sharing is switched on.
 pub struct Sharing<C> {
     clipboard: C,
     enabled: watch::Receiver<bool>,
     outbox: Outbox,
     inbox: Inbox,
-    /// Control just crossed to this Mac, so one snapshot from the peer is due.
+    /// Control just crossed to this system, so one snapshot from the peer is due.
     expecting: bool,
     /// A due snapshot is arriving.
     receiving: bool,
@@ -226,7 +226,7 @@ impl<C: Clipboard> Sharing<C> {
         &self.clipboard
     }
 
-    /// Control is leaving this Mac. Returns the work of reading the clipboard
+    /// Control is leaving this system. Returns the work of reading the clipboard
     /// and splitting it into parts, to run off the session loop: a large image
     /// takes long enough to read and convert that input would stall behind it.
     pub fn crossing(&mut self) -> Option<impl FnOnce() -> Vec<ClipboardPart> + Send + 'static> {
@@ -238,13 +238,13 @@ impl<C: Clipboard> Sharing<C> {
         Some(move || clipboard.read().map(|c| parts(first, &c)).unwrap_or_default())
     }
 
-    /// Control has crossed to this Mac; the peer's clipboard follows.
+    /// Control has crossed to this system; the peer's clipboard follows.
     pub fn expect_snapshot(&mut self) {
         self.expecting = true;
     }
 
     /// A part arrived from the peer. Only a snapshot that follows a crossing
-    /// to this Mac is accepted, so the peer cannot replace this clipboard at
+    /// to this system is accepted, so the peer cannot replace this clipboard at
     /// other times. A completed one is written if sharing is on.
     pub fn receive(&mut self, part: ClipboardPart) {
         if !self.receiving {
@@ -384,7 +384,7 @@ mod tests {
     fn what_arrived_from_the_peer_is_not_sent_back() {
         let mut clipboard = Fake::default();
         let mut outbox = Outbox::default();
-        let count = clipboard.write(&text("from the other Mac"));
+        let count = clipboard.write(&text("from the peer"));
         outbox.wrote(count);
         assert!(outbox.take(&clipboard).is_empty());
         clipboard.copy(text("copied here afterwards"));
@@ -540,7 +540,7 @@ mod tests {
         (Sharing::new(clipboard, enabled), on)
     }
 
-    /// The parts this Mac would send as control leaves it.
+    /// The parts this system would send as control leaves it.
     fn outgoing(sharing: &mut Sharing<Fake>) -> Vec<ClipboardPart> {
         sharing.crossing().map(|read| read()).unwrap_or_default()
     }
@@ -562,7 +562,7 @@ mod tests {
         let (mut here, on_here) = sharing(Some(text("secret")));
         on_here.send_replace(false);
         assert!(outgoing(&mut here).is_empty());
-        let (mut other, _on) = sharing(Some(text("from the other Mac")));
+        let (mut other, _on) = sharing(Some(text("from the peer")));
         here.expect_snapshot();
         for part in outgoing(&mut other) {
             here.receive(part);

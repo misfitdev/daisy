@@ -1,4 +1,4 @@
-//! macOS side of input sharing: reading input on the Mac with the keyboard
+//! macOS side of input sharing: reading input on the system with the keyboard
 //! and replaying it on the other.
 
 pub mod capture;
@@ -13,9 +13,27 @@ use anyhow::{Result, bail};
 
 /// Undo a pointer left enlarged by a Daisy that crashed while the
 /// pointer was being shaken.
-pub use pointer::restore as restore_pointer;
+pub use pointer::{main_run_loop_starting, restore as restore_pointer};
 
 use crate::input::Rect;
+
+/// Lets this app change the cursor while another app is in front. A private
+/// window-server property; the Dock still controls the cursor over the Dock.
+pub(crate) fn set_cursor_in_background() {
+    // SAFETY: the string is created and released here; the other calls take plain values
+    unsafe {
+        let key = ffi::CFStringCreateWithCString(
+            std::ptr::null(),
+            c"SetsCursorInBackground".as_ptr(),
+            ffi::kCFStringEncodingUTF8,
+        );
+        if !key.is_null() {
+            let connection = ffi::_CGSDefaultConnection();
+            ffi::CGSSetConnectionProperty(connection, connection, key, ffi::kCFBooleanTrue);
+            ffi::CFRelease(key);
+        }
+    }
+}
 
 /// The area covered by all active displays, in global coordinates.
 ///

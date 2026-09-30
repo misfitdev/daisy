@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -15,13 +16,13 @@ use daisy::service::{self, ServiceObserver};
 use daisy::trust::{self, Policy, Timestamp};
 
 #[derive(Parser)]
-#[command(version, about = "Share one keyboard, mouse and trackpad swipes between Macs")]
+#[command(version, about = "Share one keyboard, mouse and trackpad swipes between systems")]
 struct Cli {
-    /// Directory holding this Mac's key and its paired Macs
+    /// Directory holding this system's key and its peers
     #[arg(long, env = "DAISY_HOME", global = true)]
     home: Option<PathBuf>,
 
-    /// Name shown to the other Mac [default: this Mac's name]
+    /// Name shown to the peer [default: this system's name]
     #[arg(long, global = true)]
     name: Option<String>,
 
@@ -32,9 +33,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Show this Mac's name and key fingerprint
+    /// Show this system's name and key fingerprint
     Id,
-    /// Wait for another Mac to connect
+    /// Wait for a peer to connect
     Listen {
         /// Address to listen on
         #[arg(long, default_value = "0.0.0.0")]
@@ -42,42 +43,44 @@ enum Command {
         /// TCP port to listen on
         #[arg(long, default_value_t = service::DEFAULT_PORT)]
         port: u16,
-        /// Allow pairing with a Mac this one does not know yet
+        /// Allow pairing with a peer this system does not know yet
         #[arg(long)]
         pair: bool,
-        /// How long to trust a Mac paired now
+        /// How long to trust a peer paired now
         #[arg(long, default_value = "idle", value_name = "POLICY")]
         trust: Policy,
-        /// Share this Mac's keyboard and mouse; the other Mac sits on this side
+        /// Where the peer's screen sits; defaults to the saved arrangement,
+        /// or right for a peer paired now
         #[arg(long, value_name = "SIDE")]
-        drive: Option<Side>,
+        side: Option<Side>,
         /// Do not share the clipboard when control crosses
         #[arg(long)]
         no_clipboard: bool,
-        /// Do not advertise this Mac with Bonjour while waiting
+        /// Do not advertise this system with Bonjour while waiting
         #[arg(long)]
         no_discovery: bool,
     },
-    /// Connect to another Mac
+    /// Connect to a peer
     Connect {
         /// Host name or address, optionally followed by :port
         address: String,
-        /// Allow pairing with a Mac this one does not know yet
+        /// Allow pairing with a peer this system does not know yet
         #[arg(long)]
         pair: bool,
-        /// How long to trust a Mac paired now
+        /// How long to trust a peer paired now
         #[arg(long, default_value = "idle", value_name = "POLICY")]
         trust: Policy,
-        /// Share this Mac's keyboard and mouse; the other Mac sits on this side
+        /// Where the peer's screen sits; defaults to the saved arrangement,
+        /// or right for a peer paired now
         #[arg(long, value_name = "SIDE")]
-        drive: Option<Side>,
+        side: Option<Side>,
         /// Do not share the clipboard when control crosses
         #[arg(long)]
         no_clipboard: bool,
     },
-    /// List paired Macs and how long each stays trusted
+    /// List peers and how long each stays trusted
     Peers,
-    /// Change how long a paired Mac stays trusted
+    /// Change how long a peer stays trusted
     Trust {
         /// Name or fingerprint, shown by `peers`
         peer: String,
@@ -90,16 +93,16 @@ enum Command {
         #[arg(long)]
         request: bool,
     },
-    /// Stop trusting paired Macs, ending any session with them at once
+    /// Stop trusting peers, ending any session with them at once
     Forget {
         /// Names or fingerprints, shown by `peers`
         #[arg(required_unless_present = "all", conflicts_with = "all")]
         peers: Vec<String>,
-        /// Forget every paired Mac
+        /// Forget every peer
         #[arg(long)]
         all: bool,
     },
-    /// Give this Mac a new key; every paired Mac must pair again
+    /// Give this system a new key; every peer must pair again
     RotateKey,
 }
 
@@ -152,7 +155,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
             port,
             pair,
             trust,
-            drive,
+            side,
             no_clipboard,
             no_discovery,
         } => {
@@ -166,7 +169,8 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     peers,
                     name,
                     pairing: pair.then_some(trust),
-                    drive,
+                    side: side.unwrap_or(Side::Right),
+                    choose_side: &AtomicBool::new(side.is_some()),
                     clipboard: &clipboard,
                     discoverable: &discoverable,
                 },
@@ -181,7 +185,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
             address,
             pair,
             trust,
-            drive,
+            side,
             no_clipboard,
         } => {
             let mut prompt = TerminalPrompt;
@@ -194,7 +198,8 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     peers,
                     name,
                     pairing: pair.then_some(trust),
-                    drive,
+                    side: side.unwrap_or(Side::Right),
+                    choose_side: &AtomicBool::new(side.is_some()),
                     clipboard: &clipboard,
                     discoverable: &discoverable,
                 },
@@ -209,7 +214,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
             let now = trust::now();
             let list = peers.list(now)?;
             if list.is_empty() {
-                println!("No paired Macs.");
+                println!("No peers.");
             } else {
                 for peer in list {
                     println!(
@@ -227,7 +232,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
             let now = trust::now();
             let (matched, still) = peers.set_policy(&peer, policy, now)?;
             if matched == 0 {
-                bail!("no paired Mac matches {peer:?}");
+                bail!("no peer matches {peer:?}");
             }
             for peer in &still {
                 println!(
@@ -239,7 +244,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
             }
             if still.len() < matched {
                 println!(
-                    "{} Mac(s) matching {peer:?} had already run out of trust under that policy and were forgotten.",
+                    "{} peer(s) matching {peer:?} had already run out of trust under that policy and were forgotten.",
                     matched - still.len()
                 );
             }
@@ -258,19 +263,19 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                 (forgotten.removed, forgotten.unmatched)
             };
             if removed > 0 {
-                println!("Forgot {removed} Mac(s). Any matching session ends within a second.");
+                println!("Forgot {removed} peer(s). Any matching session ends within a second.");
             } else if all {
-                println!("No paired Macs to forget.");
+                println!("No peers to forget.");
             }
             if !unmatched.is_empty() {
-                bail!("no paired Mac matches {}", unmatched.join(", "));
+                bail!("no peer matches {}", unmatched.join(", "));
             }
             Ok(())
         }
         Command::RotateKey => {
             let rotated = Identity::rotate(&home.join("identity"))?;
             println!(
-                "This Mac's key changed from {} to {}.\nEvery paired Mac must pair again. Restart Daisy if it is running.",
+                "This system's key changed from {} to {}.\nEvery peer must pair again. Restart Daisy if it is running.",
                 identity.public_key(),
                 rotated.public_key()
             );
@@ -285,15 +290,15 @@ impl ServiceObserver for TerminalObserver {
     fn waiting(&mut self, name: &str, key: PublicKey, port: u16, pairing: Option<Policy>) {
         println!("{name} ({key}) is waiting on port {port}.");
         if let Some(policy) = pairing {
-            println!("Pairing is open; a new Mac will be trusted {}.", policy.describe());
+            println!("Pairing is open; a new peer will be trusted {}.", policy.describe());
         }
     }
 
-    fn connecting(&mut self, address: &str) {
+    fn connecting(&mut self, address: &str, _peer: Option<&str>) {
         println!("Connecting to {address}…");
     }
 
-    fn reconnecting(&mut self, address: &str, wait: std::time::Duration) {
+    fn reconnecting(&mut self, address: &str, _peer: Option<&str>, wait: std::time::Duration) {
         println!(
             "The connection to {address} was lost; trying again in {} s.",
             wait.as_secs().max(1)
@@ -311,13 +316,10 @@ impl ServiceObserver for TerminalObserver {
         }
     }
 
-    fn connected(&mut self, peer: &str, _key: PublicKey, drive: Option<Side>) {
-        match drive {
-            Some(side) => {
-                println!("Sharing this keyboard and mouse with {peer}: move the pointer off the {side} edge to use it.")
-            }
-            None => println!("{peer} can now control this Mac."),
-        }
+    fn connected(&mut self, peer: &str, _key: PublicKey, side: Side) {
+        println!(
+            "Connected to {peer}: the other screen is on the {side}. Use the keyboard or trackpad on either system to take control."
+        );
     }
 
     fn disconnected(&mut self, peer: &str) {
@@ -378,7 +380,7 @@ fn computer_name() -> String {
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|name| name.trim().to_owned())
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "Mac".to_owned())
+        .unwrap_or_else(|| "Unnamed system".to_owned())
 }
 
 #[cfg(test)]
@@ -389,5 +391,19 @@ mod tests {
     fn no_subcommand_is_the_menu_bar_app() {
         let cli = Cli::try_parse_from(["daisy"]).unwrap();
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn the_side_is_optional() {
+        let cli = Cli::try_parse_from(["daisy", "connect", "studio.local"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Connect { side: None, .. })));
+        let cli = Cli::try_parse_from(["daisy", "listen", "--side", "left"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Listen {
+                side: Some(Side::Left),
+                ..
+            })
+        ));
     }
 }

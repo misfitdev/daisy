@@ -1,6 +1,6 @@
 # Daisy
 
-Daisy shares one keyboard and trackpad across the Macs on your desk. Move the pointer past the edge of one screen and it continues onto the next, with typing, clicks and trackpad swipes following it.
+Daisy shares one keyboard and trackpad across the macOS systems on your desk. Move the pointer past the edge of one screen and it continues onto the next, with typing, clicks and trackpad swipes following it.
 
 Daisy needs no account and no cloud service. Connections run directly over your local network, and because both ends run macOS, input arrives exactly as it was entered.
 
@@ -12,22 +12,22 @@ Daisy is in beta. It supports:
 - Scrolling, and swipes for Spaces, Mission Control and app windows
 - Clipboard sharing for text, rich text and images
 - Automatic reconnection after sleep or a network change
-- Finding paired Macs on the local network with Bonjour
+- Connection status that names the peer and shows its round-trip latency
+- Finding paired peers on the local network with Bonjour
 - Pairing with a one-time code, managed from the menu bar
 - Immediate return of control with Control-Option-Command-Escape
 
 Planned: layouts that chain more than two screens.
 
-Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes through requires macOS 27 on the Host.
+Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes through requires macOS 27 on the system whose trackpad you use.
 
 ## Getting Started
 
-1. Download the latest release from [Releases](https://github.com/misfitdev/daisy/releases), unzip it and move **Daisy.app** to Applications. Install it on both Macs.
+1. Download the latest release from [Releases](https://github.com/misfitdev/daisy/releases), unzip it and move **Daisy.app** to Applications. Install it on both systems.
 2. Open Daisy from the menu bar and grant Accessibility and Input Monitoring when prompted. macOS requires both before Daisy can read and send input.
-3. Pair them:
-   - On one, choose **Wait for a peer**. On the other, choose **Connect by Address** and pick the first one from **Nearby**, or enter its network name, such as `studio.local`.
-   - Choose **Host** where you will type and use the trackpad, and **Guest** on the other. On the Host, choose the edge where the Guest sits.
-   - Click **Pair a New Peer** on both. Enter the six-digit code shown on one into the other.
+3. Click **Pair a New Peer** on both systems. Nearby systems find each other automatically. Enter the six-digit code shown on one into the other.
+   - Choose the screen edge where the peer sits. Daisy agrees on one arrangement for the pair.
+   - For networks without Bonjour, enter the peer's address on one system and leave it empty on the other.
 4. Click **Start Sharing** on both, then move the pointer through the chosen edge. The menu bar flower shows a yellow center while connected.
 
 After pairing, they recognize each other; a new code is needed only when trust ends.

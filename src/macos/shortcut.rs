@@ -1,9 +1,9 @@
 //! Replaying swipes as Mission Control keyboard shortcuts.
 //!
-//! Used on Macs before macOS 27, where the synthesized swipe events are not
+//! Used before macOS 27, where the synthesized swipe events are not
 //! good enough: they switch Spaces without animation and cannot open Mission
 //! Control. The shortcuts are public, animated like a real swipe, and read
-//! from this Mac's own keyboard settings so custom bindings still work.
+//! from this system's own keyboard settings so custom bindings still work.
 
 use std::sync::OnceLock;
 
@@ -19,7 +19,7 @@ pub struct Shortcut {
     pub flags: u64,
 }
 
-/// What this Mac's settings say about one shortcut.
+/// What this system's settings say about one shortcut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Enabled(Shortcut),
@@ -83,7 +83,7 @@ pub fn setting(hotkeys: Option<&Value>, direction: SwipeDirection) -> Setting {
     Setting::Enabled(custom.unwrap_or(default))
 }
 
-/// This Mac's symbolic hotkey settings, read once through `defaults` so
+/// This system's symbolic hotkey settings, read once through `defaults` so
 /// they come from the preferences cache rather than a possibly stale file.
 fn hotkeys() -> Option<&'static Value> {
     static HOTKEYS: OnceLock<Option<Value>> = OnceLock::new();
@@ -136,6 +136,7 @@ fn post_key(key: u16, down: bool, flags: u64, modifier: bool) {
             CGEventSetType(event, kCGEventFlagsChanged);
         }
         CGEventSetFlags(event, flags);
+        CGEventSetIntegerValueField(event, kCGEventSourceUserData, DAISY_EVENT_MARKER);
         CGEventPost(kCGHIDEventTap, event);
         CFRelease(event.cast_const());
     }
@@ -166,7 +167,7 @@ mod tests {
                 flags: CONTROL_ARROW
             })
         );
-        // an empty dictionary, as on a Mac that never touched these shortcuts
+        // an empty dictionary, as on a system that never touched these shortcuts
         let empty = hotkeys("");
         assert_eq!(
             setting(Some(&empty), SwipeDirection::Left),
@@ -179,7 +180,7 @@ mod tests {
 
     #[test]
     fn enabled_without_a_binding_means_the_default_key() {
-        // exactly what this Mac's settings hold for the Space shortcuts
+        // exactly what this system's settings hold for the Space shortcuts
         let settings = hotkeys("<key>81</key><dict><key>enabled</key><true/></dict>");
         assert_eq!(
             setting(Some(&settings), SwipeDirection::Right),
@@ -243,7 +244,7 @@ mod tests {
 
     #[test]
     fn reads_this_macs_settings() {
-        // whatever this Mac has, every direction resolves to something
+        // whatever this system has, every direction resolves to something
         for direction in [
             SwipeDirection::Left,
             SwipeDirection::Right,

@@ -18,9 +18,9 @@ const movesSvg =
   <section class="hero" aria-labelledby="hero-title">
     <div class="wrap">
       <div class="hero-row">
-        <h1 id="hero-title"><span class="hero-line">One keyboard and trackpad.</span> <span class="coral-mark">Every Mac.</span></h1>
+        <h1 id="hero-title"><span class="hero-line">One keyboard and trackpad.</span> <span class="coral-mark">Every screen.</span></h1>
         <div class="hero-action">
-          <p class="hero-lede">Daisy shares one Mac's keyboard, mouse and trackpad with all the Macs connected to the chain. No Apple ID, no iCloud, no account.</p>
+          <p class="hero-lede">Daisy shares one keyboard, mouse and trackpad between two systems on the same network. No Apple ID, no iCloud, no account.</p>
           <a class="btn" href={downloadUrl}>Download Daisy {version}</a>
           <p class="hero-meta">Free and open source · Beta · macOS 26 or later · Apple silicon</p>
         </div>
@@ -59,14 +59,14 @@ const movesSvg =
       <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
       <div class="section-head">
         <h2 id="setup-title">Set up in three moves</h2>
-        <p>Do it once on each Mac. After that, your Macs recognize each other.</p>
+        <p>Do it once on each system. After that, they recognize each other.</p>
       </div>
       <svg class="moves-chain" viewBox="0 0 1240 80" aria-hidden="true" set:html={movesSvg} />
       <div class="moves">
         <div class="move">
           <div class="move-node"><Flower size={56} /></div>
           <h3>Install</h3>
-          <p>Download Daisy, open the zip and drag Daisy.app into Applications. Do the same on the other Mac.</p>
+          <p>Download Daisy, open the zip and drag Daisy.app into Applications. Do the same on the other system.</p>
         </div>
         <div class="move">
           <div class="move-node"><Flower size={56} /></div>
@@ -76,7 +76,7 @@ const movesSvg =
         <div class="move">
           <div class="move-node"><Flower size={56} /></div>
           <h3>Pair</h3>
-          <p>One Mac shows a code; type it on the other. Tell Daisy which side the other Mac sits on, then push the pointer through that edge.</p>
+          <p>One system shows a code; type it on the other. Tell Daisy which side the other system sits on, then push the pointer through that edge.</p>
         </div>
       </div>
       <img
@@ -86,7 +86,7 @@ const movesSvg =
         height="1504"
         loading="lazy"
         decoding="async"
-        alt="Daisy settings with this system waiting for a peer, Host selected, and screen edge, trust, and permission controls."
+        alt="Daisy setup with automatic nearby connections, optional address, screen position, trust and both permissions."
       />
       <p class="text-links"><a href={href("/docs/getting-started/")}>Read the full getting-started guide</a></p>
     </div>
@@ -98,16 +98,16 @@ const movesSvg =
       <h2 id="native-title" class="native-statement">Both ends speak macOS, so keys, clicks and swipes arrive as themselves.</h2>
       <div class="native-points">
         <div>
-          <h3>Mac to Mac, by design</h3>
-          <p>Nothing is translated through another operating system. A three-finger swipe to the next Space on this Mac is a three-finger swipe to the next Space on that one.</p>
+          <h3>Mac-to-Mac, by design</h3>
+          <p>Nothing is translated through another operating system. A three-finger swipe to the next Space on this system is a three-finger swipe to the next Space on that one.</p>
         </div>
         <div>
           <h3>No account, anywhere</h3>
-          <p>Your Macs trust each other directly, through a one-time code. There is no sign-in, no cloud service and nothing to sync.</p>
+          <p>Your systems trust each other directly, through a one-time code. There is no sign-in, no cloud service and nothing to sync.</p>
         </div>
         <div>
           <h3>You decide how long trust lasts</h3>
-          <p>Each Mac chooses: until it has been idle for 96 hours, for a number of days, for one session, or until you forget it. The stricter choice wins.</p>
+          <p>Each system chooses: until it has been idle for 96 hours, for a number of days, for one session, or until you forget it. The stricter choice wins.</p>
         </div>
       </div>
     </div>
@@ -118,12 +118,12 @@ const movesSvg =
       <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
       <div class="section-head">
         <h2 id="security-title">Paired, encrypted and verifiable</h2>
-        <p>Macs pair once with a one-time code. Every connection after that is encrypted and authenticated, and every release can be traced to its source.</p>
+        <p>Two systems pair once with a one-time code. Every connection after that is encrypted and authenticated, and every release can be traced to its source.</p>
       </div>
       <ul class="facts">
         <li>Connections use a Noise handshake with X25519, ChaCha20-Poly1305 and BLAKE2s.</li>
         <li>Pairing runs SPAKE2 on a one-time six-digit code, so someone in the middle gets one guess per attempt: a one-in-a-million chance.</li>
-        <li>At most five unknown Macs may try in ten minutes, and pairing closes after the first success.</li>
+        <li>At most five unknown systems may try in ten minutes, and pairing closes after the first success.</li>
         <li>Releases are signed with Developer ID, notarized by Apple, and built with SLSA Build Level 3 provenance. <a href={href("/download/#verify")}>Verify your download.</a></li>
       </ul>
     </div>
@@ -132,7 +132,7 @@ const movesSvg =
   <section class="section" aria-labelledby="closing-title">
     <div class="wrap closing">
       <span class="thread-end" data-thread-end aria-hidden="true"><Flower size={72} state="disconnected" /></span>
-      <h2 id="closing-title">Put your Macs anywhere and use them as one desk.</h2>
+      <h2 id="closing-title">Put your systems anywhere and use them as one desk.</h2>
       <div class="closing-actions">
         <a class="btn" href={downloadUrl}>Download Daisy {version}</a>
         <a class="btn btn-ghost" href={repo}>View on GitHub</a>

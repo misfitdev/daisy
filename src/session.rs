@@ -1,8 +1,8 @@
-//! Encrypted channel between two Macs.
+//! Encrypted channel between two systems.
 //!
 //! Every connection runs a Noise XX handshake: each side learns the other's
 //! long-term key and all later traffic is encrypted and authenticated. XX
-//! alone does not prove the key belongs to the Mac you meant to reach; see
+//! alone does not prove the key belongs to the peer you meant to reach; see
 //! `pairing` for how keys become trusted.
 
 use std::io;
@@ -18,9 +18,79 @@ use crate::protocol::Message;
 /// their long-term keys.
 pub(crate) const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 
-/// Bound into every handshake, so peers running an incompatible protocol
-/// version fail the handshake instead of misreading each other.
-const PROLOGUE: &[u8] = b"daisy/1";
+/// Bound into every handshake. Never changes: versions are compared through
+/// the handshake payloads instead, so a mismatch can be explained.
+const PROLOGUE: &[u8] = b"daisy";
+
+/// Session protocol version. Raise it for any change that would make two
+/// versions misread each other; sessions need the same version on both sides.
+pub const PROTOCOL: u16 = 2;
+
+/// Longest app version carried in a handshake payload.
+const MAX_APP_VERSION: usize = 64;
+
+/// What a system runs, sent inside the handshake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Version {
+    pub protocol: u16,
+    /// The Daisy release, as people see it.
+    pub app: String,
+}
+
+impl Version {
+    pub fn this_system() -> Self {
+        Self {
+            protocol: PROTOCOL,
+            app: env!("CARGO_PKG_VERSION").to_owned(),
+        }
+    }
+
+    // Every version must read this layout: the protocol as two big-endian
+    // bytes, then the app version in UTF-8.
+    fn encode(&self) -> Vec<u8> {
+        let app = &self.app.as_bytes()[..self.app.len().min(MAX_APP_VERSION)];
+        let mut bytes = self.protocol.to_be_bytes().to_vec();
+        bytes.extend_from_slice(app);
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let (protocol, app) = bytes.split_first_chunk::<2>()?;
+        (app.len() <= MAX_APP_VERSION).then(|| Self {
+            protocol: u16::from_be_bytes(*protocol),
+            app: String::from_utf8_lossy(app).into_owned(),
+        })
+    }
+}
+
+/// Two systems run different protocol versions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mismatch {
+    pub peer_key: PublicKey,
+    pub peer: Version,
+    pub local: Version,
+}
+
+impl Mismatch {
+    /// Whether this system is the one that needs updating.
+    pub fn update_here(&self) -> bool {
+        self.local.protocol < self.peer.protocol
+    }
+}
+
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the peer runs Daisy {} (protocol {}) and this system runs Daisy {} (protocol {}); update Daisy on {} to connect",
+            self.peer.app,
+            self.peer.protocol,
+            self.local.app,
+            self.local.protocol,
+            if self.update_here() { "this system" } else { "the peer" }
+        )
+    }
+}
 
 // Noise caps one message at 65535 bytes, including a 16 byte tag.
 const MAX_FRAME: usize = 65_535;
@@ -51,6 +121,11 @@ pub enum SessionError {
     Malformed(#[from] postcard::Error),
     #[error("peer did not present a key")]
     NoRemoteKey,
+    /// The peer predates version reporting, or the handshake was altered.
+    #[error("the peer runs a different version of Daisy; update Daisy on both systems")]
+    Incompatible,
+    #[error("{0}")]
+    VersionMismatch(Box<Mismatch>),
 }
 
 pub struct Channel<S> {
@@ -88,46 +163,74 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     /// Run the handshake as the side that opened the connection.
-    pub async fn initiate(mut stream: S, identity: &Identity) -> Result<Self, SessionError> {
-        let mut handshake = builder(identity)?.build_initiator()?;
-        let mut buffer = vec![0; MAX_FRAME];
-
-        // -> e
-        let len = handshake.write_message(&[], &mut buffer)?;
-        write_frame(&mut stream, &buffer[..len]).await?;
-        // <- e, ee, s, es
-        let frame = read_frame(&mut stream).await?;
-        handshake.read_message(&frame, &mut buffer)?;
-        // -> s, se
-        let len = handshake.write_message(&[], &mut buffer)?;
-        write_frame(&mut stream, &buffer[..len]).await?;
-
-        Self::finish(stream, handshake, Role::Initiator, buffer)
+    pub async fn initiate(stream: S, identity: &Identity) -> Result<Self, SessionError> {
+        Self::initiate_as(stream, identity, &Version::this_system()).await
     }
 
     /// Run the handshake as the side that accepted the connection.
-    pub async fn respond(mut stream: S, identity: &Identity) -> Result<Self, SessionError> {
+    pub async fn respond(stream: S, identity: &Identity) -> Result<Self, SessionError> {
+        Self::respond_as(stream, identity, &Version::this_system()).await
+    }
+
+    // Each side's version rides in its first handshake message. Both are
+    // compared only once the handshake has authenticated them, and both
+    // sides finish it first, so each can explain the mismatch.
+    async fn initiate_as(mut stream: S, identity: &Identity, local: &Version) -> Result<Self, SessionError> {
+        let mut handshake = builder(identity)?.build_initiator()?;
+        let mut buffer = vec![0; MAX_FRAME];
+
+        // -> e, with this system's version
+        let len = handshake.write_message(&local.encode(), &mut buffer)?;
+        write_frame(&mut stream, &buffer[..len]).await?;
+        // <- e, ee, s, es, with the peer's version
+        let frame = read_frame(&mut stream).await?;
+        let len = handshake.read_message(&frame, &mut buffer).map_err(incompatible)?;
+        let peer = Version::decode(&buffer[..len]);
+        // -> s, se
+        let len = handshake.write_message(&[], &mut buffer)?;
+        write_frame(&mut stream, &buffer[..len]).await?;
+
+        Self::finish(stream, handshake, Role::Initiator, buffer, peer, local)
+    }
+
+    async fn respond_as(mut stream: S, identity: &Identity, local: &Version) -> Result<Self, SessionError> {
         let mut handshake = builder(identity)?.build_responder()?;
         let mut buffer = vec![0; MAX_FRAME];
 
-        // -> e
+        // -> e, with the peer's version
         let frame = read_frame(&mut stream).await?;
-        handshake.read_message(&frame, &mut buffer)?;
-        // <- e, ee, s, es
-        let len = handshake.write_message(&[], &mut buffer)?;
+        let len = handshake.read_message(&frame, &mut buffer)?;
+        let peer = Version::decode(&buffer[..len]);
+        // <- e, ee, s, es, with this system's version
+        let len = handshake.write_message(&local.encode(), &mut buffer)?;
         write_frame(&mut stream, &buffer[..len]).await?;
         // -> s, se
         let frame = read_frame(&mut stream).await?;
-        handshake.read_message(&frame, &mut buffer)?;
+        handshake.read_message(&frame, &mut buffer).map_err(incompatible)?;
 
-        Self::finish(stream, handshake, Role::Responder, buffer)
+        Self::finish(stream, handshake, Role::Responder, buffer, peer, local)
     }
 
-    fn finish(stream: S, handshake: HandshakeState, role: Role, buffer: Vec<u8>) -> Result<Self, SessionError> {
+    fn finish(
+        stream: S,
+        handshake: HandshakeState,
+        role: Role,
+        buffer: Vec<u8>,
+        peer: Option<Version>,
+        local: &Version,
+    ) -> Result<Self, SessionError> {
         let remote_key = handshake
             .get_remote_static()
             .and_then(PublicKey::from_bytes)
             .ok_or(SessionError::NoRemoteKey)?;
+        let peer = peer.ok_or(SessionError::Incompatible)?;
+        if peer.protocol != local.protocol {
+            return Err(SessionError::VersionMismatch(Box::new(Mismatch {
+                peer_key: remote_key,
+                peer,
+                local: local.clone(),
+            })));
+        }
         let handshake_hash = handshake.get_handshake_hash().to_vec();
         let transport = Arc::new(handshake.into_stateless_transport_mode()?);
         Ok(Self {
@@ -235,6 +338,15 @@ fn builder(identity: &Identity) -> Result<snow::Builder<'_>, SessionError> {
         .prologue(PROLOGUE)?)
 }
 
+// A different prologue, from a peer that predates version reporting, is the
+// only way an unaltered handshake fails to decrypt.
+fn incompatible(error: snow::Error) -> SessionError {
+    match error {
+        snow::Error::Decrypt => SessionError::Incompatible,
+        other => other.into(),
+    }
+}
+
 // Frames are a big-endian u16 length followed by that many bytes.
 async fn write_frame<S: AsyncWrite + Unpin>(stream: &mut S, frame: &[u8]) -> Result<(), SessionError> {
     let len = u16::try_from(frame.len()).map_err(|_| SessionError::TooLarge(frame.len()))?;
@@ -281,6 +393,59 @@ mod tests {
         assert_eq!(left.handshake_hash(), right.handshake_hash());
         assert_eq!(left.role(), Role::Initiator);
         assert_eq!(right.role(), Role::Responder);
+    }
+
+    fn version(protocol: u16, app: &str) -> Version {
+        Version {
+            protocol,
+            app: app.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn both_sides_explain_a_protocol_mismatch() {
+        let (a, b) = duplex(2 * MAX_FRAME);
+        let (older, newer) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let (old_release, new_release) = (version(2, "0.1.2"), version(3, "0.1.3"));
+        let (left, right) = tokio::join!(
+            Channel::initiate_as(a, &older, &old_release),
+            Channel::respond_as(b, &newer, &new_release)
+        );
+        let Err(SessionError::VersionMismatch(left)) = left else {
+            panic!("expected a mismatch");
+        };
+        let Err(SessionError::VersionMismatch(right)) = right else {
+            panic!("expected a mismatch");
+        };
+        assert_eq!(left.peer, version(3, "0.1.3"));
+        assert_eq!(left.peer_key, newer.public_key());
+        assert!(left.update_here());
+        assert_eq!(right.peer, version(2, "0.1.2"));
+        assert!(!right.update_here());
+        assert_eq!(
+            left.to_string(),
+            "the peer runs Daisy 0.1.3 (protocol 3) and this system runs Daisy 0.1.2 (protocol 2); update Daisy on this system to connect"
+        );
+    }
+
+    #[tokio::test]
+    async fn different_releases_on_one_protocol_connect() {
+        let (a, b) = duplex(2 * MAX_FRAME);
+        let (left, right) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let (first, second) = (version(PROTOCOL, "0.1.2"), version(PROTOCOL, "0.1.3"));
+        let (left, right) = tokio::join!(
+            Channel::initiate_as(a, &left, &first),
+            Channel::respond_as(b, &right, &second)
+        );
+        assert!(left.is_ok() && right.is_ok());
+    }
+
+    #[test]
+    fn a_version_survives_the_wire_and_garbage_does_not() {
+        let this = Version::this_system();
+        assert_eq!(Version::decode(&this.encode()), Some(this));
+        assert_eq!(Version::decode(&[2]), None);
+        assert_eq!(Version::decode(&[0; 2 + MAX_APP_VERSION + 1]), None);
     }
 
     #[tokio::test]
@@ -435,18 +600,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incompatible_prologue_fails_the_handshake() {
+    async fn a_peer_on_another_protocol_version_fails_the_handshake() {
         let (a, b) = duplex(2 * MAX_FRAME);
         let initiator = Identity::generate().unwrap();
         let responder = Identity::generate().unwrap();
 
-        // a peer built with a different protocol version
+        // a peer on another protocol version
         let other_version = async move {
             let mut stream = b;
             let mut handshake = snow::Builder::new(NOISE_PATTERN.parse().unwrap())
                 .local_private_key(responder.private_key())
                 .unwrap()
-                .prologue(b"daisy/2")
+                .prologue(b"daisy/1")
                 .unwrap()
                 .build_responder()
                 .unwrap();
@@ -459,6 +624,6 @@ mod tests {
         };
 
         let (result, _stream) = tokio::join!(Channel::initiate(a, &initiator), other_version);
-        assert!(matches!(result, Err(SessionError::Noise(_))), "{:?}", result.err());
+        assert!(matches!(result, Err(SessionError::Incompatible)), "{:?}", result.err());
     }
 }

@@ -4,24 +4,24 @@ import { initialState, renderDesk } from "../lib/desk";
 const svg = renderDesk(initialState(), { pointer: false });
 ---
 
-<section class="desk" data-desk aria-label="Try Daisy: a virtual desk of Macs">
+<section class="desk" data-desk aria-label="Try Daisy: a virtual desk of systems">
   <div class="desk-bar">
     <div class="desk-read">
-      <p class="desk-hint" data-hint>Push the pointer through the right edge of this Mac.</p>
-      <p class="desk-status" role="status" aria-live="polite" data-status>This Mac has control.</p>
+      <p class="desk-hint" data-hint>Push the pointer through the right edge of this system.</p>
+      <p class="desk-status" role="status" aria-live="polite" data-status>This system has control.</p>
     </div>
     <div class="desk-controls">
       <button type="button" class="desk-btn" data-action="arrange" aria-pressed="false">Arrange displays</button>
       <button type="button" class="desk-btn" data-action="swipe">Swipe to next Space</button>
       <button type="button" class="desk-btn" data-action="connect" aria-pressed="true">Disconnect</button>
-      <button type="button" class="desk-btn desk-btn-planned" data-action="add">Add a Mac <span class="planned-chip">Planned</span></button>
+      <button type="button" class="desk-btn desk-btn-planned" data-action="add">Add a system <span class="planned-chip">Planned</span></button>
       <button type="button" class="desk-btn desk-btn-quiet" data-action="reset">Reset</button>
     </div>
   </div>
   <div class="desk-stage" data-stage set:html={svg} />
-  <p class="desk-keys"><kbd>Esc</kbd> takes control back, standing in for <kbd>Control</kbd>-<kbd>Option</kbd>-<kbd>Command</kbd>-<kbd>Escape</kbd>. Typing goes to the Mac with control.</p>
+  <p class="desk-keys"><kbd>Esc</kbd> takes control back, standing in for <kbd>Control</kbd>-<kbd>Option</kbd>-<kbd>Command</kbd>-<kbd>Escape</kbd>. Typing goes to the system with control.</p>
   <p class="desk-fallback">
-    <span class="fallback-small">Open this page on a Mac with a mouse or trackpad to drive the desk yourself.</span>
+    <span class="fallback-small">Open this page on a computer with a mouse or trackpad to drive the desk yourself.</span>
     <span class="fallback-motion">The interactive desk is paused because reduced motion is on.</span>
   </p>
 </section>
@@ -82,7 +82,7 @@ const svg = renderDesk(initialState(), { pointer: false });
   let running = false;
   let calm = 0;
 
-  const name = (id: string) => state.screens.find((s) => s.id === id)?.label ?? "This Mac";
+  const name = (id: string) => state.screens.find((s) => s.id === id)?.label ?? "This system";
   const byId = (id: string) => state.screens.find((s) => s.id === id)!;
 
   function body(s: Screen): Body {
@@ -196,8 +196,8 @@ const svg = renderDesk(initialState(), { pointer: false });
   }
 
   function controlStatus() {
-    if (!state.connected) return "Disconnected. Input stays on this Mac.";
-    if (state.active === state.home) return "This Mac has control.";
+    if (!state.connected) return "Disconnected. Input stays on this system.";
+    if (state.active === state.home) return "This system has control.";
     return `${name(state.active)} has control. Press Esc to take it back.`;
   }
 
@@ -214,8 +214,8 @@ const svg = renderDesk(initialState(), { pointer: false });
     const words: Record<Side, string> = { left: "left", right: "right", above: "top", below: "bottom" };
     hint.textContent =
       sides.length === 1
-        ? `Push the pointer through the ${words[sides[0]]} edge of this Mac.`
-        : "Push the pointer through any edge with a Mac beyond it.";
+        ? `Push the pointer through the ${words[sides[0]]} edge of this system.`
+        : "Push the pointer through any edge with a peer beyond it.";
   }
 
   function toSvg(e: PointerEvent): Vec {
@@ -321,7 +321,7 @@ const svg = renderDesk(initialState(), { pointer: false });
     if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId);
     syncRopes(true);
     render();
-    say(ok ? `${name(d.id)} snapped into place.` : "That spot would overlap another display or cut a Mac off, so it went back.");
+    say(ok ? `${name(d.id)} snapped into place.` : "That spot would overlap another display or cut a system off, so it went back.");
   }
 
   function onKey(e: KeyboardEvent) {
@@ -333,7 +333,7 @@ const svg = renderDesk(initialState(), { pointer: false });
         offset = lastReal ? { x: state.pointer.x - lastReal.x, y: state.pointer.y - lastReal.y } : { x: 0, y: 0 };
         render();
         pull(from, state.home);
-        say("Control is back on this Mac.");
+        say("Control is back on this system.");
       }
       return;
     }
@@ -390,7 +390,7 @@ const svg = renderDesk(initialState(), { pointer: false });
         if (anchor) bodies.set(s.id, { x: s.x + (s.x - anchor.x) * 0.6, y: s.y + (s.y - anchor.y) * 0.6, vx: 0, vy: 0 });
         syncRopes(true);
         render();
-        say("Added another Mac. Dynamic Mac chaining is planned.");
+        say("Added another system. Dynamic chaining is planned.");
       }
       button.disabled = state.screens.length >= 4;
     }
