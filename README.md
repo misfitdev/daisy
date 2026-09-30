@@ -45,7 +45,7 @@ The [security model](docs/security-model.md) describes the design in detail. Rep
 Releases are built by GitHub Actions from tagged commits, signed with a Developer ID certificate and notarized by Apple. To confirm a download came from this repository:
 
 ```bash
-gh attestation verify Daisy-0.1.1-macos-arm64.zip --repo misfitdev/daisy
+gh attestation verify Daisy-0.1.2-macos-arm64.zip --repo misfitdev/daisy
 ```
 
 ## Documentation

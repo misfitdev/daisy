@@ -1,4 +1,4 @@
-export const version = "0.1.1";
+export const version = "0.1.2";
 export const repo = "https://github.com/misfitdev/daisy";
 export const releaseAsset = `Daisy-${version}-macos-arm64.zip`;
 /** The zip itself. Pinned to this version's tag: `releases/latest` skips
