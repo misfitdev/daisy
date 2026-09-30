@@ -201,7 +201,7 @@ define_class!(
                         "Remove Daisy from Accessibility and Input Monitoring in System Settings → \
                          Privacy & Security, then reopen Daisy. ({error})"
                     ),
-                    NSAlertStyle::Informational,
+                    NSAlertStyle::Warning,
                 ),
             }
         }
