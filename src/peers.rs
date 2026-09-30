@@ -362,15 +362,8 @@ struct Entry {
     trust: Policy,
     paired_at: Timestamp,
     last_seen: Timestamp,
-    /// Absent from files written by 0.1.1.
-    #[serde(default = "default_side")]
     side: crate::input::Side,
-    #[serde(default)]
     side_chosen: Timestamp,
-}
-
-fn default_side() -> crate::input::Side {
-    crate::input::Side::Right
 }
 
 #[cfg(test)]
@@ -428,19 +421,6 @@ mod tests {
     fn missing_file_is_empty() {
         let (store, _dir) = store();
         assert!(store.list(NOW).unwrap().is_empty());
-    }
-
-    #[test]
-    fn peers_saved_by_0_1_1_still_load() {
-        let (store, dir) = store();
-        let old = format!(
-            "[[peer]]\nkey = \"{}\"\nname = \"Studio\"\ntrust = \"forever\"\npaired_at = {NOW}\nlast_seen = {NOW}\n",
-            key(1).to_hex()
-        );
-        fs::write(dir.path().join("peers.toml"), old).unwrap();
-        let peer = store.trusted(&key(1), NOW).unwrap().unwrap();
-        assert_eq!(peer.name, "Studio");
-        assert_eq!(peer.side, crate::input::Side::Right);
     }
 
     #[test]

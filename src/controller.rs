@@ -8,6 +8,7 @@ use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
@@ -21,6 +22,7 @@ use crate::input::Side;
 use crate::pairing::{PairingCode, PairingPrompt};
 use crate::peers::{Peer, PeerStore};
 use crate::service::{self, ServiceObserver};
+use crate::session::{Mismatch, SessionError};
 use crate::trust::{self, Policy};
 
 const SETTINGS_FILE: &str = "settings.toml";
@@ -28,9 +30,7 @@ const SETTINGS_FILE: &str = "settings.toml";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum Connection {
-    /// `listen` is what 0.1.1 saved while waiting for a connection.
     #[default]
-    #[serde(alias = "listen")]
     Automatic,
     Connect {
         address: String,
@@ -45,23 +45,17 @@ pub enum Connection {
 pub struct SessionSettings {
     #[serde(flatten)]
     pub connection: Connection,
-    /// Where the peer sits relative to this system. 0.1.1 saved it as
-    /// `drive`, and left it out on the system that followed.
-    #[serde(default = "default_side", alias = "drive")]
+    /// Where the peer sits relative to this system.
     pub side: Side,
     #[serde(default)]
     pub trust: Policy,
-}
-
-fn default_side() -> Side {
-    Side::Right
 }
 
 impl Default for SessionSettings {
     fn default() -> Self {
         Self {
             connection: Connection::default(),
-            side: default_side(),
+            side: Side::Right,
             trust: Policy::default(),
         }
     }
@@ -102,6 +96,8 @@ pub enum Command {
     Start {
         settings: SessionSettings,
         allow_pairing: bool,
+        /// The screen edge was chosen for this start, rather than left as saved.
+        side_chosen: bool,
     },
     Stop,
     Forget {
@@ -287,6 +283,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             Command::Start {
                 settings,
                 allow_pairing,
+                side_chosen,
             } => {
                 if let Some(running) = session.take() {
                     running.abort();
@@ -308,11 +305,15 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 let session_clipboard = clipboard.clone();
                 let session_discoverable = discoverable.clone();
                 session = Some(tokio::spawn(async move {
+                    let start = Start {
+                        settings,
+                        allow_pairing,
+                        side_chosen,
+                    };
                     run_session(
                         session_home,
                         session_name,
-                        settings,
-                        allow_pairing,
+                        start,
                         session_clipboard,
                         session_discoverable,
                         session_events,
@@ -463,32 +464,33 @@ async fn browse_nearby(home: PathBuf, events: Sender<Event>) {
     }
 }
 
+/// One press of Start, as `Command::Start` carries it.
+struct Start {
+    settings: SessionSettings,
+    allow_pairing: bool,
+    side_chosen: bool,
+}
+
 async fn run_session(
     home: PathBuf,
     name: String,
-    settings: SessionSettings,
-    allow_pairing: bool,
+    start: Start,
     clipboard: watch::Receiver<bool>,
     discoverable: watch::Receiver<bool>,
     events: Sender<Event>,
 ) {
+    let Start {
+        settings,
+        allow_pairing,
+        side_chosen,
+    } = start;
     let result = async {
         let identity = Identity::load_or_create(&home.join("identity"))?;
         let peers = PeerStore::open(&home)?;
-        {
-            let side = settings.side;
-            let known = peers.list(trust::now())?;
-            let chosen = match &settings.connection {
-                Connection::Connect { peer: Some(key), .. } => PublicKey::from_hex(key),
-                Connection::Automatic if known.len() == 1 => Some(known[0].key),
-                _ => None,
-            };
-            if let Some(key) = chosen {
-                peers.set_side(&key, side)?;
-            }
-        }
+        let choose_side = AtomicBool::new(side_chosen);
         let mut prompt = ControllerPrompt { events: events.clone() };
         let mut observer = ControllerObserver {
+            told_version: None,
             events: events.clone(),
             home: home.clone(),
             waiting: None,
@@ -500,7 +502,7 @@ async fn run_session(
             name: &name,
             pairing,
             side: settings.side,
-            choose_side: false,
+            choose_side: &choose_side,
             clipboard: &clipboard,
             discoverable: &discoverable,
         };
@@ -520,7 +522,10 @@ async fn run_session(
         }
         Err(error) => {
             tracing::error!(error = ?error, "connection session stopped");
-            let _ = send_problem(&events, "Connection stopped", recovery_for(&error));
+            let _ = match version_copy(&home, &error) {
+                Some((title, detail)) => send_problem(&events, &title, detail),
+                None => send_problem(&events, "Connection stopped", recovery_for(&error)),
+            };
         }
     }
 }
@@ -552,6 +557,8 @@ impl PairingPrompt for ControllerPrompt {
 }
 
 struct ControllerObserver {
+    /// The version mismatch last reported, so a retry does not repeat it.
+    told_version: Option<(String, String)>,
     events: Sender<Event>,
     home: PathBuf,
     waiting: Option<(u16, bool)>,
@@ -630,6 +637,15 @@ impl ServiceObserver for ControllerObserver {
 
     fn connection_failed(&mut self, address: &str, error: &anyhow::Error) {
         tracing::warn!(address, error = ?error, "incoming connection ended");
+        if let Some(copy) = version_copy(&self.home, error) {
+            // automatic mode retries every few seconds; say it once
+            if self.told_version.as_ref() != Some(&copy) {
+                self.told_version = Some(copy.clone());
+                let (title, detail) = copy;
+                let _ = self.events.send(Event::Notice { title, detail });
+            }
+            return;
+        }
         let _ = self.events.send(Event::Notice {
             title: "A peer could not connect".to_owned(),
             detail: format!(
@@ -663,6 +679,38 @@ fn set_trust(home: &Path, selector: &str, policy: Policy) -> Result<(String, Vec
         .map(|peer| peer.name.clone())
         .unwrap_or_else(|| selector.to_owned());
     Ok((peer, store.list(trust::now())?))
+}
+
+/// What to tell a person when the peer runs another protocol version: a
+/// title, and which versions run where and which system to update.
+fn version_copy(home: &Path, error: &anyhow::Error) -> Option<(String, String)> {
+    let mismatch = error
+        .chain()
+        .find_map(|cause| match cause.downcast_ref::<SessionError>() {
+            Some(SessionError::VersionMismatch(mismatch)) => Some(mismatch),
+            _ => None,
+        })?;
+    let name = PeerStore::open(home)
+        .and_then(|peers| peers.trusted(&mismatch.peer_key, trust::now()))
+        .ok()
+        .flatten()
+        .map(|peer| peer.name);
+    Some(mismatch_copy(mismatch, name.as_deref()))
+}
+
+fn mismatch_copy(mismatch: &Mismatch, name: Option<&str>) -> (String, String) {
+    let peer = name.unwrap_or("The peer");
+    let title = format!("{peer} runs a different version of Daisy");
+    let update = if mismatch.update_here() {
+        "this system".to_owned()
+    } else {
+        name.unwrap_or("the peer").to_owned()
+    };
+    let detail = format!(
+        "{peer} runs Daisy {} (protocol {}). This system runs Daisy {} (protocol {}). Update Daisy on {update} to connect.",
+        mismatch.peer.app, mismatch.peer.protocol, mismatch.local.app, mismatch.local.protocol
+    );
+    (title, detail)
 }
 
 fn recovery_for(error: &anyhow::Error) -> String {
@@ -802,21 +850,38 @@ mod tests {
     }
 
     #[test]
-    fn settings_saved_by_0_1_1_still_load() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join(SETTINGS_FILE);
-        let waiting = "share_clipboard = false\n\n[last_session]\nmode = \"listen\"\nbind = \"0.0.0.0\"\nport = 24850\ndrive = \"Left\"\n";
-        fs::write(&path, waiting).unwrap();
-        let settings = load_settings(directory.path()).unwrap();
-        assert_eq!(settings.last_session.connection, Connection::Automatic);
-        assert_eq!(settings.last_session.side, Side::Left);
-        assert!(!settings.share_clipboard);
+    fn a_version_mismatch_says_which_system_to_update() {
+        use crate::session::Version;
+        let mismatch = Mismatch {
+            peer_key: Identity::generate().unwrap().public_key(),
+            peer: Version {
+                protocol: 3,
+                app: "0.1.3".to_owned(),
+            },
+            local: Version {
+                protocol: 2,
+                app: "0.1.2".to_owned(),
+            },
+        };
+        let (title, detail) = mismatch_copy(&mismatch, Some("Studio"));
+        assert_eq!(title, "Studio runs a different version of Daisy");
+        assert_eq!(
+            detail,
+            "Studio runs Daisy 0.1.3 (protocol 3). This system runs Daisy 0.1.2 (protocol 2). Update Daisy on this system to connect."
+        );
+        let newer_here = Mismatch {
+            peer: mismatch.local.clone(),
+            local: mismatch.peer.clone(),
+            ..mismatch
+        };
+        let (title, detail) = mismatch_copy(&newer_here, None);
+        assert_eq!(title, "The peer runs a different version of Daisy");
+        assert!(detail.ends_with("Update Daisy on the peer to connect."));
 
-        let following = "[last_session]\nmode = \"connect\"\naddress = \"studio.local\"\ntrust = \"once\"\n";
-        fs::write(&path, following).unwrap();
-        let settings = load_settings(directory.path()).unwrap();
-        assert_eq!(settings.last_session.side, Side::Right);
-        assert_eq!(settings.last_session.trust, Policy::Once);
+        let wrapped = anyhow::Error::from(SessionError::VersionMismatch(Box::new(newer_here))).context("connecting");
+        let home = tempfile::tempdir().unwrap();
+        assert!(version_copy(home.path(), &wrapped).is_some());
+        assert!(version_copy(home.path(), &anyhow::anyhow!("connecting failed")).is_none());
     }
 
     #[test]
@@ -857,6 +922,7 @@ mod tests {
             .unwrap()
             .public_key();
         let mut observer = ControllerObserver {
+            told_version: None,
             events,
             home: directory.path().to_owned(),
             waiting: None,

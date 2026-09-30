@@ -22,7 +22,7 @@ Out of scope:
 
 Every connection uses a Noise `XX` handshake with X25519, ChaCha20-Poly1305 and BLAKE2s, through a library and without a network extension or root.
 
-After the handshake, every message is encrypted and authenticated with a per-direction nonce. Altered, replayed or reordered frames fail authentication. The prologue binds the protocol version into the handshake.
+After the handshake, every message is encrypted and authenticated with a per-direction nonce. Altered, replayed or reordered frames fail authentication. Each side's protocol version travels inside the handshake, so it is authenticated before either side acts on it.
 
 ## Pairing
 

@@ -88,7 +88,7 @@ where
                     for action in release.target.reclaim() { release.injector.execute(&action); }
                     sharing.expect_snapshot();
                 }
-                let crossing = matches!(message, Message::SharedEnter { .. });
+                let crossing = matches!(message, Message::Enter { .. });
                 outgoing.send(message)?;
                 if crossing { outgoing.send_clipboard(sharing.crossing()); }
             }
@@ -121,7 +121,7 @@ where
                             layout.control.publish(meter.average());
                         }
                     }
-                    Message::SharedLeave { generation, along } => {
+                    Message::Leave { generation, along } => {
                         let state = layout.control.state.lock().unwrap_or_else(|e| e.into_inner());
                         let current = state.owns() && state.generation() == generation;
                         drop(state);
@@ -130,28 +130,28 @@ where
                             sharing.expect_snapshot();
                         }
                     }
-                    Message::SharedEnter { generation, .. }
-                    | Message::SharedInput { generation, .. }
-                    | Message::SharedReclaim { generation } => {
+                    Message::Enter { generation, .. }
+                    | Message::Input { generation, .. }
+                    | Message::Reclaim { generation } => {
                         let state = layout.control.state.lock().unwrap_or_else(|e| e.into_inner());
                         let receives = state.receives(generation, layout.control.now()) && !layout.control.local_busy();
                         drop(state);
                         if !receives {
-                            if let Message::SharedEnter { along, .. } = message {
-                                outgoing.send(Message::SharedLeave { generation, along })?;
+                            if let Message::Enter { along, .. } = message {
+                                outgoing.send(Message::Leave { generation, along })?;
                             }
                             continue;
                         }
                         let mut crossing = false;
                         let actions = match message {
-                            Message::SharedEnter { along, .. } => { sharing.expect_snapshot(); release.target.enter(along) },
-                            Message::SharedInput { event, .. } => release.target.input(event),
-                            Message::SharedReclaim { .. } => { crossing = true; release.target.reclaim() },
+                            Message::Enter { along, .. } => { sharing.expect_snapshot(); release.target.enter(along) },
+                            Message::Input { event, .. } => release.target.input(event),
+                            Message::Reclaim { .. } => { crossing = true; release.target.reclaim() },
                             _ => unreachable!(),
                         };
                         for action in actions {
                             match action {
-                                Action::Leave { along } => { outgoing.send(Message::SharedLeave { generation, along })?; crossing = true; },
+                                Action::Leave { along } => { outgoing.send(Message::Leave { generation, along })?; crossing = true; },
                                 other => release.injector.execute(&other),
                             }
                         }
@@ -611,7 +611,7 @@ mod tests {
             peer.send(&Message::Ping { nonce: 1 }).await.unwrap();
             while peer.recv().await.unwrap() != (Message::Pong { nonce: 1 }) {}
             control.note_physical();
-            peer.send(&Message::SharedEnter {
+            peer.send(&Message::Enter {
                 generation: 1,
                 along: 123,
             })
@@ -619,7 +619,7 @@ mod tests {
             .unwrap();
             loop {
                 match peer.recv().await.unwrap() {
-                    Message::SharedLeave { generation, along } => break (generation, along),
+                    Message::Leave { generation, along } => break (generation, along),
                     _ => continue,
                 }
             }
@@ -659,13 +659,13 @@ mod tests {
         let mut board = no_clipboard();
         let script = async {
             peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
-            peer.send(&Message::SharedEnter {
+            peer.send(&Message::Enter {
                 generation: 1,
                 along: 0,
             })
             .await
             .unwrap();
-            peer.send(&Message::SharedInput {
+            peer.send(&Message::Input {
                 generation: 1,
                 event: InputEvent::Key {
                     code: 7,
@@ -699,13 +699,13 @@ mod tests {
             )));
             peer.send(&Message::ControlClaim { generation: 3 }).await.unwrap();
             tokio::time::sleep(crate::control::SETTLE + Duration::from_millis(20)).await;
-            peer.send(&Message::SharedEnter {
+            peer.send(&Message::Enter {
                 generation: 3,
                 along: 0,
             })
             .await
             .unwrap();
-            peer.send(&Message::SharedInput {
+            peer.send(&Message::Input {
                 generation: 1,
                 event: InputEvent::Key {
                     code: 8,
@@ -716,7 +716,7 @@ mod tests {
             })
             .await
             .unwrap();
-            peer.send(&Message::SharedInput {
+            peer.send(&Message::Input {
                 generation: 3,
                 event: InputEvent::Key {
                     code: 9,
@@ -807,7 +807,7 @@ mod tests {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
-        peer.send(&Message::SharedEnter {
+        peer.send(&Message::Enter {
             generation: 1,
             along: 0,
         })
@@ -819,7 +819,7 @@ mod tests {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        peer.send(&Message::SharedInput { generation: 1, event }).await.unwrap();
+        peer.send(&Message::Input { generation: 1, event }).await.unwrap();
     }
 
     /// Everything this system sent until it answers `nonce`, so all earlier
@@ -872,7 +872,7 @@ mod tests {
 
         result.unwrap();
         assert!(
-            seen.contains(&Message::SharedLeave {
+            seen.contains(&Message::Leave {
                 generation: 1,
                 along: 0
             }),
@@ -935,7 +935,7 @@ mod tests {
         let mut pointer = Returned::default();
         let mut board = no_clipboard();
         capture
-            .try_send(Message::SharedEnter {
+            .try_send(Message::Enter {
                 generation: 0,
                 along: 7,
             })
@@ -948,7 +948,7 @@ mod tests {
                     other => seen.push(other),
                 }
             }
-            peer.send(&Message::SharedLeave {
+            peer.send(&Message::Leave {
                 generation: 0,
                 along: 9,
             })
@@ -979,7 +979,7 @@ mod tests {
         result.unwrap();
         assert_eq!(
             seen,
-            vec![Message::SharedEnter {
+            vec![Message::Enter {
                 generation: 0,
                 along: 7
             }]
@@ -992,7 +992,7 @@ mod tests {
         let (local, mut peer) = channels_with_capacity(1).await;
         let control = Arc::new(SharedControl::new(true));
         let (capture, input) = mpsc::channel(2);
-        let enter = Message::SharedEnter {
+        let enter = Message::Enter {
             generation: 0,
             along: 7,
         };
@@ -1299,7 +1299,7 @@ mod tests {
         let control = Arc::new(SharedControl::new(true));
         let (capture, input) = mpsc::channel(16);
         let mut board = board_with(text("copied on this system"), true);
-        let enter = Message::SharedEnter {
+        let enter = Message::Enter {
             generation: 0,
             along: 7,
         };
@@ -1339,7 +1339,7 @@ mod tests {
         let mut board = no_clipboard();
         let script = async {
             // control comes back to this system, then the peer's clipboard follows
-            peer.send(&Message::SharedLeave {
+            peer.send(&Message::Leave {
                 generation: 0,
                 along: 3,
             })
@@ -1386,7 +1386,7 @@ mod tests {
         let script = async {
             peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
             until_snapshot_done(&mut peer).await;
-            peer.send(&Message::SharedEnter {
+            peer.send(&Message::Enter {
                 generation: 1,
                 along: 0,
             })
@@ -1423,14 +1423,14 @@ mod tests {
 
     #[tokio::test]
     async fn sends_its_clipboard_when_control_leaves() {
-        let seen = clipboard_after_handing_back(&[Message::SharedInput {
+        let seen = clipboard_after_handing_back(&[Message::Input {
             generation: 1,
             event: AWAY,
         }])
         .await;
         assert_eq!(
             seen[0],
-            Message::SharedLeave {
+            Message::Leave {
                 generation: 1,
                 along: 0
             }
@@ -1440,7 +1440,7 @@ mod tests {
 
     #[tokio::test]
     async fn sends_its_clipboard_when_control_is_reclaimed() {
-        let seen = clipboard_after_handing_back(&[Message::SharedReclaim { generation: 1 }]).await;
+        let seen = clipboard_after_handing_back(&[Message::Reclaim { generation: 1 }]).await;
         assert_eq!(assembled(&seen), Some(text("copied while the peer was in control")));
     }
 
@@ -1491,7 +1491,7 @@ mod tests {
         result.unwrap();
         assert_eq!(
             seen,
-            vec![Message::SharedLeave {
+            vec![Message::Leave {
                 generation: 1,
                 along: 0
             }],
@@ -1511,7 +1511,7 @@ mod tests {
         };
         let mut board = board_with(image.clone(), true);
         capture
-            .try_send(Message::SharedEnter {
+            .try_send(Message::Enter {
                 generation: 0,
                 along: 7,
             })
@@ -1535,7 +1535,7 @@ mod tests {
                     .unwrap();
                     if !sent_motion {
                         capture
-                            .try_send(Message::SharedInput {
+                            .try_send(Message::Input {
                                 generation: 0,
                                 event: InputEvent::Motion { dx: 1.0, dy: 0.0 },
                             })
@@ -1578,10 +1578,7 @@ mod tests {
 
         result.unwrap();
         assert_eq!(assembled(&seen), Some(image));
-        let motion = seen
-            .iter()
-            .position(|m| matches!(m, Message::SharedInput { .. }))
-            .unwrap();
+        let motion = seen.iter().position(|m| matches!(m, Message::Input { .. })).unwrap();
         assert!(motion < seen.len() - 2, "input waited for the whole image");
     }
 
@@ -1596,7 +1593,7 @@ mod tests {
         };
         let mut board = board_with(image, true);
         capture
-            .try_send(Message::SharedEnter {
+            .try_send(Message::Enter {
                 generation: 0,
                 along: 7,
             })

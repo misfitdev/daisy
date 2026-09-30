@@ -62,6 +62,9 @@ struct AppDelegateIvars {
     menu_discoverable: OnceCell<Retained<NSMenuItem>>,
     side_label: OnceCell<Retained<NSTextField>>,
     side_popup: OnceCell<Retained<NSPopUpButton>>,
+    /// Whether the person changed the screen edge since it last showed the
+    /// saved arrangement.
+    side_edited: Cell<bool>,
     trust_label: OnceCell<Retained<NSTextField>>,
     trust_popup: OnceCell<Retained<NSPopUpButton>>,
     permissions_heading: OnceCell<Retained<NSTextField>>,
@@ -222,6 +225,11 @@ define_class!(
             self.refresh_permissions();
         }
 
+        #[unsafe(method(chooseSide:))]
+        fn choose_side(&self, _sender: &NSPopUpButton) {
+            self.ivars().side_edited.set(true);
+        }
+
         #[unsafe(method(pickNearby:))]
         fn pick_nearby(&self, sender: &NSPopUpButton) {
             // item 0 is the pull-down's title
@@ -369,6 +377,7 @@ impl AppDelegate {
             menu_discoverable: OnceCell::new(),
             side_label: OnceCell::new(),
             side_popup: OnceCell::new(),
+            side_edited: Cell::new(false),
             trust_label: OnceCell::new(),
             trust_popup: OnceCell::new(),
             permissions_heading: OnceCell::new(),
@@ -521,7 +530,12 @@ impl AppDelegate {
         self.ivars().nearby_popup.set(nearby).ok();
 
         let side_label = self.form_label(&content, "Screen edge", 261.0);
-        let side = self.popup(&content, 261.0, &["Right", "Left", "Above", "Below"], None);
+        let side = self.popup(
+            &content,
+            261.0,
+            &["Right", "Left", "Above", "Below"],
+            Some(sel!(chooseSide:)),
+        );
         side.setAccessibilityLabel(Some(&NSString::from_str("Peer screen position")));
 
         let trust_label = self.form_label(&content, "Trust", 217.0);
@@ -655,6 +669,7 @@ impl AppDelegate {
     fn apply_status(&self, status: Status) {
         if let Status::Connected { side, .. } = &status {
             self.ivars().settings.borrow_mut().last_session.side = *side;
+            self.ivars().side_edited.set(false);
             if let Some(popup) = self.ivars().side_popup.get() {
                 popup.selectItemAtIndex(match side {
                     Side::Right => 0,
@@ -723,6 +738,7 @@ impl AppDelegate {
         let _ = self.ivars().controller.send(Command::Start {
             settings,
             allow_pairing,
+            side_chosen: self.ivars().side_edited.replace(false),
         });
     }
 
@@ -775,6 +791,7 @@ impl AppDelegate {
         } else if let Some(field) = self.ivars().address_field.get() {
             field.setStringValue(&NSString::from_str(""));
         }
+        self.ivars().side_edited.set(false);
         if let Some(popup) = self.ivars().side_popup.get() {
             let side = settings.side;
             popup.selectItemAtIndex(match side {

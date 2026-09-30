@@ -47,9 +47,9 @@ The network queues and event-tap queue are bounded. If callback state is contend
 3. The trust layer accepts an already-pinned key or, only while both peers explicitly allow pairing, runs SPAKE2 using the six-digit code as input.
 4. Both sides exchange `Layout`; the most recent choice, or the initiator's on a tie, and its inverse define both crossing directions.
 5. The event tap on the system in use observes local input. While control is local, events pass through untouched.
-6. Pushing the pointer through the shared edge hides and pins the local pointer, then sends `SharedEnter` with the crossing position. Control never crosses while a mouse button is held.
+6. Pushing the pointer through the shared edge hides and pins the local pointer, then sends `Enter` with the crossing position. Control never crosses while a mouse button is held.
 7. Input is swallowed locally and forwarded. A key pressed before crossing keeps its release on the system it was pressed on, so it cannot become stuck remotely.
-8. The peer moves its pointer to the corresponding edge position. Pushing it out through that edge releases held input and sends `SharedLeave`; the local pointer reappears at the same proportional position.
+8. The peer moves its pointer to the corresponding edge position. Pushing it out through that edge releases held input and sends `Leave`; the local pointer reappears at the same proportional position.
 9. Whenever control moves, whether through the edge or because someone started using the other system, the peer giving it up reads its clipboard on a blocking thread and sends it behind input and heartbeats. Chunks are acknowledged and at most four are in flight, so a large image never holds up input. The receiver accepts one snapshot per crossing and writes it once the whole snapshot has arrived.
 10. Control-Option-Command-Escape returns control to the system it was pressed on. Explicit stop, trust revocation, a dropped connection, three seconds of silence or queue overload takes control back immediately.
 

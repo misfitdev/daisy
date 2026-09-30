@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -95,12 +95,13 @@ where
                         // connected do not keep colliding
                         first_seen.remove(&heard.election);
                         let mut expected = match heard.seen { discovery::Seen::Paired(key) => Some(key), discovery::Seen::Pairing => None };
+                        let pairing_candidate = expected.is_none();
                         let attempt = SessionConfig { pairing: pairing.for_peer(expected.is_some()), ..config };
                         let address = heard.address.to_string();
                         observer.connecting(&address, peer_name(config.peers, expected).as_deref());
                         drop(advertiser);
                         let (_, result) = connect_once(attempt, &address, &mut expected, prompt, observer).await;
-                        if expected.is_some() { pairing.completed = true; }
+                        if pairing_candidate && expected.is_some() { pairing.completed = true; }
                         if let Err(error) = result { observer.connection_failed(&address, &error); }
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         break;
@@ -142,8 +143,10 @@ pub struct SessionConfig<'a> {
     pub pairing: Option<Policy>,
     /// Where a newly paired peer sits.
     pub side: Side,
-    /// Also apply `side` to a peer paired before, as a new choice.
-    pub choose_side: bool,
+    /// Also apply `side` to a peer paired before, as a new choice. Taken by
+    /// the first session, so a reconnect cannot override a later choice
+    /// made on the peer.
+    pub choose_side: &'a AtomicBool,
     /// Whether this system shares its clipboard; may change mid-session.
     pub clipboard: &'a watch::Receiver<bool>,
     /// Whether a waiting system advertises itself with Bonjour.
@@ -314,6 +317,11 @@ where
     }
 }
 
+/// The side chosen for this start, for the first session only.
+fn take_side_choice(config: &SessionConfig<'_>) -> Option<Side> {
+    config.choose_side.swap(false, Ordering::AcqRel).then_some(config.side)
+}
+
 /// The name of the paired peer with `key`, if there is one.
 fn peer_name(peers: &PeerStore, key: Option<PublicKey>) -> Option<String> {
     let key = key?;
@@ -417,7 +425,7 @@ where
             channel,
             config.peers,
             &peer,
-            config.choose_side.then_some(config.side),
+            take_side_choice(&config),
             config.clipboard,
             observer,
         )
@@ -466,7 +474,7 @@ where
         channel,
         config.peers,
         &peer,
-        config.choose_side.then_some(config.side),
+        take_side_choice(config),
         config.clipboard,
         observer,
     )
@@ -681,10 +689,24 @@ mod tests {
             name: "Laptop",
             pairing: None,
             side: Side::Right,
-            choose_side: false,
+            choose_side: Box::leak(Box::new(AtomicBool::new(false))),
             clipboard,
             discoverable,
         }
+    }
+
+    #[test]
+    fn a_chosen_side_applies_to_the_first_session_only() {
+        let system = system();
+        let clipboard = watch::channel(true).1;
+        let chosen = AtomicBool::new(true);
+        let config = SessionConfig {
+            side: Side::Above,
+            choose_side: &chosen,
+            ..config(&system, &clipboard)
+        };
+        assert_eq!(take_side_choice(&config), Some(Side::Above));
+        assert_eq!(take_side_choice(&config), None);
     }
 
     #[test]

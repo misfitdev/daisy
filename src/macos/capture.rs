@@ -113,41 +113,35 @@ struct Context {
 }
 
 impl Context {
-    fn send(&self, message: Message) -> bool {
-        let stamped = matches!(
-            message,
-            Message::Enter { .. } | Message::Input { .. } | Message::Reclaim
-        );
-        let message = if stamped {
-            let control = &self.control;
-            let Some(state) = try_lock(&control.state) else {
-                // The session task holds this lock only briefly: keep this
-                // one event here rather than end the session.
-                self.release_local();
-                return false;
-            };
-            if !state.owns() {
-                drop(state);
-                if let Some(mut driver) = try_lock(&self.driver) {
-                    driver.reclaim();
-                }
-                if let Some(mut cursor) = try_lock(&self.cursor) {
-                    cursor.thaw(None);
-                }
-                control.interrupted.store(true, Ordering::Release);
-                control.wake();
-                return false;
-            }
-            let generation = state.generation();
-            match message {
-                Message::Enter { along } => Message::SharedEnter { generation, along },
-                Message::Input { event } => Message::SharedInput { generation, event },
-                Message::Reclaim => Message::SharedReclaim { generation },
-                other => other,
-            }
-        } else {
-            message
+    /// Sends input as part of this system's control, stamped with its
+    /// generation. Input made while the peer has control is not sent: it
+    /// hands control back to this system instead.
+    fn send_stamped(&self, stamp: impl FnOnce(u64) -> Message) -> bool {
+        let control = &self.control;
+        let Some(state) = try_lock(&control.state) else {
+            // The session task holds this lock only briefly: keep this
+            // one event here rather than end the session.
+            self.release_local();
+            return false;
         };
+        if !state.owns() {
+            drop(state);
+            if let Some(mut driver) = try_lock(&self.driver) {
+                driver.reclaim();
+            }
+            if let Some(mut cursor) = try_lock(&self.cursor) {
+                cursor.thaw(None);
+            }
+            control.interrupted.store(true, Ordering::Release);
+            control.wake();
+            return false;
+        }
+        let message = stamp(state.generation());
+        drop(state);
+        self.send(message)
+    }
+
+    fn send(&self, message: Message) -> bool {
         if self.messages.try_send(message).is_ok() {
             true
         } else {
@@ -403,7 +397,9 @@ fn handle(context: &Context, event_type: u32, event: CGEventRef) -> bool {
             if let Some(mut driver) = try_lock(&context.driver) {
                 driver.reclaim();
             }
-            if let Some(mut cursor) = context.cursor_or_recover() {
+            // the session task holds the cursor while yielding control;
+            // it thaws it there, so a busy lock needs nothing here
+            if let Some(mut cursor) = try_lock(&context.cursor) {
                 cursor.thaw(None);
             }
             if let Some(generation) = claim {
@@ -470,7 +466,7 @@ fn handle(context: &Context, event_type: u32, event: CGEventRef) -> bool {
             };
             cursor.freeze(location);
             drop(cursor);
-            !context.send(Message::Enter { along })
+            !context.send_stamped(|generation| Message::Enter { generation, along })
         }
         Route::Forward(event) => {
             if matches!(event, crate::input::InputEvent::Motion { .. }) {
@@ -479,7 +475,7 @@ fn handle(context: &Context, event_type: u32, event: CGEventRef) -> bool {
                 };
                 cursor.hold(location);
             }
-            !context.send(Message::Input { event })
+            !context.send_stamped(|generation| Message::Input { generation, event })
         }
         Route::Reclaim => {
             if let Some(mut cursor) = try_lock(&context.cursor) {
@@ -487,7 +483,7 @@ fn handle(context: &Context, event_type: u32, event: CGEventRef) -> bool {
             } else {
                 context.stop_for_contention();
             }
-            context.send(Message::Reclaim);
+            context.send_stamped(|generation| Message::Reclaim { generation });
             false
         }
     }
@@ -513,7 +509,7 @@ fn handle_gesture(context: &Context, event: CGEventRef) -> bool {
     let route = driver.swipe(step);
     drop(driver);
     match route {
-        Route::Forward(event) => !context.send(Message::Input { event }),
+        Route::Forward(event) => !context.send_stamped(|generation| Message::Input { generation, event }),
         Route::Local => true,
         _ => false,
     }

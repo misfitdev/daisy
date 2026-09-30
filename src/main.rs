@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -50,7 +51,7 @@ enum Command {
         trust: Policy,
         /// Where the peer's screen sits; defaults to the saved arrangement,
         /// or right for a peer paired now
-        #[arg(long, alias = "drive", value_name = "SIDE")]
+        #[arg(long, value_name = "SIDE")]
         side: Option<Side>,
         /// Do not share the clipboard when control crosses
         #[arg(long)]
@@ -71,7 +72,7 @@ enum Command {
         trust: Policy,
         /// Where the peer's screen sits; defaults to the saved arrangement,
         /// or right for a peer paired now
-        #[arg(long, alias = "drive", value_name = "SIDE")]
+        #[arg(long, value_name = "SIDE")]
         side: Option<Side>,
         /// Do not share the clipboard when control crosses
         #[arg(long)]
@@ -169,7 +170,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     name,
                     pairing: pair.then_some(trust),
                     side: side.unwrap_or(Side::Right),
-                    choose_side: side.is_some(),
+                    choose_side: &AtomicBool::new(side.is_some()),
                     clipboard: &clipboard,
                     discoverable: &discoverable,
                 },
@@ -198,7 +199,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     name,
                     pairing: pair.then_some(trust),
                     side: side.unwrap_or(Side::Right),
-                    choose_side: side.is_some(),
+                    choose_side: &AtomicBool::new(side.is_some()),
                     clipboard: &clipboard,
                     discoverable: &discoverable,
                 },
@@ -393,10 +394,10 @@ mod tests {
     }
 
     #[test]
-    fn the_side_is_optional_and_keeps_its_0_1_1_name() {
+    fn the_side_is_optional() {
         let cli = Cli::try_parse_from(["daisy", "connect", "studio.local"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Connect { side: None, .. })));
-        let cli = Cli::try_parse_from(["daisy", "listen", "--drive", "left"]).unwrap();
+        let cli = Cli::try_parse_from(["daisy", "listen", "--side", "left"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Listen {

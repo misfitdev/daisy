@@ -34,24 +34,6 @@ pub enum Message {
     Pong {
         nonce: u64,
     },
-    /// The sender has the keyboard and mouse; the receiver sits on `side`
-    /// of it.
-    Drive {
-        side: Side,
-    },
-    /// The pointer crossed onto the receiver's screen at `along`.
-    Enter {
-        along: Along,
-    },
-    Input {
-        event: InputEvent,
-    },
-    /// The pointer went back to the driving system at `along`.
-    Leave {
-        along: Along,
-    },
-    /// The driving system took control back; release everything and stop.
-    Reclaim,
     /// A piece of the sender's clipboard, sent whenever control crosses.
     Clipboard {
         part: ClipboardPart,
@@ -61,22 +43,26 @@ pub enum Message {
         side: Side,
         chosen: u64,
     },
+    /// The sender takes control, as its `generation`th claim.
     ControlClaim {
         generation: u64,
     },
-    SharedEnter {
+    /// The pointer crossed onto the receiver's screen at `along`.
+    Enter {
         generation: u64,
         along: Along,
     },
-    SharedInput {
+    Input {
         generation: u64,
         event: InputEvent,
     },
-    SharedLeave {
+    /// The pointer went back to the system in control at `along`.
+    Leave {
         generation: u64,
         along: Along,
     },
-    SharedReclaim {
+    /// The system in control took the pointer back; release everything held.
+    Reclaim {
         generation: u64,
     },
 }
@@ -144,9 +130,17 @@ mod tests {
             },
             Message::Ping { nonce: u64::MAX },
             Message::Pong { nonce: 0 },
-            Message::Drive { side: Side::Left },
-            Message::Enter { along: 12 },
+            Message::Layout {
+                side: Side::Left,
+                chosen: u64::MAX,
+            },
+            Message::ControlClaim { generation: 3 },
+            Message::Enter {
+                generation: 3,
+                along: 12,
+            },
             Message::Input {
+                generation: 3,
                 event: InputEvent::Key {
                     code: 0,
                     down: true,
@@ -154,8 +148,11 @@ mod tests {
                     flags: 0x0010_0000,
                 },
             },
-            Message::Leave { along: u16::MAX },
-            Message::Reclaim,
+            Message::Leave {
+                generation: 3,
+                along: u16::MAX,
+            },
+            Message::Reclaim { generation: 3 },
             Message::Clipboard {
                 part: ClipboardPart::Begin {
                     id: 1,
@@ -208,24 +205,12 @@ mod tests {
         );
         assert_eq!(Message::Ping { nonce: 0 }.encode().unwrap()[0], 3);
         assert_eq!(Message::Pong { nonce: 0 }.encode().unwrap()[0], 4);
-        assert_eq!(Message::Drive { side: Side::Left }.encode().unwrap()[0], 5);
-        assert_eq!(Message::Enter { along: 0 }.encode().unwrap()[0], 6);
-        assert_eq!(
-            Message::Input {
-                event: InputEvent::Motion { dx: 0.0, dy: 0.0 },
-            }
-            .encode()
-            .unwrap()[0],
-            7
-        );
-        assert_eq!(Message::Leave { along: 0 }.encode().unwrap()[0], 8);
-        assert_eq!(Message::Reclaim.encode().unwrap()[0], 9);
         let clipboard = Message::Clipboard {
             part: ClipboardPart::End { id: 0 },
         }
         .encode()
         .unwrap();
-        assert_eq!(clipboard[0], 10);
+        assert_eq!(clipboard[0], 5);
         // the second byte is the part's own variant index
         assert_eq!(clipboard[1], 2);
         // tag, part tag, id (0 fits one byte), then the kind's own index
@@ -265,6 +250,36 @@ mod tests {
             .unwrap()[1],
             4
         );
+        let layout = Message::Layout {
+            side: Side::Left,
+            chosen: 0,
+        };
+        assert_eq!(layout.encode().unwrap()[0], 6);
+        assert_eq!(Message::ControlClaim { generation: 0 }.encode().unwrap()[0], 7);
+        assert_eq!(
+            Message::Enter {
+                generation: 0,
+                along: 0
+            }
+            .encode()
+            .unwrap()[0],
+            8
+        );
+        let input = Message::Input {
+            generation: 0,
+            event: InputEvent::Motion { dx: 0.0, dy: 0.0 },
+        };
+        assert_eq!(input.encode().unwrap()[0], 9);
+        assert_eq!(
+            Message::Leave {
+                generation: 0,
+                along: 0
+            }
+            .encode()
+            .unwrap()[0],
+            10
+        );
+        assert_eq!(Message::Reclaim { generation: 0 }.encode().unwrap()[0], 11);
     }
 
     #[test]
