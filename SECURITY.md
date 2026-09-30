@@ -7,7 +7,7 @@ Report suspected vulnerabilities privately through [GitHub private vulnerability
 A report should include:
 
 - A description of the vulnerability and the affected component.
-- The affected version and the macOS version of each Mac involved.
+- The affected version and the macOS version of each system involved.
 - Steps to reproduce, including configuration and any proof-of-concept code.
 - The assessed impact and the preconditions an attacker requires.
 
@@ -25,13 +25,13 @@ In scope:
 
 - Reading, altering or injecting input traffic from a network position.
 - Completing pairing without the one-time code.
-- Establishing a session as a Mac that has not been paired.
-- Disclosure of a Mac's private identity key.
+- Establishing a session as a peer that has not been paired.
+- Disclosure of a system's private identity key.
 - Weaknesses in release signing, notarization or build provenance.
 
 Out of scope:
 
-- Actions taken by a paired Mac, which pairing authorizes by design.
-- Attacks that require the user's account or root on either Mac.
+- Actions taken by a paired peer, which pairing authorizes by design.
+- Attacks that require the user's account or root on either system.
 
 [docs/security-model.md](docs/security-model.md) documents the security design.

@@ -86,11 +86,9 @@ pub fn settings_after_request(before: Access, after: Access, pane: &'static str)
     (after != Access::Granted && before != Access::Undetermined).then_some(pane)
 }
 
-/// What a Mac needs to take part. The Guest only posts input, which takes
-/// Accessibility; the Host also reads the keyboard and trackpad, which takes
-/// Input Monitoring.
-pub fn ready(host: bool, accessibility: Access, input_monitoring: Access) -> bool {
-    accessibility == Access::Granted && (!host || input_monitoring == Access::Granted)
+/// Both systems need Accessibility and Input Monitoring.
+pub fn ready(accessibility: Access, input_monitoring: Access) -> bool {
+    accessibility == Access::Granted && input_monitoring == Access::Granted
 }
 
 /// `tccutil` invocations that clear every Accessibility and Input Monitoring
@@ -197,20 +195,12 @@ mod tests {
     }
 
     #[test]
-    fn a_guest_needs_only_accessibility() {
+    fn every_system_needs_both_permissions() {
         use Access::*;
-        assert!(ready(false, Granted, Denied));
-        assert!(ready(false, Granted, Undetermined));
-        assert!(!ready(false, Denied, Granted));
-    }
-
-    #[test]
-    fn a_host_needs_both() {
-        use Access::*;
-        assert!(ready(true, Granted, Granted));
-        assert!(!ready(true, Granted, Denied));
-        assert!(!ready(true, Granted, Undetermined));
-        assert!(!ready(true, Denied, Granted));
+        assert!(ready(Granted, Granted));
+        assert!(!ready(Granted, Denied));
+        assert!(!ready(Granted, Undetermined));
+        assert!(!ready(Denied, Granted));
     }
 
     #[test]

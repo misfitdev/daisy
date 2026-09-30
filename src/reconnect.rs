@@ -1,4 +1,4 @@
-//! When a connection to the other Mac ends or cannot be made: whether to try
+//! When a connection to the peer ends or cannot be made: whether to try
 //! again, and how long to wait. No I/O; `service::connect` acts on it.
 
 use std::time::Duration;
@@ -13,7 +13,7 @@ use crate::share::Silent;
 pub const STABLE: Duration = Duration::from_secs(30);
 
 /// Waits that double from 1 second to a 10-second cap, each lengthened by up
-/// to the same again at random so two Macs do not retry in lockstep: 1–2 s,
+/// to the same again at random so two peers do not retry in lockstep: 1–2 s,
 /// 2–4 s, 4–8 s, 8–16 s, then 10–20 s. Never gives up on its own.
 pub fn waits() -> ExponentialBackoff {
     ExponentialBuilder::new()
@@ -24,15 +24,15 @@ pub fn waits() -> ExponentialBackoff {
         .build()
 }
 
-/// A different Mac answered at the address; never connect to it in place of
+/// A different system answered at the address; never connect to it in place of
 /// the one that was paired.
 #[derive(Debug, thiserror::Error)]
-#[error("a different Mac answered at {address}; pair with it deliberately if that is intended")]
+#[error("a different system answered at {address}; pair with it deliberately if that is intended")]
 pub struct KeyChanged {
     pub address: String,
 }
 
-/// The other Mac could not be reached at the network level: the connection
+/// The peer could not be reached at the network level: the connection
 /// was refused, timed out, or the name did not resolve.
 #[derive(Debug, thiserror::Error)]
 #[error("could not reach {address}")]

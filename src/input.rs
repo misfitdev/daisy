@@ -1,4 +1,4 @@
-//! Keyboard and mouse input as it travels between Macs, and the rules for
+//! Keyboard and mouse input as it travels between peers, and the rules for
 //! moving control from one screen to the other.
 //!
 //! Nothing here touches macOS: the platform layer turns real events into
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::swipe::{SwipePhase, SwipeStep};
 
-/// Where the other Mac sits relative to this one.
+/// Where the peer sits relative to this system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 pub enum Side {
     Left,
@@ -47,7 +47,7 @@ impl Side {
 /// proportionally.
 pub type Along = u16;
 
-/// One piece of input, forwarded from the driving Mac.
+/// One piece of input, forwarded from the driving system.
 ///
 /// Travels inside `protocol::Message`, so the same rule applies: append
 /// variants, never reorder or remove them.
@@ -56,7 +56,7 @@ pub enum InputEvent {
     /// Pointer motion in points, as the mouse or trackpad reported it.
     Motion { dx: f64, dy: f64 },
     /// `button` 0 is left, 1 right, 2 and up the others. `clicks` is the
-    /// click count the driving Mac computed, so double-click timing follows
+    /// click count the driving system computed, so double-click timing follows
     /// its settings.
     Button { button: u8, down: bool, clicks: u8 },
     /// Scroll distance in points.
@@ -147,28 +147,28 @@ impl Rect {
     }
 }
 
-/// What the driving Mac should do with one of its own input events.
+/// What the driving system should do with one of its own input events.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Route {
-    /// Deliver it to this Mac as usual.
+    /// Deliver it to this system as usual.
     Local,
     /// Swallow it.
     Drop,
-    /// Swallow it, freeze the pointer, and hand control to the other Mac.
+    /// Swallow it, freeze the pointer, and hand control to the peer.
     Enter { along: Along },
-    /// Swallow it and send it to the other Mac.
+    /// Swallow it and send it to the peer.
     Forward(InputEvent),
-    /// Swallow it, take control back here at once, and have the other Mac
+    /// Swallow it, take control back here at once, and have the peer
     /// release everything.
     Reclaim,
 }
 
 /// Escape takes control back from anywhere with Control, Option and Command
-/// held, even if the other Mac or the connection is misbehaving.
+/// held, even if the peer or the connection is misbehaving.
 const ESCAPE_KEY: u16 = 53;
 const ESCAPE_MODIFIERS: u64 = 0x0004_0000 | 0x0008_0000 | 0x0010_0000;
 
-/// Decides, on the Mac with the keyboard, where each input event goes.
+/// Decides, on the system with the keyboard, where each input event goes.
 pub struct Driver {
     screen: Rect,
     side: Side,
@@ -179,12 +179,12 @@ pub struct Driver {
     remote_modifiers: BTreeSet<u16>,
     orphaned_modifiers: BTreeSet<u16>,
     local_buttons: BTreeSet<u8>,
-    // for the swipe under way, whether it began while the other Mac had control
+    // for the swipe under way, whether it began while the peer had control
     swipe_forwarded: Option<bool>,
 }
 
 impl Driver {
-    /// `side` is where the other Mac sits.
+    /// `side` is where the peer sits.
     pub fn new(screen: Rect, side: Side) -> Self {
         Self {
             screen,
@@ -211,7 +211,7 @@ impl Driver {
                 dy: delta.1,
             });
         }
-        // never cross while dragging: the drag would end up split across Macs
+        // never cross while dragging: the drag would end up split across two systems
         if self.local_buttons.is_empty() && self.screen.pushed_through(self.side, point, delta) {
             self.remote = true;
             return Route::Enter {
@@ -251,7 +251,7 @@ impl Driver {
             return Route::Local;
         }
         if down && self.local_keys.contains(&code) {
-            // auto-repeat of a key held since before crossing: this Mac owns it
+            // auto-repeat of a key held since before crossing: this system owns it
             return Route::Drop;
         }
         Route::Forward(InputEvent::Key {
@@ -284,12 +284,12 @@ impl Driver {
         Route::Forward(InputEvent::Modifiers { code, flags })
     }
 
-    /// Whether the swipe under way, or one starting now, happens on this Mac.
+    /// Whether the swipe under way, or one starting now, happens on this system.
     pub fn swipe_is_local(&self) -> bool {
         !self.swipe_forwarded.unwrap_or(self.remote)
     }
 
-    /// A step of a trackpad swipe. A swipe belongs to the Mac that had
+    /// A step of a trackpad swipe. A swipe belongs to the system that had
     /// control when it began, so one under way stays put when control moves.
     pub fn swipe(&mut self, step: SwipeStep) -> Route {
         if step.phase == SwipePhase::Began {
@@ -301,7 +301,7 @@ impl Driver {
         }
         match (forwarded, self.remote) {
             (true, true) => Route::Forward(InputEvent::Swipe { step }),
-            // control came back mid-swipe, and the other Mac cancelled it
+            // control came back mid-swipe, and the peer cancelled it
             (true, false) => Route::Drop,
             (false, _) => Route::Local,
         }
@@ -322,14 +322,14 @@ impl Driver {
         self.screen.entry_point(self.side, along)
     }
 
-    /// The other Mac is gone; take control back without moving the pointer.
+    /// The peer is gone; take control back without moving the pointer.
     pub fn reclaim(&mut self) {
         self.remote = false;
         self.orphaned_modifiers.append(&mut self.remote_modifiers);
     }
 }
 
-/// What the Mac being controlled should do.
+/// What the following system should do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// Move the pointer. `dragging` is the lowest held button, if any.
@@ -361,16 +361,16 @@ pub enum Action {
     Swipe {
         step: SwipeStep,
     },
-    /// The pointer went back out; tell the driving Mac where.
+    /// The pointer went back out; tell the driving system where.
     Leave {
         along: Along,
     },
 }
 
-/// Replays forwarded input on the Mac being controlled.
+/// Replays forwarded input on the following system.
 pub struct Target {
     screen: Rect,
-    // the edge facing the driving Mac
+    // the edge facing the driving system
     exit: Side,
     pointer: Option<Point>,
     keys: BTreeSet<u16>,
@@ -382,7 +382,7 @@ pub struct Target {
 }
 
 impl Target {
-    /// `driver_side` is where the driving Mac said this one sits.
+    /// `driver_side` is where the driving system said this one sits.
     pub fn new(screen: Rect, driver_side: Side) -> Self {
         Self {
             screen,
@@ -487,7 +487,7 @@ impl Target {
         }
     }
 
-    /// The driving Mac took control back without the pointer leaving.
+    /// The driving system took control back without the pointer leaving.
     pub fn reclaim(&mut self) -> Vec<Action> {
         let actions = self.release_all();
         self.pointer = None;
@@ -649,7 +649,7 @@ mod tests {
         assert_eq!(driver.key(COMMAND_KEY, true, false, COMMAND_FLAG), Route::Local);
         assert!(matches!(driver.motion((0.0, 250.0), (-3.0, 0.0)), Route::Enter { .. }));
 
-        // its auto-repeat and release stay on this Mac
+        // its auto-repeat and release stay on this system
         assert_eq!(driver.key(COMMAND_KEY, true, true, COMMAND_FLAG), Route::Drop);
         assert_eq!(driver.key(COMMAND_KEY, false, false, 0), Route::Local);
         // a key pressed after crossing goes over, press and release
@@ -784,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn a_swipe_stays_with_the_mac_it_began_on() {
+    fn a_swipe_stays_with_the_system_it_began_on() {
         let mut driver = Driver::new(SCREEN, Side::Left);
         driver.swipe(swipe(SwipePhase::Began, 0.0));
         assert!(matches!(driver.motion((0.0, 250.0), (-3.0, 0.0)), Route::Enter { .. }));

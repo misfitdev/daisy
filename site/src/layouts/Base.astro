@@ -10,10 +10,10 @@ interface Props {
 }
 const {
   title,
-  description = "Share one keyboard, mouse and trackpad swipes between Macs on your network. No Apple ID, no iCloud, no account.",
+  description = "Share one keyboard, mouse and trackpad swipes between systems on your network. No Apple ID, no iCloud, no account.",
   current,
 } = Astro.props;
-const fullTitle = title ? `${title} · Daisy` : "Daisy · One keyboard and trackpad for every Mac";
+const fullTitle = title ? `${title} · Daisy` : "Daisy · One keyboard and trackpad for every screen";
 const canonical = new URL(Astro.url.pathname, Astro.site);
 const og = new URL(href("/og.png"), Astro.site);
 const nav = [
@@ -39,7 +39,7 @@ const nav = [
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
     <meta property="og:image" content={og} />
-    <meta property="og:image:alt" content="Daisy connects a flowing chain of Macs into one desk." />
+    <meta property="og:image:alt" content="Daisy connects a flowing chain of systems into one desk." />
     <meta name="twitter:card" content="summary_large_image" />
   </head>
   <body>
@@ -67,7 +67,7 @@ const nav = [
       <div class="wrap footer-row">
         <div class="footer-brand">
           <Flower size={36} />
-          <p>Daisy {version} beta. Mac to Mac, by design.</p>
+          <p>Daisy {version} beta. Mac-to-Mac, by design.</p>
         </div>
         <ul class="footer-links">
           <li><a href={href("/download/")}>Download</a></li>

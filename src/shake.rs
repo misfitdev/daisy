@@ -1,8 +1,8 @@
-//! Recognizing a shake of the pointer, so the Mac being controlled can
+//! Recognizing a shake of the pointer, so the following system can
 //! enlarge it the way macOS does for its own mouse.
 //!
 //! macOS detects the shake from real hardware input only; motion posted as
-//! events never triggers it, so the controlled Mac watches the motion it
+//! events never triggers it, so the following system watches the motion it
 //! replays and magnifies the pointer itself.
 
 use std::collections::VecDeque;

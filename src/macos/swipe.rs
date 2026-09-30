@@ -87,7 +87,7 @@ impl Drop for Event {
     }
 }
 
-/// Replay one step of a swipe captured on the other Mac, live, so the Dock
+/// Replay one step of a swipe captured on the peer, live, so the Dock
 /// follows it as it would the fingers. Only for macOS 27 and later; see
 /// `can_synthesize`.
 ///
@@ -142,6 +142,16 @@ fn post_step(step: &SwipeStep) {
     };
     // SAFETY: both events are live until dropped here
     unsafe {
+        CGEventSetIntegerValueField(
+            dock.as_ptr(),
+            super::ffi::kCGEventSourceUserData,
+            super::ffi::DAISY_EVENT_MARKER,
+        );
+        CGEventSetIntegerValueField(
+            companion.as_ptr(),
+            super::ffi::kCGEventSourceUserData,
+            super::ffi::DAISY_EVENT_MARKER,
+        );
         CGEventPost(kCGSessionEventTap, dock.as_ptr());
         CGEventPost(kCGSessionEventTap, companion.as_ptr());
     }
@@ -476,7 +486,7 @@ mod tests {
     /// Needs macOS 27, a Space to the right of the current one, and
     /// Accessibility for the test binary; it switches Spaces while it runs.
     #[test]
-    #[ignore = "switches Spaces on this Mac; run by hand"]
+    #[ignore = "switches Spaces on this system; run by hand"]
     fn the_dock_follows_a_replayed_swipe() {
         let home = active_space();
         let back = || {

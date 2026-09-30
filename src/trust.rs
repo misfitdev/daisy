@@ -1,7 +1,7 @@
-//! How long this Mac keeps trusting a Mac it paired with.
+//! How long this system keeps trusting a peer it paired with.
 //!
-//! Trust is never forever unless asked for: a Mac paired once, long ago,
-//! must not be able to come back and take over the keyboard. Each Mac
+//! Trust is never forever unless asked for: a peer paired once, long ago,
+//! must not be able to come back and take over the keyboard. Each side
 //! applies its own policy to the other, and a session needs both to trust
 //! each other, so the stricter of the two always wins.
 
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 /// Trust under the default policy ends after this long without a session.
 pub const IDLE_LIMIT: Duration = Duration::from_secs(96 * 60 * 60);
-/// How long a "just this once" Mac may reconnect after an unexpected drop.
+/// How long a "just this once" peer may reconnect after an unexpected drop.
 pub const ONCE_GRACE: Duration = Duration::from_secs(60);
 /// The longest deadline `--trust <N>d` accepts, about ten years.
 const MAX_DAYS: u32 = 3650;
@@ -34,7 +34,7 @@ pub enum Policy {
     /// Until `IDLE_LIMIT` passes without a session; being connected renews it.
     #[default]
     Idle,
-    /// Until this many days after pairing, however often the Macs connect.
+    /// Until this many days after pairing, however often the two connect.
     Days(u32),
     /// For one session, and a reconnect within `ONCE_GRACE` of it dropping.
     Once,
@@ -44,7 +44,7 @@ pub enum Policy {
 
 impl Policy {
     /// When trust ends, or `None` if it never does. `live` means a session
-    /// with the Mac is running now, which keeps idle and once trust alive
+    /// with the peer is running now, which keeps idle and once trust alive
     /// but not a deadline.
     pub fn expires_at(self, paired_at: Timestamp, last_seen: Timestamp, live: bool) -> Option<Timestamp> {
         match self {

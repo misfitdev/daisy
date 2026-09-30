@@ -3,6 +3,7 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::c_void;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use objc2::rc::Retained;
@@ -12,8 +13,8 @@ use objc2_app_kit::{
     NSAccessibility, NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControlStateValueMixed,
     NSControlStateValueOff, NSControlStateValueOn, NSFont, NSImage, NSImageView, NSMenu, NSMenuItem, NSPopUpButton,
-    NSSegmentStyle, NSSegmentSwitchTracking, NSSegmentedControl, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
-    NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
+    NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -21,6 +22,7 @@ use objc2_foundation::{
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
+use crate::control::Link;
 use crate::controller::{self, AppSettings, Command, Connection, Event, Handle, SessionSettings, Status};
 use crate::input::Side;
 use crate::peers::Peer;
@@ -37,6 +39,9 @@ struct AppDelegateIvars {
     settings: RefCell<AppSettings>,
     peers: RefCell<Vec<Peer>>,
     status: RefCell<Status>,
+    /// Latency and control in the running session, once reported.
+    link: Cell<Option<Link>>,
+    connected_at: Cell<Option<Instant>>,
     window: OnceCell<Retained<NSWindow>>,
     status_item: OnceCell<Retained<NSStatusItem>>,
     menu_status: OnceCell<Retained<NSMenuItem>>,
@@ -47,18 +52,14 @@ struct AppDelegateIvars {
     status_title: OnceCell<Retained<NSTextField>>,
     status_detail: OnceCell<Retained<NSTextField>>,
     connection_group: OnceCell<Retained<NSBox>>,
-    connection_control: OnceCell<Retained<NSSegmentedControl>>,
     address_label: OnceCell<Retained<NSTextField>>,
     address_field: OnceCell<Retained<NSTextField>>,
     nearby_popup: OnceCell<Retained<NSPopUpButton>>,
     nearby: RefCell<Vec<controller::Nearby>>,
-    /// The address and key of the Mac last picked from Nearby; the key is
+    /// The address and key of the peer last picked from Nearby; the key is
     /// used only while the address field still shows that address.
     nearby_choice: RefCell<Option<(String, String)>>,
     menu_discoverable: OnceCell<Retained<NSMenuItem>>,
-    role_label: OnceCell<Retained<NSTextField>>,
-    role_control: OnceCell<Retained<NSSegmentedControl>>,
-    role_detail: OnceCell<Retained<NSTextField>>,
     side_label: OnceCell<Retained<NSTextField>>,
     side_popup: OnceCell<Retained<NSPopUpButton>>,
     trust_label: OnceCell<Retained<NSTextField>>,
@@ -173,17 +174,6 @@ define_class!(
             let _ = self.ivars().controller.send(Command::Stop);
         }
 
-        #[unsafe(method(connectionChanged:))]
-        fn connection_changed(&self, _sender: Option<&AnyObject>) {
-            self.update_conditional_controls();
-        }
-
-        #[unsafe(method(controlChanged:))]
-        fn control_changed(&self, _sender: Option<&AnyObject>) {
-            self.update_conditional_controls();
-            self.update_action_buttons();
-        }
-
         #[unsafe(method(resetPermissions:))]
         fn reset_permissions(&self, _sender: Option<&AnyObject>) {
             let alert = NSAlert::new(self.mtm());
@@ -236,16 +226,16 @@ define_class!(
         fn pick_nearby(&self, sender: &NSPopUpButton) {
             // item 0 is the pull-down's title
             let index = sender.indexOfSelectedItem() - 1;
-            let Some(mac) = usize::try_from(index)
+            let Some(peer) = usize::try_from(index)
                 .ok()
                 .and_then(|index| self.ivars().nearby.borrow().get(index).cloned())
             else {
                 return;
             };
             if let Some(field) = self.ivars().address_field.get() {
-                field.setStringValue(&NSString::from_str(&mac.address));
+                field.setStringValue(&NSString::from_str(&peer.address));
             }
-            *self.ivars().nearby_choice.borrow_mut() = mac.key.map(|key| (mac.address.clone(), key.to_hex()));
+            *self.ivars().nearby_choice.borrow_mut() = peer.key.map(|key| (peer.address.clone(), key.to_hex()));
         }
 
         #[unsafe(method(toggleDiscoverable:))]
@@ -359,6 +349,8 @@ impl AppDelegate {
             settings: RefCell::new(AppSettings::default()),
             peers: RefCell::new(Vec::new()),
             status: RefCell::new(Status::Idle),
+            link: Cell::new(None),
+            connected_at: Cell::new(None),
             window: OnceCell::new(),
             status_item: OnceCell::new(),
             menu_status: OnceCell::new(),
@@ -369,16 +361,12 @@ impl AppDelegate {
             status_title: OnceCell::new(),
             status_detail: OnceCell::new(),
             connection_group: OnceCell::new(),
-            connection_control: OnceCell::new(),
             address_label: OnceCell::new(),
             address_field: OnceCell::new(),
             nearby_popup: OnceCell::new(),
             nearby: RefCell::new(Vec::new()),
             nearby_choice: RefCell::new(None),
             menu_discoverable: OnceCell::new(),
-            role_label: OnceCell::new(),
-            role_control: OnceCell::new(),
-            role_detail: OnceCell::new(),
             side_label: OnceCell::new(),
             side_popup: OnceCell::new(),
             trust_label: OnceCell::new(),
@@ -405,7 +393,7 @@ impl AppDelegate {
         let status_item = status_bar.statusItemWithLength(NSSquareStatusItemLength);
         let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Daisy"));
 
-        let status = self.menu_item("Disconnected", None, false);
+        let status = self.menu_item("Stopped", None, false);
         let open = self.menu_item("Open Daisy…", Some(sel!(openDaisy:)), true);
         let start_stop = self.menu_item("Start", Some(sel!(startOrStop:)), true);
         let pair = self.menu_item("Pair a New Peer…", Some(sel!(openDaisy:)), true);
@@ -491,15 +479,15 @@ impl AppDelegate {
         separator.setBoxType(NSBoxType::Separator);
         content.addSubview(&separator);
 
-        let status_title = self.label("Disconnected", 17.0, true);
+        let status_title = self.label("Stopped", 17.0, true);
         status_title.setFrame(frame(28.0, 574.0, 524.0, 24.0));
         content.addSubview(&status_title);
         let status_detail = NSTextField::wrappingLabelWithString(
-            &NSString::from_str("Set how this system connects, then start sharing or pair a new peer."),
+            &NSString::from_str("Pair with a peer, then choose where its screen sits."),
             mtm,
         );
         status_detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        status_detail.setFrame(frame(28.0, 528.0, 524.0, 38.0));
+        status_detail.setFrame(frame(28.0, 504.0, 524.0, 62.0));
         content.addSubview(&status_detail);
 
         let connection_heading = self.label("Connection", 15.0, true);
@@ -510,25 +498,21 @@ impl AppDelegate {
         let connection_group = self.group(frame(28.0, 196.0, 524.0, 274.0));
         content.addSubview(&connection_group);
 
-        self.form_label(&content, "This system", 433.0);
-        let connection = self.segmented_control(
-            &content,
-            433.0,
-            &["Wait for a peer", "Connect by Address"],
-            sel!(connectionChanged:),
-        );
-        connection.setAccessibilityLabel(Some(&NSString::from_str("Connection")));
+        self.form_label(&content, "Nearby peers", 433.0);
+        let automatic = self.label("Connect automatically on this network.", 13.0, false);
+        automatic.setFrame(frame(180.0, 433.0, 352.0, 24.0));
+        content.addSubview(&automatic);
 
-        let address_label = self.form_label(&content, "Peer address", 389.0);
+        let address_label = self.form_label(&content, "Address (optional)", 389.0);
         let address = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
-        address.setPlaceholderString(Some(&NSString::from_str("studio.local")));
+        address.setPlaceholderString(Some(&NSString::from_str("Automatic, or enter an address")));
         address.setAccessibilityLabel(Some(&NSString::from_str("Peer address")));
         address.setFrame(frame(180.0, 384.0, 212.0, 28.0));
         content.addSubview(&address);
         let nearby =
             NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), frame(400.0, 382.0, 132.0, 30.0), true);
         nearby.addItemWithTitle(&NSString::from_str("Nearby"));
-        nearby.setAccessibilityLabel(Some(&NSString::from_str("Nearby Macs")));
+        nearby.setAccessibilityLabel(Some(&NSString::from_str("Nearby peers")));
         unsafe {
             nearby.setTarget(Some(self));
             nearby.setAction(Some(sel!(pickNearby:)));
@@ -536,21 +520,9 @@ impl AppDelegate {
         content.addSubview(&nearby);
         self.ivars().nearby_popup.set(nearby).ok();
 
-        let role_label = self.form_label(&content, "Role", 345.0);
-        let control = self.segmented_control(&content, 345.0, &["Host", "Guest"], sel!(controlChanged:));
-        control.setAccessibilityLabel(Some(&NSString::from_str("Role")));
-
-        let role_detail = NSTextField::wrappingLabelWithString(
-            &NSString::from_str("Uses this system's keyboard and trackpad. Either system can make the connection."),
-            mtm,
-        );
-        role_detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        role_detail.setFrame(frame(180.0, 305.0, 352.0, 34.0));
-        content.addSubview(&role_detail);
-
         let side_label = self.form_label(&content, "Screen edge", 261.0);
         let side = self.popup(&content, 261.0, &["Right", "Left", "Above", "Below"], None);
-        side.setAccessibilityLabel(Some(&NSString::from_str("Guest screen position")));
+        side.setAccessibilityLabel(Some(&NSString::from_str("Peer screen position")));
 
         let trust_label = self.form_label(&content, "Trust", 217.0);
         let trust = self.popup(
@@ -602,12 +574,8 @@ impl AppDelegate {
         self.ivars().status_title.set(status_title).ok();
         self.ivars().status_detail.set(status_detail).ok();
         self.ivars().connection_group.set(connection_group).ok();
-        self.ivars().connection_control.set(connection).ok();
         self.ivars().address_label.set(address_label).ok();
         self.ivars().address_field.set(address).ok();
-        self.ivars().role_label.set(role_label).ok();
-        self.ivars().role_control.set(control).ok();
-        self.ivars().role_detail.set(role_detail).ok();
         self.ivars().side_label.set(side_label).ok();
         self.ivars().side_popup.set(side).ok();
         self.ivars().trust_label.set(trust_label).ok();
@@ -627,6 +595,10 @@ impl AppDelegate {
     fn handle_event(&self, event: Event) {
         match event {
             Event::Nearby(nearby) => self.show_nearby(nearby),
+            Event::Link(link) => {
+                self.ivars().link.set(Some(link));
+                self.render_status();
+            }
             Event::Ready {
                 settings,
                 peers,
@@ -681,44 +653,65 @@ impl AppDelegate {
     }
 
     fn apply_status(&self, status: Status) {
-        let (title, detail, connected) = status_copy(&status);
-        if let Some(label) = self.ivars().status_title.get() {
-            label.setStringValue(&NSString::from_str(&title));
+        if let Status::Connected { side, .. } = &status {
+            self.ivars().settings.borrow_mut().last_session.side = *side;
+            if let Some(popup) = self.ivars().side_popup.get() {
+                popup.selectItemAtIndex(match side {
+                    Side::Right => 0,
+                    Side::Left => 1,
+                    Side::Above => 2,
+                    Side::Below => 3,
+                });
+            }
         }
-        if let Some(label) = self.ivars().status_detail.get() {
-            label.setStringValue(&NSString::from_str(&detail));
-        }
-        if let Some(item) = self.ivars().menu_status.get() {
-            item.setTitle(&NSString::from_str(&title));
+        let was_connected = matches!(*self.ivars().status.borrow(), Status::Connected { .. });
+        if !matches!(status, Status::Connected { .. }) {
+            self.ivars().connected_at.set(None);
+            self.ivars().link.set(None);
+        } else if !was_connected {
+            self.ivars().connected_at.set(Some(Instant::now()));
+            self.ivars().link.set(None);
         }
         if let Some(item) = self.ivars().menu_start_stop.get() {
             item.setTitle(&NSString::from_str(if is_active(&status) { "Stop" } else { "Start" }));
         }
-        if let Some(item) = self.ivars().status_item.get()
-            && let Some(button) = item.button(self.mtm())
-        {
-            self.set_status_image(&button, connected);
-        }
         let problem = matches!(status, Status::Problem { .. });
         *self.ivars().status.borrow_mut() = status;
+        self.render_status();
         self.update_action_buttons();
         if problem {
             self.open_window();
         }
     }
 
+    fn render_status(&self) {
+        let live = self
+            .ivars()
+            .link
+            .get()
+            .zip(self.ivars().connected_at.get().map(|at| at.elapsed()));
+        let copy = status_copy(&self.ivars().status.borrow(), live);
+        if let Some(label) = self.ivars().status_title.get() {
+            label.setStringValue(&NSString::from_str(&copy.title));
+        }
+        if let Some(label) = self.ivars().status_detail.get() {
+            label.setStringValue(&NSString::from_str(&copy.detail));
+        }
+        if let Some(item) = self.ivars().menu_status.get() {
+            item.setTitle(&NSString::from_str(&copy.menu));
+        }
+        if let Some(item) = self.ivars().status_item.get()
+            && let Some(button) = item.button(self.mtm())
+        {
+            self.set_status_image(&button, copy.connected);
+        }
+    }
+
     fn start(&self, allow_pairing: bool) {
         if !self.permissions_granted() {
-            let host = self.is_host();
             self.show_alert(
-                "Permissions are required",
-                if host {
-                    "The Host needs Accessibility and Input Monitoring. If System Settings already shows Daisy \
-                     switched on, choose Reset Permissions in the Daisy menu."
-                } else {
-                    "The Guest needs Accessibility. If System Settings already shows Daisy switched on, choose \
-                     Reset Permissions in the Daisy menu."
-                },
+                "Grant Daisy permission",
+                "Daisy needs Accessibility and Input Monitoring on both systems. If System Settings already shows Daisy switched on, choose Reset Permissions in Daisy's menu.",
                 NSAlertStyle::Informational,
             );
             self.open_window();
@@ -734,40 +727,31 @@ impl AppDelegate {
     }
 
     fn settings_from_controls(&self) -> Option<SessionSettings> {
-        let connection = match self.ivars().connection_control.get()?.selectedSegment() {
-            0 => Connection::Listen {
-                bind: "0.0.0.0".to_owned(),
-                port: crate::service::DEFAULT_PORT,
-            },
-            _ => {
-                let address = self.ivars().address_field.get()?.stringValue().to_string();
-                let address = address.trim().to_owned();
-                if address.is_empty() {
-                    self.show_alert(
-                        "Enter the peer's address",
-                        "Use a local name such as studio.local or an IP address.",
-                        NSAlertStyle::Informational,
-                    );
-                    return None;
-                }
-                let peer = self
-                    .ivars()
-                    .nearby_choice
-                    .borrow()
-                    .as_ref()
-                    .filter(|(chosen, _)| *chosen == address)
-                    .map(|(_, key)| key.clone());
-                Connection::Connect { address, peer }
-            }
+        let address = self
+            .ivars()
+            .address_field
+            .get()?
+            .stringValue()
+            .to_string()
+            .trim()
+            .to_owned();
+        let connection = if address.is_empty() {
+            Connection::Automatic
+        } else {
+            let peer = self
+                .ivars()
+                .nearby_choice
+                .borrow()
+                .as_ref()
+                .filter(|(chosen, _)| *chosen == address)
+                .map(|(_, key)| key.clone());
+            Connection::Connect { address, peer }
         };
-        let drive = match self.ivars().role_control.get()?.selectedSegment() {
-            0 => Some(match self.ivars().side_popup.get()?.indexOfSelectedItem() {
-                0 => Side::Right,
-                1 => Side::Left,
-                2 => Side::Above,
-                _ => Side::Below,
-            }),
-            _ => None,
+        let side = match self.ivars().side_popup.get()?.indexOfSelectedItem() {
+            0 => Side::Right,
+            1 => Side::Left,
+            2 => Side::Above,
+            _ => Side::Below,
         };
         let trust = match self.ivars().trust_popup.get()?.indexOfSelectedItem() {
             1 => Policy::Once,
@@ -777,32 +761,22 @@ impl AppDelegate {
         };
         Some(SessionSettings {
             connection,
-            drive,
+            side,
             trust,
         })
     }
 
     fn apply_settings(&self, settings: &SessionSettings) {
-        match &settings.connection {
-            Connection::Listen { .. } => {
-                if let Some(control) = self.ivars().connection_control.get() {
-                    control.setSelectedSegment(0);
-                }
+        if let Connection::Connect { address, peer } = &settings.connection {
+            *self.ivars().nearby_choice.borrow_mut() = peer.clone().map(|key| (address.clone(), key));
+            if let Some(field) = self.ivars().address_field.get() {
+                field.setStringValue(&NSString::from_str(address));
             }
-            Connection::Connect { address, peer } => {
-                if let Some(control) = self.ivars().connection_control.get() {
-                    control.setSelectedSegment(1);
-                }
-                *self.ivars().nearby_choice.borrow_mut() = peer.clone().map(|key| (address.clone(), key));
-                if let Some(field) = self.ivars().address_field.get() {
-                    field.setStringValue(&NSString::from_str(address));
-                }
-            }
+        } else if let Some(field) = self.ivars().address_field.get() {
+            field.setStringValue(&NSString::from_str(""));
         }
-        if let Some(control) = self.ivars().role_control.get() {
-            control.setSelectedSegment(if settings.drive.is_some() { 0 } else { 1 });
-        }
-        if let (Some(side), Some(popup)) = (settings.drive, self.ivars().side_popup.get()) {
+        if let Some(popup) = self.ivars().side_popup.get() {
+            let side = settings.side;
             popup.selectItemAtIndex(match side {
                 Side::Right => 0,
                 Side::Left => 1,
@@ -823,83 +797,19 @@ impl AppDelegate {
     }
 
     fn update_conditional_controls(&self) {
-        let connecting = self
-            .ivars()
-            .connection_control
-            .get()
-            .is_some_and(|control| control.selectedSegment() == 1);
-
-        let mut y = 433.0;
-        if let Some(control) = self.ivars().connection_control.get() {
-            control.setFrame(frame(180.0, y - 5.0, 352.0, 30.0));
-        }
-
-        if let Some(label) = self.ivars().address_label.get() {
-            label.setHidden(!connecting);
-        }
-        if let Some(field) = self.ivars().address_field.get() {
-            field.setHidden(!connecting);
-        }
-        if let Some(popup) = self.ivars().nearby_popup.get() {
-            popup.setHidden(!connecting);
-        }
-
-        if connecting {
-            y -= 44.0;
-            if let Some(label) = self.ivars().address_label.get() {
-                label.setFrame(frame(48.0, y, 120.0, 24.0));
-            }
-            if let Some(field) = self.ivars().address_field.get() {
-                field.setFrame(frame(180.0, y - 5.0, 212.0, 28.0));
-            }
-            if let Some(popup) = self.ivars().nearby_popup.get() {
-                popup.setFrame(frame(400.0, y - 7.0, 132.0, 30.0));
-            }
-        }
-
-        y -= 44.0;
-        if let Some(label) = self.ivars().role_label.get() {
-            label.setFrame(frame(48.0, y, 120.0, 24.0));
-        }
-        if let Some(control) = self.ivars().role_control.get() {
-            control.setFrame(frame(180.0, y - 5.0, 352.0, 30.0));
-        }
-
-        let host = self
-            .ivars()
-            .role_control
-            .get()
-            .is_some_and(|control| control.selectedSegment() == 0);
-        if let Some(detail) = self.ivars().role_detail.get() {
-            detail.setStringValue(&NSString::from_str(role_copy(host)));
-            detail.setFrame(frame(180.0, y - 40.0, 352.0, 34.0));
-        }
-
         if let Some(label) = self.ivars().side_label.get() {
-            label.setHidden(!host);
+            label.setFrame(frame(48.0, 345.0, 120.0, 24.0));
         }
         if let Some(popup) = self.ivars().side_popup.get() {
-            popup.setHidden(!host);
+            popup.setFrame(frame(180.0, 340.0, 352.0, 30.0));
         }
-
-        y -= 84.0;
-        if host {
-            if let Some(label) = self.ivars().side_label.get() {
-                label.setFrame(frame(48.0, y, 120.0, 24.0));
-            }
-            if let Some(popup) = self.ivars().side_popup.get() {
-                popup.setFrame(frame(180.0, y - 5.0, 352.0, 30.0));
-            }
-            y -= 44.0;
-        }
-
         if let Some(label) = self.ivars().trust_label.get() {
-            label.setFrame(frame(48.0, y, 120.0, 24.0));
+            label.setFrame(frame(48.0, 301.0, 120.0, 24.0));
         }
         if let Some(popup) = self.ivars().trust_popup.get() {
-            popup.setFrame(frame(180.0, y - 5.0, 352.0, 30.0));
+            popup.setFrame(frame(180.0, 296.0, 352.0, 30.0));
         }
-
+        let y = 301.0;
         let connection_bottom = y - 21.0;
         if let Some(group) = self.ivars().connection_group.get() {
             group.setFrame(frame(28.0, connection_bottom, 524.0, 470.0 - connection_bottom));
@@ -947,19 +857,8 @@ impl AppDelegate {
         self.update_action_buttons();
     }
 
-    fn is_host(&self) -> bool {
-        self.ivars()
-            .role_control
-            .get()
-            .is_none_or(|control| control.selectedSegment() == 0)
-    }
-
     fn permissions_granted(&self) -> bool {
-        permissions::ready(
-            self.is_host(),
-            permissions::accessibility(),
-            permissions::input_monitoring(),
-        )
+        permissions::ready(permissions::accessibility(), permissions::input_monitoring())
     }
 
     fn update_action_buttons(&self) {
@@ -1042,13 +941,13 @@ impl AppDelegate {
             popup.removeAllItems();
             popup.addItemWithTitle(&NSString::from_str("Nearby"));
             if nearby.is_empty() {
-                popup.addItemWithTitle(&NSString::from_str("No Macs found"));
+                popup.addItemWithTitle(&NSString::from_str("No peers found"));
                 if let Some(item) = popup.lastItem() {
                     item.setEnabled(false);
                 }
             }
-            for mac in &nearby {
-                popup.addItemWithTitle(&NSString::from_str(&nearby_title(mac)));
+            for peer in &nearby {
+                popup.addItemWithTitle(&NSString::from_str(&nearby_title(peer)));
             }
         }
         *self.ivars().nearby.borrow_mut() = nearby;
@@ -1189,35 +1088,6 @@ impl AppDelegate {
         accent
     }
 
-    fn segmented_control(
-        &self,
-        content: &NSView,
-        y: f64,
-        items: &[&str],
-        action: objc2::runtime::Sel,
-    ) -> Retained<NSSegmentedControl> {
-        let control = NSSegmentedControl::initWithFrame(
-            NSSegmentedControl::alloc(self.mtm()),
-            frame(180.0, y - 5.0, 352.0, 30.0),
-        );
-        control.setSegmentCount(items.len() as isize);
-        control.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
-        control.setSegmentStyle(NSSegmentStyle::Rounded);
-        let segment_width = 352.0 / items.len() as f64;
-        for (index, item) in items.iter().enumerate() {
-            control.setLabel_forSegment(&NSString::from_str(item), index as isize);
-            control.setWidth_forSegment(segment_width, index as isize);
-        }
-        control.setSelectedSegment(0);
-        control.setSelectedSegmentBezelColor(Some(&coral_color()));
-        unsafe {
-            control.setTarget(Some(self));
-            control.setAction(Some(action));
-        }
-        content.addSubview(&control);
-        control
-    }
-
     fn popup(
         &self,
         content: &NSView,
@@ -1269,51 +1139,99 @@ pub fn run(home: PathBuf, name: String) -> Result<()> {
     let delegate = AppDelegate::new(mtm, controller);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    crate::macos::main_run_loop_starting();
     app.run();
     Ok(())
 }
 
-fn status_copy(status: &Status) -> (String, String, bool) {
+/// What the window and menu say about the session.
+#[derive(Debug, PartialEq, Eq)]
+struct StatusCopy {
+    title: String,
+    detail: String,
+    /// The menu's status line: the title, with latency once measured.
+    menu: String,
+    connected: bool,
+}
+
+/// `live` is the running session's latest report and how long it has run.
+fn status_copy(status: &Status, live: Option<(Link, Duration)>) -> StatusCopy {
+    let plain = |title: String, detail: String| StatusCopy {
+        menu: title.clone(),
+        title,
+        detail,
+        connected: false,
+    };
     match status {
-        Status::Idle => (
-            "Disconnected".to_owned(),
-            "Choose how this system connects, then start sharing or pair a new peer.".to_owned(),
-            false,
+        Status::Idle => plain(
+            "Stopped".to_owned(),
+            "Pair with a peer, then choose where its screen sits.".to_owned(),
         ),
-        Status::Starting => (
-            "Starting…".to_owned(),
-            "Daisy is preparing the connection.".to_owned(),
-            false,
-        ),
-        Status::Waiting { port, pairing } => (
-            if *pairing {
-                "Waiting to pair".to_owned()
-            } else {
-                "Waiting for a peer".to_owned()
+        Status::Starting => plain("Starting…".to_owned(), "Daisy is preparing the connection.".to_owned()),
+        Status::Waiting {
+            port,
+            pairing,
+            looking_for,
+        } => plain(
+            match (pairing, looking_for) {
+                (true, _) => "Waiting to pair".to_owned(),
+                (false, Some(peer)) => format!("Looking for {peer}"),
+                (false, None) => "Looking for peers".to_owned(),
             },
             format!("This system is available on port {port}."),
-            false,
         ),
-        Status::Connecting { address } => ("Connecting…".to_owned(), format!("Reaching {address}."), false),
-        Status::Reconnecting { address, wait } => (
-            "Reconnecting…".to_owned(),
+        Status::Connecting { address, peer } => plain(
+            peer.as_ref()
+                .map_or_else(|| "Connecting…".to_owned(), |peer| format!("Connecting to {peer}…")),
+            format!("Reaching {address}."),
+        ),
+        Status::Reconnecting { address, peer, wait } => plain(
+            peer.as_ref()
+                .map_or_else(|| "Reconnecting…".to_owned(), |peer| format!("Reconnecting to {peer}…")),
             format!(
-                "The connection to {address} was lost. Trying again in {} s.",
+                "The connection to {} was lost. Trying again in {} s.",
+                peer.as_deref().unwrap_or(address),
                 wait.as_secs().max(1)
             ),
-            false,
         ),
-        Status::Connected { peer, drive, .. } => (
-            format!("Connected to {peer}"),
-            match drive {
-                Some(side) => format!(
-                    "Move through the {side} edge to use {peer}. Press Control-Option-Command-Escape to return."
-                ),
-                None => format!("{peer} can now control this system."),
-            },
-            true,
-        ),
-        Status::Problem { summary, recovery } => (summary.clone(), recovery.clone(), false),
+        Status::Connected { peer, side, .. } => {
+            let title = format!("Connected to {peer}");
+            let mut facts = Vec::new();
+            let mut menu = title.clone();
+            if let Some((link, connected_for)) = live {
+                facts.push(if link.in_control {
+                    "This system has control.".to_owned()
+                } else {
+                    format!("{peer} has control.")
+                });
+                if let Some(ms) = link.latency_ms {
+                    facts.push(format!("Round trip {ms} ms."));
+                    menu = format!("{title} · {ms} ms");
+                }
+                facts.push(format!("Connected for {}.", span(connected_for)));
+            }
+            facts.push(format!(
+                "Move through the {side} edge to use {peer}. Use each system's own keyboard or trackpad to take control there. Press Control-Option-Command-Escape to return."
+            ));
+            StatusCopy {
+                title,
+                detail: facts.join(" "),
+                menu,
+                connected: true,
+            }
+        }
+        Status::Problem { summary, recovery } => plain(summary.clone(), recovery.clone()),
+    }
+}
+
+/// How long a session has run, to the minute.
+fn span(elapsed: Duration) -> String {
+    let minutes = elapsed.as_secs() / 60;
+    match (minutes / 60, minutes % 60) {
+        (0, 0) => "less than a minute".to_owned(),
+        (0, minutes) => format!("{minutes} min"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, minutes) => format!("{hours} h {minutes} min"),
     }
 }
 
@@ -1335,10 +1253,10 @@ fn open_settings(pane: Option<&str>) {
     }
 }
 
-fn nearby_title(mac: &controller::Nearby) -> String {
-    match &mac.name {
+fn nearby_title(peer: &controller::Nearby) -> String {
+    match &peer.name {
         Some(name) => name.clone(),
-        None => format!("Mac open to pairing at {}", mac.address),
+        None => format!("Peer open to pairing at {}", peer.address),
     }
 }
 
@@ -1352,14 +1270,6 @@ fn permission_copy(name: &str, access: Access) -> String {
 
 fn coral_color() -> Retained<NSColor> {
     NSColor::colorWithRed_green_blue_alpha(1.0, 107.0 / 255.0, 94.0 / 255.0, 1.0)
-}
-
-fn role_copy(host: bool) -> &'static str {
-    if host {
-        "Uses this system's keyboard and trackpad. Either system can make the connection."
-    } else {
-        "Receives input from the Host. Either system can make the connection."
-    }
 }
 
 fn flower_image(connected: bool, size: f64) -> Option<Retained<NSImage>> {
@@ -1389,40 +1299,101 @@ mod tests {
     use super::*;
     use crate::identity::Identity;
 
-    #[test]
-    fn connected_driving_copy_keeps_recovery_chord_visible() {
-        let (_, detail, connected) = status_copy(&Status::Connected {
-            peer: "Studio Mac".to_owned(),
+    fn connected() -> Status {
+        Status::Connected {
+            peer: "Studio".to_owned(),
             key: Identity::generate().unwrap().public_key(),
-            drive: Some(Side::Left),
-        });
-        assert!(connected);
-        assert!(detail.contains("Control-Option-Command-Escape"));
+            side: Side::Left,
+        }
     }
 
     #[test]
-    fn waiting_copy_distinguishes_pairing_from_known_peers_only() {
-        let (pairing, _, _) = status_copy(&Status::Waiting {
-            port: crate::service::DEFAULT_PORT,
-            pairing: true,
-        });
-        let (known_only, _, _) = status_copy(&Status::Waiting {
-            port: crate::service::DEFAULT_PORT,
-            pairing: false,
-        });
-        assert_eq!(pairing, "Waiting to pair");
-        assert_eq!(known_only, "Waiting for a peer");
+    fn connected_copy_keeps_recovery_chord_visible() {
+        let copy = status_copy(&connected(), None);
+        assert!(copy.connected);
+        assert!(copy.detail.contains("Control-Option-Command-Escape"));
     }
 
     #[test]
-    fn role_copy_keeps_network_direction_separate() {
-        assert_eq!(
-            role_copy(true),
-            "Uses this system's keyboard and trackpad. Either system can make the connection."
+    fn a_running_session_shows_control_latency_and_duration() {
+        let link = Link {
+            latency_ms: Some(4),
+            in_control: false,
+        };
+        let copy = status_copy(&connected(), Some((link, Duration::from_secs(65 * 60))));
+        assert_eq!(copy.title, "Connected to Studio");
+        assert_eq!(copy.menu, "Connected to Studio · 4 ms");
+        assert!(
+            copy.detail
+                .starts_with("Studio has control. Round trip 4 ms. Connected for 1 h 5 min.")
         );
-        assert_eq!(
-            role_copy(false),
-            "Receives input from the Host. Either system can make the connection."
+        assert!(copy.detail.contains("Control-Option-Command-Escape"));
+
+        let here = Link {
+            latency_ms: None,
+            in_control: true,
+        };
+        let copy = status_copy(&connected(), Some((here, Duration::from_secs(30))));
+        assert_eq!(copy.menu, "Connected to Studio");
+        assert!(
+            copy.detail
+                .starts_with("This system has control. Connected for less than a minute.")
         );
+    }
+
+    #[test]
+    fn waiting_names_the_peer_it_is_looking_for() {
+        let waiting = |pairing, looking_for: Option<&str>| {
+            status_copy(
+                &Status::Waiting {
+                    port: crate::service::DEFAULT_PORT,
+                    pairing,
+                    looking_for: looking_for.map(str::to_owned),
+                },
+                None,
+            )
+            .title
+        };
+        assert_eq!(waiting(true, Some("Studio")), "Waiting to pair");
+        assert_eq!(waiting(false, Some("Studio")), "Looking for Studio");
+        assert_eq!(waiting(false, None), "Looking for peers");
+    }
+
+    #[test]
+    fn connecting_and_reconnecting_name_a_known_peer() {
+        let connecting = status_copy(
+            &Status::Connecting {
+                address: "192.168.1.20:24850".to_owned(),
+                peer: Some("Studio".to_owned()),
+            },
+            None,
+        );
+        assert_eq!(connecting.title, "Connecting to Studio…");
+        let reconnecting = status_copy(
+            &Status::Reconnecting {
+                address: "192.168.1.20:24850".to_owned(),
+                peer: Some("Studio".to_owned()),
+                wait: Duration::from_secs(2),
+            },
+            None,
+        );
+        assert_eq!(reconnecting.title, "Reconnecting to Studio…");
+        assert!(reconnecting.detail.starts_with("The connection to Studio was lost."));
+        let unknown = status_copy(
+            &Status::Connecting {
+                address: "192.168.1.20:24850".to_owned(),
+                peer: None,
+            },
+            None,
+        );
+        assert_eq!(unknown.title, "Connecting…");
+        assert_eq!(status_copy(&Status::Idle, None).title, "Stopped");
+    }
+
+    #[test]
+    fn spans_read_to_the_minute() {
+        assert_eq!(span(Duration::from_secs(59)), "less than a minute");
+        assert_eq!(span(Duration::from_secs(12 * 60 + 30)), "12 min");
+        assert_eq!(span(Duration::from_secs(2 * 3600)), "2 h");
     }
 }

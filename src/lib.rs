@@ -1,12 +1,14 @@
-//! Share one keyboard, mouse and trackpad swipes between Macs.
+//! Share one keyboard, mouse and trackpad swipes between systems.
 
 #[cfg(target_os = "macos")]
 pub mod app;
 pub mod clipboard;
+pub mod control;
 pub mod controller;
 pub mod discovery;
 pub mod identity;
 pub mod input;
+pub mod latency;
 pub mod launcher;
 pub mod macos;
 pub mod pairing;

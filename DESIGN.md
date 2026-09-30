@@ -1,6 +1,6 @@
 ---
 name: Daisy
-description: A quiet, native visual system for one continuous workspace across many Macs.
+description: A quiet, native visual system for one continuous workspace across many macOS systems.
 colors:
   paper: "#F7F6F2"
   paper-raised: "#EFEEE9"
@@ -92,9 +92,9 @@ components:
 
 ### Creative North Star: "The Open Daisy Chain"
 
-Daisy makes separate Macs feel like one continuous workspace. Its identity pairs a
-simple centered flower with repeating, interlocking U-shaped links. The flower is a
-Mac in the chain; repetition implies that another Mac can always join. The system
+Daisy makes separate systems feel like one continuous workspace. Its identity pairs a
+simple centered flower with repeating, interlocking U-shaped links. The flower is one
+computer in the chain; repetition implies that another peer can always join. The system
 must never collapse into a two-computer cable, a central hub, or a topology diagram
 that asks the viewer to understand networking.
 
@@ -111,7 +111,7 @@ vector marks in `site/src/lib/marks.ts` follow the same rules.
 
 **Key Characteristics:**
 
-- A centered Daisy node gives every Mac equal visual weight.
+- A centered Daisy node gives every computer equal visual weight.
 - Repeating fixed-size U links make the chain feel open-ended.
 - Matte metal gray keeps connectivity present without making it loud.
 - Yellow means connected; gray means disconnected.
@@ -316,11 +316,11 @@ with about 0.4% slack under gravity 700 and damping 0.985. When displays move an
 slack passes about 1.5%, or the span outgrows the chain, the chain re-links to a new
 link count instead of drooping or stretching.
 
-**The Pull Rule.** When control crosses to another Mac, a pull passes along the chain
+**The Pull Rule.** When control crosses to another peer, a pull passes along the chain
 joint by joint, about 22ms apart, and the target flower blooms. The pull moves links;
 it never lengthens them.
 
-### Multi-Mac demonstration
+### Multi-peer demonstration
 
 Each display centers its own flower, regardless of screen size. Repeating links fill
 the distance to each edge, may change direction along the way, and interlock across
@@ -382,12 +382,12 @@ action outrank brand decoration. A single large flower anchors the header with
 its yellow brand center. Connection-state color changes belong to the menu-bar
 glyph; the header mark does not turn gray when disconnected.
 
-The current role choices are exactly **Host** and **Guest**. They are a compact,
-secondary setup choice below connection direction, never a headline, device
-identity, or sentence disguised as a menu item. One short helper line explains
-that Host supplies the keyboard and trackpad while Guest receives input, and
-that either role may wait or connect. Future positioned chains should reduce
-the prominence of this choice rather than build more interface around it.
+Setup is two steps: **Pair a New Peer**, then a **Screen edge** choice for where
+the peer sits. The edge choice is compact and secondary, never a headline,
+device identity, or sentence disguised as a menu item. There is no role or
+connection-direction choice; an optional address field stays quiet below it for
+networks Bonjour does not reach. Future positioned chains should reduce the
+prominence of this choice rather than build more interface around it.
 
 Conditional rows close up when hidden. Granted permissions retain a quiet text
 status and remove their action buttons. Use native AppKit controls, system type,

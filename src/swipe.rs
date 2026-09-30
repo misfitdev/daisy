@@ -2,10 +2,10 @@
 //! Mission Control.
 //!
 //! macOS delivers these as private "DockControl" events, not public gesture
-//! events. The driving Mac forwards every step of a swipe, so the other Mac
+//! events. The driving system forwards every step of a swipe, so the peer
 //! can replay it live and the swipe follows the fingers: paused halfway,
 //! pulled back, or flicked. This module holds those steps, paces them for
-//! replay, and recognizes a swipe's direction for Macs that can only replay
+//! replay, and recognizes a swipe's direction for systems that can only replay
 //! it as a keyboard shortcut; `macos::swipe` reads and synthesizes the
 //! events. The field meanings are pinned by hardware observations and tests.
 

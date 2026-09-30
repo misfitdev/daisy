@@ -3,12 +3,12 @@ import Docs from "../../layouts/Docs.astro";
 import { downloadUrl, href, version } from "../../config";
 ---
 
-<Docs title="Getting started" slug="getting-started" lede="From download to your first crossing, on two Macs, in a few minutes." description="Install Daisy, allow it, pair two Macs and cross your first edge.">
+<Docs title="Getting started" slug="getting-started" lede="From download to your first crossing, on two systems, in a few minutes." description="Install Daisy, allow it, pair two systems and cross your first edge.">
   <h2>Before you start</h2>
   <ul>
-    <li>Two Macs with Apple silicon, running macOS 26 or later.</li>
+    <li>Two systems with Apple silicon, running macOS 26 or later.</li>
     <li>Both on the same network, able to reach each other.</li>
-    <li>macOS 27 on the Mac with the trackpad, if you want Multi-Touch gestures for Spaces, Mission Control and App Exposé to pass through.</li>
+    <li>macOS 27 on the system whose trackpad you use, if you want Multi-Touch gestures for Spaces, Mission Control and App Exposé to pass through.</li>
   </ul>
 
   <h2>Set up</h2>
@@ -16,49 +16,49 @@ import { downloadUrl, href, version } from "../../config";
     <li>
       <div>
         <h3>Download and install</h3>
-        <p><a href={downloadUrl}>Download Daisy {version}</a>, open the zip, and drag Daisy.app into Applications. Do the same on the other Mac.</p>
+        <p><a href={downloadUrl}>Download Daisy {version}</a>, open the zip, and drag Daisy.app into Applications. Do the same on the other system.</p>
       </div>
     </li>
     <li>
       <div>
         <h3>Open Daisy</h3>
-        <p>Daisy lives in the menu bar. Its flower is gray until your Macs are connected.</p>
+        <p>Daisy lives in the menu bar. Its flower is gray until your systems are connected.</p>
       </div>
     </li>
     <li>
       <div>
         <h3>Allow Accessibility and Input Monitoring</h3>
         <p>Daisy needs both to read and replay the keyboard and trackpad. It opens the right place in System Settings and waits until each one is on.</p>
-        <img class="setup-shot" src={href("/screenshots/daisy-setup.png")} width="1160" height="1504" loading="lazy" decoding="async" alt="Daisy settings with this system waiting for a peer, Host selected, screen edge, trust, and permission controls." />
+        <img class="setup-shot" src={href("/screenshots/daisy-setup.png")} width="1160" height="1504" loading="lazy" decoding="async" alt="Daisy setup with automatic nearby connections, optional address, screen position, trust and both permissions." />
       </div>
     </li>
     <li>
       <div>
-        <h3>Pair the two Macs</h3>
-        <p>On one Mac, choose to pair. It shows a six-digit code. Type that code on the other Mac. The code works once, and only for this pairing.</p>
+        <h3>Pair the two systems</h3>
+        <p>Choose <strong>Pair a New Peer</strong> on both systems. They find each other automatically; one shows a six-digit code. Type that code on the other system. The code works once, and only for this pairing.</p>
       </div>
     </li>
     <li>
       <div>
-        <h3>Say where the other Mac sits</h3>
-        <p>On the Mac with the keyboard and trackpad, pick the side the other screen is on: left, right, above or below.</p>
+        <h3>Say where the other system sits</h3>
+        <p>On each system, pick the side the other screen is on: left, right, above or below. The two systems keep one arrangement; the most recent choice wins.</p>
       </div>
     </li>
     <li>
       <div>
         <h3>Push through the edge</h3>
-        <p>Move the pointer off that edge. It appears on the other Mac. Push back out to return.</p>
+        <p>Move the pointer off that edge. It appears on the other system. Push back out to return.</p>
       </div>
     </li>
   </ol>
 
   <h2>Take control back</h2>
-  <p>Press <kbd>Control</kbd>-<kbd>Option</kbd>-<kbd>Command</kbd>-<kbd>Escape</kbd> on the Mac with the keyboard. Control returns at once.</p>
-  <p>Control never crosses while a mouse button is held, so a drag cannot end up stuck on the other Mac.</p>
+  <p>Press <kbd>Control</kbd>-<kbd>Option</kbd>-<kbd>Command</kbd>-<kbd>Escape</kbd> on the system you are at. Control returns to it at once.</p>
+  <p>Control never crosses while a mouse button is held, so a drag cannot end up stuck on the other system.</p>
 
   <h2>Next</h2>
   <ul>
-    <li><a href={href("/docs/trust/")}>Trust and pairing</a>: choose how long your Macs trust each other.</li>
+    <li><a href={href("/docs/trust/")}>Trust and pairing</a>: choose how long your systems trust each other.</li>
     <li><a href={href("/docs/user-guide/")}>User guide</a>: everything else, troubleshooting, and the optional command line.</li>
   </ul>
 </Docs>

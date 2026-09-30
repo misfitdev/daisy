@@ -46,15 +46,38 @@ pub enum Message {
     Input {
         event: InputEvent,
     },
-    /// The pointer went back to the driving Mac at `along`.
+    /// The pointer went back to the driving system at `along`.
     Leave {
         along: Along,
     },
-    /// The driving Mac took control back; release everything and stop.
+    /// The driving system took control back; release everything and stop.
     Reclaim,
     /// A piece of the sender's clipboard, sent whenever control crosses.
     Clipboard {
         part: ClipboardPart,
+    },
+    /// Where the sender places the receiver, and when that was chosen.
+    Layout {
+        side: Side,
+        chosen: u64,
+    },
+    ControlClaim {
+        generation: u64,
+    },
+    SharedEnter {
+        generation: u64,
+        along: Along,
+    },
+    SharedInput {
+        generation: u64,
+        event: InputEvent,
+    },
+    SharedLeave {
+        generation: u64,
+        along: Along,
+    },
+    SharedReclaim {
+        generation: u64,
     },
 }
 

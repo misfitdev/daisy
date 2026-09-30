@@ -1,4 +1,4 @@
-//! Replaying forwarded input on the Mac being controlled.
+//! Replaying forwarded input on the following system.
 
 // Apple's constant names, kept so they match the SDK headers
 #![allow(non_upper_case_globals)]
@@ -11,7 +11,7 @@ use crate::input::Action;
 use crate::shake::ShakeDetector;
 use crate::swipe::SwipeDetector;
 
-/// Posts input events as if they came from this Mac's own hardware.
+/// Posts input events as if they came from this system's own hardware.
 pub struct Injector {
     source: CGEventSourceRef,
     // macOS 27 ignores synthetic clicks and drags without an event number
@@ -198,6 +198,7 @@ fn post(event: CGEventRef) {
     }
     // SAFETY: event is live until released here
     unsafe {
+        CGEventSetIntegerValueField(event, kCGEventSourceUserData, DAISY_EVENT_MARKER);
         CGEventPost(kCGHIDEventTap, event);
         CFRelease(event.cast_const());
     }

@@ -1,4 +1,4 @@
-//! This Mac's long-term key pair, and the public keys peers are known by.
+//! This system's long-term key pair, and the public keys peers are known by.
 
 use std::fmt;
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -55,7 +55,7 @@ impl fmt::Display for PublicKey {
     }
 }
 
-/// This Mac's long-term key pair.
+/// This system's long-term key pair.
 pub struct Identity {
     private: [u8; KEY_LEN],
     public: PublicKey,
@@ -85,8 +85,8 @@ impl Identity {
         Ok(identity)
     }
 
-    /// Replace the identity at `path` with a new one. Every Mac paired with
-    /// this one stops recognizing it and must pair again.
+    /// Replace the identity at `path` with a new one. Every peer paired with
+    /// this system stops recognizing it and must pair again.
     pub fn rotate(path: &Path) -> Result<Self> {
         let _lock = lock(path)?;
         let identity = Self::generate()?;

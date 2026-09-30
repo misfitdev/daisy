@@ -1,16 +1,15 @@
-//! Running a sharing session once two Macs trust each other.
+//! Running a sharing session once two systems trust each other.
 //!
-//! One Mac drives: it has the keyboard and mouse and sends input across.
-//! The other follows, replaying that input. Both keep a heartbeat, so if the
-//! other side vanishes, control returns to the driving Mac and anything held
-//! down on the following Mac is released.
+//! Whichever system is in use has control and sends its input across when the
+//! pointer crosses; the other replays it. Both keep a heartbeat, so if the
+//! other side vanishes, anything held down on the replaying system is released.
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
@@ -24,21 +23,163 @@ use crate::session::{Channel, ChannelReceiver, ChannelSender, SessionError};
 const HEARTBEAT: Duration = Duration::from_secs(1);
 /// Silence after which the peer is presumed gone.
 const SILENCE_LIMIT: Duration = Duration::from_secs(3);
-/// How long the following Mac waits to be told where it sits.
-const DRIVE_WAIT: Duration = Duration::from_secs(5);
 
-/// Puts the pointer back on the driving Mac.
+/// Puts the pointer back on this system when control returns to it.
 pub trait Pointer {
     fn leave(&mut self, along: Along);
+    fn yield_control(&mut self) {}
 }
 
-/// Carries out what the following Mac decided.
+pub struct SharedLayout {
+    pub screen: Rect,
+    pub side: Side,
+    pub control: std::sync::Arc<crate::control::SharedControl>,
+}
+
+/// Both sides capture physical input and either may take control. Generation
+/// stamps exclude queued events from the previous owner after a handoff.
+pub async fn together<S>(
+    channel: Channel<S>,
+    layout: SharedLayout,
+    mut input: mpsc::Receiver<Message>,
+    pointer: &mut impl Pointer,
+    injector: &mut impl Inject,
+    sharing: &mut Sharing<impl Clipboard>,
+    until: impl Future<Output = anyhow::Error>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut until = pin!(until);
+    let (sender, receiver) = channel.split();
+    let mut incoming = spawn_receiver(receiver);
+    let mut outgoing = spawn_sender(sender);
+    let mut target = Target::new(layout.screen, layout.side.opposite());
+    let release = ReleaseOnDrop {
+        target: &mut target,
+        injector,
+    };
+    let mut wakeups = layout
+        .control
+        .take_wakeups()
+        .context("the input control is already in use by another session")?;
+    let mut heartbeat = tokio::time::interval(HEARTBEAT);
+    let mut meter = crate::latency::Meter::default();
+    let mut last_heard = Instant::now();
+    let mut nonce = 0;
+    loop {
+        tokio::select! {
+            _ = wakeups.recv() => {
+                let mut state = layout.control.state.lock().unwrap_or_else(|e| e.into_inner());
+                let interrupted = layout.control.interrupted.swap(false, std::sync::atomic::Ordering::AcqRel);
+                let claim = if interrupted { Some(state.interrupt(layout.control.now())) } else { None };
+                drop(state);
+                for action in release.target.reclaim() { release.injector.execute(&action); }
+                if interrupted { pointer.yield_control(); }
+                if let Some(generation) = claim {
+                    outgoing.send(Message::ControlClaim { generation })?;
+                    sharing.expect_snapshot();
+                }
+                layout.control.publish(meter.average());
+            }
+            message = input.recv() => {
+                let Some(message) = message else { return outgoing.drain().await; };
+                if matches!(message, Message::ControlClaim { .. }) {
+                    for action in release.target.reclaim() { release.injector.execute(&action); }
+                    sharing.expect_snapshot();
+                }
+                let crossing = matches!(message, Message::SharedEnter { .. });
+                outgoing.send(message)?;
+                if crossing { outgoing.send_clipboard(sharing.crossing()); }
+            }
+            message = incoming.recv() => {
+                let quiet = last_heard.elapsed();
+                last_heard = Instant::now();
+                let message = match message {
+                    Some(Ok(message)) => message,
+                    Some(Err(SessionError::Closed)) | None => return closed_after(quiet),
+                    Some(Err(error)) => return Err(error.into()),
+                };
+                match message {
+                    Message::Ping { nonce } => outgoing.send(Message::Pong { nonce })?,
+                    Message::Pong { nonce } => {
+                        if let Some(round_trip) = meter.answered(nonce, layout.control.now())
+                            && round_trip > crate::latency::SPIKE
+                        {
+                            tracing::warn!(ms = round_trip.as_millis(), "slow round trip to the peer");
+                        }
+                    }
+                    Message::Clipboard { part } => receive_clipboard(part, &outgoing, sharing)?,
+                    Message::ControlClaim { generation } => {
+                        let mut state = layout.control.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let changed = state.claim(generation);
+                        drop(state);
+                        if changed {
+                            pointer.yield_control();
+                            for action in release.target.reclaim() { release.injector.execute(&action); }
+                            outgoing.send_clipboard(sharing.crossing());
+                            layout.control.publish(meter.average());
+                        }
+                    }
+                    Message::SharedLeave { generation, along } => {
+                        let state = layout.control.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let current = state.owns() && state.generation() == generation;
+                        drop(state);
+                        if current {
+                            pointer.leave(along);
+                            sharing.expect_snapshot();
+                        }
+                    }
+                    Message::SharedEnter { generation, .. }
+                    | Message::SharedInput { generation, .. }
+                    | Message::SharedReclaim { generation } => {
+                        let state = layout.control.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let receives = state.receives(generation, layout.control.now()) && !layout.control.local_busy();
+                        drop(state);
+                        if !receives {
+                            if let Message::SharedEnter { along, .. } = message {
+                                outgoing.send(Message::SharedLeave { generation, along })?;
+                            }
+                            continue;
+                        }
+                        let mut crossing = false;
+                        let actions = match message {
+                            Message::SharedEnter { along, .. } => { sharing.expect_snapshot(); release.target.enter(along) },
+                            Message::SharedInput { event, .. } => release.target.input(event),
+                            Message::SharedReclaim { .. } => { crossing = true; release.target.reclaim() },
+                            _ => unreachable!(),
+                        };
+                        for action in actions {
+                            match action {
+                                Action::Leave { along } => { outgoing.send(Message::SharedLeave { generation, along })?; crossing = true; },
+                                other => release.injector.execute(&other),
+                            }
+                        }
+                        if crossing { outgoing.send_clipboard(sharing.crossing()); }
+                    }
+                    other => bail!("unexpected message in shared session: {other:?}"),
+                }
+            }
+            error = &mut until => return Err(error),
+            result = outgoing.finished() => return result,
+            _ = heartbeat.tick() => {
+                if last_heard.elapsed() > SILENCE_LIMIT { return Err(Silent.into()); }
+                layout.control.publish(meter.average());
+                nonce += 1;
+                meter.sent(nonce, layout.control.now());
+                outgoing.send(Message::Ping { nonce })?;
+            }
+        }
+    }
+}
+
+/// Carries out the peer's input on this system.
 pub trait Inject {
     fn execute(&mut self, action: &Action);
 }
 
-/// Releases every held key, button, modifier and swipe even if the async
-/// follower future is cancelled rather than allowed to return normally.
+/// Releases every held key, button, modifier and swipe even if the session
+/// future is cancelled rather than allowed to return normally.
 struct ReleaseOnDrop<'a, I: Inject> {
     target: &'a mut Target,
     injector: &'a mut I,
@@ -100,7 +241,7 @@ impl Outgoing {
         })
     }
 
-    /// Reads this Mac's clipboard on a blocking thread and queues it behind
+    /// Reads this system's clipboard on a blocking thread and queues it behind
     /// input and heartbeats. Never ends the session: if snapshots back up,
     /// this one is dropped.
     fn send_clipboard(&self, read: Option<impl FnOnce() -> Vec<ClipboardPart> + Send + 'static>) {
@@ -160,187 +301,9 @@ pub fn connection_lost(error: &anyhow::Error) -> bool {
         || matches!(error.downcast_ref::<SessionError>(), Some(SessionError::Io(_)))
 }
 
-/// Drive the peer, which sits on `side` of this system. `input` carries
-/// what the local event tap forwards; the session ends when either side
-/// closes or goes silent, or with the error `until` resolves to.
-pub async fn drive<S>(
-    channel: Channel<S>,
-    side: Side,
-    mut input: mpsc::Receiver<Message>,
-    pointer: &mut impl Pointer,
-    sharing: &mut Sharing<impl Clipboard>,
-    until: impl Future<Output = anyhow::Error>,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let mut until = pin!(until);
-    let (sender, receiver) = channel.split();
-    let mut incoming = spawn_receiver(receiver);
-    let mut outgoing = spawn_sender(sender);
-    outgoing.send(Message::Drive { side })?;
-
-    let mut heartbeat = tokio::time::interval(HEARTBEAT);
-    let mut last_heard = Instant::now();
-    let mut nonce = 0;
-    loop {
-        tokio::select! {
-            message = input.recv() => match message {
-                Some(message) => {
-                    // control is crossing to the peer; this Mac's clipboard goes with it
-                    let crossing = matches!(message, Message::Enter { .. });
-                    // control taken back: the peer's clipboard comes home
-                    if matches!(message, Message::Reclaim) {
-                        sharing.expect_snapshot();
-                    }
-                    outgoing.send(message)?;
-                    if crossing {
-                        outgoing.send_clipboard(sharing.crossing());
-                    }
-                }
-                None => return outgoing.drain().await,
-            },
-            message = incoming.recv() => {
-                let quiet = last_heard.elapsed();
-                last_heard = Instant::now();
-                match message {
-                    Some(Ok(Message::Leave { along })) => {
-                        pointer.leave(along);
-                        sharing.expect_snapshot();
-                    }
-                    Some(Ok(Message::Clipboard { part })) => receive_clipboard(part, &outgoing, sharing)?,
-                    Some(Ok(Message::Ping { nonce })) => outgoing.send(Message::Pong { nonce })?,
-                    Some(Ok(Message::Pong { .. })) => {}
-                    Some(Ok(Message::Drive { .. })) => {
-                    bail!("both systems are set as Host; choose Host only on the system with the keyboard")
-                    }
-                Some(Ok(other)) => bail!("unexpected message from the peer: {other:?}"),
-                    Some(Err(SessionError::Closed)) | None => return closed_after(quiet),
-                    Some(Err(error)) => return Err(error.into()),
-                }
-            }
-            error = &mut until => return Err(error),
-            result = outgoing.finished() => return result,
-            _ = heartbeat.tick() => {
-                if last_heard.elapsed() > SILENCE_LIMIT {
-                    return Err(Silent.into());
-                }
-                nonce += 1;
-                outgoing.send(Message::Ping { nonce })?;
-            }
-        }
-    }
-}
-
-/// Follow the peer's lead, replaying its input on `screen`, until the
-/// session ends or `until` resolves to an error.
-pub async fn follow<S>(
-    channel: Channel<S>,
-    screen: Rect,
-    injector: &mut impl Inject,
-    sharing: &mut Sharing<impl Clipboard>,
-    until: impl Future<Output = anyhow::Error>,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let mut until = pin!(until);
-    let (sender, receiver) = channel.split();
-    let mut incoming = spawn_receiver(receiver);
-    let mut outgoing = spawn_sender(sender);
-
-    let side = loop {
-        let next = tokio::select! {
-            next = tokio::time::timeout(DRIVE_WAIT, incoming.recv()) => next,
-            error = &mut until => return Err(error),
-            result = outgoing.finished() => return result,
-        };
-        match next {
-            Err(_) => bail!("the peer is not set as Host; choose Host on the system with the keyboard"),
-            Ok(Some(Ok(Message::Drive { side }))) => break side,
-            Ok(Some(Ok(Message::Ping { nonce }))) => outgoing.send(Message::Pong { nonce })?,
-            Ok(Some(Ok(other))) => bail!("unexpected message from the peer: {other:?}"),
-            Ok(Some(Err(SessionError::Closed)) | None) => return Ok(()),
-            Ok(Some(Err(error))) => return Err(error.into()),
-        }
-    };
-
-    let mut target = Target::new(screen, side);
-    let mut release = ReleaseOnDrop {
-        target: &mut target,
-        injector,
-    };
-    let ReleaseOnDrop { target, injector } = &mut release;
-    replay(&mut outgoing, &mut incoming, target, &mut **injector, sharing, until).await
-}
-
-async fn replay(
-    outgoing: &mut Outgoing,
-    incoming: &mut Incoming,
-    target: &mut Target,
-    injector: &mut impl Inject,
-    sharing: &mut Sharing<impl Clipboard>,
-    mut until: Pin<&mut impl Future<Output = anyhow::Error>>,
-) -> Result<()> {
-    let mut heartbeat = tokio::time::interval(HEARTBEAT);
-    let mut last_heard = Instant::now();
-    loop {
-        tokio::select! {
-            message = incoming.recv() => {
-                let quiet = last_heard.elapsed();
-                last_heard = Instant::now();
-                // control returning to the driving Mac takes this Mac's clipboard back with it
-                let mut crossing = false;
-                let actions = match message {
-                    Some(Ok(Message::Enter { along })) => {
-                        sharing.expect_snapshot();
-                        target.enter(along)
-                    }
-                    Some(Ok(Message::Input { event })) => target.input(event),
-                    Some(Ok(Message::Reclaim)) => {
-                        crossing = true;
-                        target.reclaim()
-                    }
-                    Some(Ok(Message::Clipboard { part })) => {
-                        receive_clipboard(part, outgoing, sharing)?;
-                        continue;
-                    }
-                Some(Ok(Message::Ping { nonce })) => {
-                    outgoing.send(Message::Pong { nonce })?;
-                        continue;
-                    }
-                    Some(Ok(Message::Pong { .. })) => continue,
-            Some(Ok(other)) => bail!("unexpected message from the peer: {other:?}"),
-                    Some(Err(SessionError::Closed)) | None => return closed_after(quiet),
-                    Some(Err(error)) => return Err(error.into()),
-                };
-                for action in actions {
-                    match action {
-                        Action::Leave { along } => {
-                            outgoing.send(Message::Leave { along })?;
-                            crossing = true;
-                        }
-                        other => injector.execute(&other),
-                    }
-                }
-                if crossing {
-                    outgoing.send_clipboard(sharing.crossing());
-                }
-            }
-            error = &mut until => return Err(error),
-            result = outgoing.finished() => return result,
-            _ = heartbeat.tick() => {
-                if last_heard.elapsed() > SILENCE_LIMIT {
-                    return Err(Silent.into());
-                }
-            }
-        }
-    }
-}
-
 /// How a clean close from the peer counts. After a stretch of silence longer
 /// than the peer tolerates, the peer closed because it stopped hearing this
-/// Mac (sleep, a network change): a lost connection, not a deliberate stop.
+/// system (sleep, a network change): a lost connection, not a deliberate stop.
 fn closed_after(quiet: std::time::Duration) -> Result<()> {
     if quiet > SILENCE_LIMIT {
         Err(Silent.into())
@@ -446,6 +409,7 @@ where
 mod tests {
     use super::*;
     use crate::clipboard::Content;
+    use crate::control::SharedControl;
     use crate::identity::Identity;
     use crate::input::InputEvent;
     use std::future::pending;
@@ -460,23 +424,31 @@ mod tests {
         height: 500.0,
     };
 
+    /// A clipboard every clone shares, like the system one.
     #[derive(Default, Clone)]
-    struct Board {
-        count: i64,
-        content: Option<Content>,
+    struct Board(Arc<Mutex<(i64, Option<Content>)>>);
+
+    impl Board {
+        fn copy(&self, content: Content) -> i64 {
+            let mut board = self.0.lock().unwrap();
+            board.0 += 1;
+            board.1 = Some(content);
+            board.0
+        }
+        fn content(&self) -> Option<Content> {
+            self.0.lock().unwrap().1.clone()
+        }
     }
 
     impl Clipboard for Board {
         fn change_count(&self) -> i64 {
-            self.count
+            self.0.lock().unwrap().0
         }
         fn read(&self) -> Option<Content> {
-            self.content.clone()
+            self.content()
         }
         fn write(&mut self, content: &Content) -> i64 {
-            self.count += 1;
-            self.content = Some(content.clone());
-            self.count
+            self.copy(content.clone())
         }
     }
 
@@ -540,31 +512,372 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follower_replays_input_and_hands_control_back() {
-        let mut board = no_clipboard();
-        let (mut driver, follower) = channels().await;
+    async fn the_session_reports_latency_and_who_has_control() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(crate::control::SharedControl::new(true));
+        let mut link = control.watch_link();
+        let (_capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
-
-        let script = async {
-            driver.send(&Message::Drive { side: Side::Left }).await.unwrap();
-            driver.send(&Message::Enter { along: 0 }).await.unwrap();
-            let press = InputEvent::Key {
-                code: 0,
-                down: true,
-                repeat: false,
-                flags: 0,
-            };
-            driver.send(&Message::Input { event: press }).await.unwrap();
-            let away = InputEvent::Motion { dx: 5000.0, dy: 0.0 };
-            driver.send(&Message::Input { event: away }).await.unwrap();
-            let reply = driver.recv().await.unwrap();
-            drop(driver);
-            reply
+        let mut pointer = Returned::default();
+        let mut board = no_clipboard();
+        let answer = async {
+            loop {
+                if let Message::Ping { nonce } = peer.recv().await.unwrap() {
+                    peer.send(&Message::Pong { nonce }).await.unwrap();
+                }
+            }
         };
-        let (reply, result) = tokio::join!(script, follow(follower, SCREEN, &mut injector, &mut board, pending()));
+        let measured = async {
+            loop {
+                link.changed().await.unwrap();
+                let current = *link.borrow_and_update();
+                if current.latency_ms.is_some() {
+                    break current;
+                }
+            }
+        };
+        let session = together(
+            local,
+            SharedLayout {
+                screen: SCREEN,
+                side: Side::Left,
+                control: control.clone(),
+            },
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let reported = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                reported = measured => reported,
+                () = answer => unreachable!(),
+                result = session => panic!("session ended first: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert!(reported.in_control);
+        assert!(reported.latency_ms.is_some_and(|ms| ms < 1000));
+    }
 
-        assert_eq!(reply, Message::Leave { along: 0 });
+    #[tokio::test]
+    async fn giving_up_control_sends_the_clipboard() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(true));
+        let (_capture, input) = mpsc::channel(16);
+        let mut injector = Recorded::default();
+        let mut pointer = Returned::default();
+        let mut board = board_with(text("copied before walking away"), true);
+        let script = async {
+            peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
+            until_snapshot_done(&mut peer).await
+        };
+        let session = together(
+            local,
+            SharedLayout {
+                screen: SCREEN,
+                side: Side::Left,
+                control: control.clone(),
+            },
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                seen = script => seen,
+                result = session => panic!("session ended first: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(assembled(&seen), Some(text("copied before walking away")));
+    }
+
+    #[tokio::test]
+    async fn a_busy_system_sends_the_pointer_back_where_it_crossed() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(false));
+        let (_capture, input) = mpsc::channel(16);
+        let mut injector = Recorded::default();
+        let mut pointer = Returned::default();
+        let mut board = no_clipboard();
+        let script = async {
+            peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
+            peer.send(&Message::Ping { nonce: 1 }).await.unwrap();
+            while peer.recv().await.unwrap() != (Message::Pong { nonce: 1 }) {}
+            control.note_physical();
+            peer.send(&Message::SharedEnter {
+                generation: 1,
+                along: 123,
+            })
+            .await
+            .unwrap();
+            loop {
+                match peer.recv().await.unwrap() {
+                    Message::SharedLeave { generation, along } => break (generation, along),
+                    _ => continue,
+                }
+            }
+        };
+        let session = together(
+            local,
+            SharedLayout {
+                screen: SCREEN,
+                side: Side::Left,
+                control: control.clone(),
+            },
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let returned = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                returned = script => returned,
+                result = session => panic!("session ended first: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(returned, (1, 123));
+    }
+
+    #[tokio::test]
+    async fn shared_handoff_releases_keys_and_rejects_queued_input() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(false));
+        let (capture, input) = mpsc::channel(16);
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let mut injector = SharedRecorded(actions.clone());
+        let mut pointer = Returned::default();
+        let mut board = no_clipboard();
+        let script = async {
+            peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
+            peer.send(&Message::SharedEnter {
+                generation: 1,
+                along: 0,
+            })
+            .await
+            .unwrap();
+            peer.send(&Message::SharedInput {
+                generation: 1,
+                event: InputEvent::Key {
+                    code: 7,
+                    down: true,
+                    repeat: false,
+                    flags: 0,
+                },
+            })
+            .await
+            .unwrap();
+            peer.send(&Message::Ping { nonce: 99 }).await.unwrap();
+            while peer.recv().await.unwrap() != (Message::Pong { nonce: 99 }) {}
+            assert!(actions.lock().unwrap().iter().any(|a| matches!(
+                a,
+                Action::Key {
+                    code: 7,
+                    down: true,
+                    ..
+                }
+            )));
+            let generation = control.state.lock().unwrap().physical(control.now()).unwrap();
+            capture.send(Message::ControlClaim { generation }).await.unwrap();
+            while peer.recv().await.unwrap() != (Message::ControlClaim { generation }) {}
+            assert!(actions.lock().unwrap().iter().any(|a| matches!(
+                a,
+                Action::Key {
+                    code: 7,
+                    down: false,
+                    ..
+                }
+            )));
+            peer.send(&Message::ControlClaim { generation: 3 }).await.unwrap();
+            tokio::time::sleep(crate::control::SETTLE + Duration::from_millis(20)).await;
+            peer.send(&Message::SharedEnter {
+                generation: 3,
+                along: 0,
+            })
+            .await
+            .unwrap();
+            peer.send(&Message::SharedInput {
+                generation: 1,
+                event: InputEvent::Key {
+                    code: 8,
+                    down: true,
+                    repeat: false,
+                    flags: 0,
+                },
+            })
+            .await
+            .unwrap();
+            peer.send(&Message::SharedInput {
+                generation: 3,
+                event: InputEvent::Key {
+                    code: 9,
+                    down: true,
+                    repeat: false,
+                    flags: 0,
+                },
+            })
+            .await
+            .unwrap();
+            peer.send(&Message::Ping { nonce: 100 }).await.unwrap();
+            while peer.recv().await.unwrap() != (Message::Pong { nonce: 100 }) {}
+            drop(peer);
+        };
+        let session = together(
+            local,
+            SharedLayout {
+                screen: SCREEN,
+                side: Side::Left,
+                control: control.clone(),
+            },
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let (_, result) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
         result.unwrap();
+        let actions = actions.lock().unwrap();
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::Key {
+                code: 7,
+                down: false,
+                ..
+            }
+        )));
+        assert!(!actions.iter().any(|a| matches!(a, Action::Key { code: 8, .. })));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::Key {
+                code: 9,
+                down: true,
+                ..
+            }
+        )));
+    }
+
+    fn layout(control: &Arc<SharedControl>) -> SharedLayout {
+        SharedLayout {
+            screen: SCREEN,
+            side: Side::Left,
+            control: control.clone(),
+        }
+    }
+
+    const PRESS_KEY: InputEvent = InputEvent::Key {
+        code: 0,
+        down: true,
+        repeat: false,
+        flags: 0,
+    };
+    const PRESS_BUTTON: InputEvent = InputEvent::Button {
+        button: 0,
+        down: true,
+        clicks: 1,
+    };
+    /// Far past the edge the peer sits beyond, so the pointer leaves.
+    const AWAY: InputEvent = InputEvent::Motion { dx: -5000.0, dy: 0.0 };
+
+    fn button_released(action: Option<&Action>) -> bool {
+        matches!(
+            action,
+            Some(Action::Button {
+                button: 0,
+                down: false,
+                ..
+            })
+        )
+    }
+
+    /// The peer takes control and moves its pointer onto this system.
+    async fn peer_enters<S>(peer: &mut Channel<S>)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
+        peer.send(&Message::SharedEnter {
+            generation: 1,
+            along: 0,
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn peer_sends<S>(peer: &mut Channel<S>, event: InputEvent)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        peer.send(&Message::SharedInput { generation: 1, event }).await.unwrap();
+    }
+
+    /// Everything this system sent until it answers `nonce`, so all earlier
+    /// messages from the peer have been handled. Heartbeats are skipped.
+    async fn round_trip<S>(peer: &mut Channel<S>, nonce: u64) -> Vec<Message>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        peer.send(&Message::Ping { nonce }).await.unwrap();
+        let mut seen = Vec::new();
+        loop {
+            match peer.recv().await.unwrap() {
+                Message::Pong { nonce: n } if n == nonce => return seen,
+                Message::Ping { .. } => {}
+                other => seen.push(other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn replays_input_and_hands_control_back() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(false));
+        let (capture, input) = mpsc::channel(16);
+        let mut injector = Recorded::default();
+        let mut board = no_clipboard();
+        let script = async {
+            peer_enters(&mut peer).await;
+            peer_sends(&mut peer, PRESS_KEY).await;
+            peer_sends(&mut peer, AWAY).await;
+            let seen = round_trip(&mut peer, 1).await;
+            drop(capture);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(peer);
+            seen
+        };
+        let mut pointer = Returned::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let (seen, result) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
+
+        result.unwrap();
+        assert!(
+            seen.contains(&Message::SharedLeave {
+                generation: 1,
+                along: 0
+            }),
+            "{seen:?}"
+        );
         assert!(matches!(injector.0[0], Action::Move { .. }), "{:?}", injector.0);
         assert!(injector.0.contains(&Action::Key {
             code: 0,
@@ -582,178 +895,195 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follower_releases_held_input_when_the_driver_vanishes() {
-        let mut board = no_clipboard();
-        let (mut driver, follower) = channels().await;
+    async fn releases_held_input_when_the_peer_vanishes() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(false));
+        let (_capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
-
-        let script = async {
-            driver.send(&Message::Drive { side: Side::Left }).await.unwrap();
-            driver.send(&Message::Enter { along: 0 }).await.unwrap();
-            let press = InputEvent::Button {
-                button: 0,
-                down: true,
-                clicks: 1,
-            };
-            driver.send(&Message::Input { event: press }).await.unwrap();
-            drop(driver);
-        };
-        let (_, result) = tokio::join!(script, follow(follower, SCREEN, &mut injector, &mut board, pending()));
-
-        result.unwrap();
-        let last = injector.0.last().unwrap();
-        assert!(
-            matches!(
-                last,
-                Action::Button {
-                    button: 0,
-                    down: false,
-                    ..
-                }
-            ),
-            "{:?}",
-            injector.0
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn follower_gives_up_if_nobody_drives() {
         let mut board = no_clipboard();
-        let (_driver, follower) = channels().await;
-        let error = follow(follower, SCREEN, &mut Recorded::default(), &mut board, pending())
+        let script = async {
+            peer_enters(&mut peer).await;
+            peer_sends(&mut peer, PRESS_BUTTON).await;
+            round_trip(&mut peer, 1).await;
+            drop(peer);
+        };
+        let mut pointer = Returned::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let (_, result) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
             .await
-            .unwrap_err();
-        assert!(error.to_string().contains("not set as Host"), "{error}");
+            .unwrap();
+
+        if let Err(error) = result {
+            assert!(connection_lost(&error), "{error}");
+        }
+        assert!(button_released(injector.0.last()), "{:?}", injector.0);
     }
 
     #[tokio::test]
-    async fn driver_sends_input_and_takes_control_back() {
-        let mut board = no_clipboard();
-        let (driver, mut follower) = channels().await;
-        let (input, receiver) = mpsc::channel(16);
+    async fn sends_input_and_takes_control_back() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(true));
+        let (capture, input) = mpsc::channel(16);
         let mut pointer = Returned::default();
-
-        input.try_send(Message::Enter { along: 7 }).unwrap();
+        let mut board = no_clipboard();
+        capture
+            .try_send(Message::SharedEnter {
+                generation: 0,
+                along: 7,
+            })
+            .unwrap();
         let script = async {
-            assert_eq!(follower.recv().await.unwrap(), Message::Drive { side: Side::Right });
-            // skip heartbeats while looking for the forwarded messages
             let mut seen = Vec::new();
             while seen.is_empty() {
-                match follower.recv().await.unwrap() {
+                match peer.recv().await.unwrap() {
                     Message::Ping { .. } => {}
                     other => seen.push(other),
                 }
             }
-            follower.send(&Message::Leave { along: 9 }).await.unwrap();
-            // give the driver a moment to handle it, then hang up
+            peer.send(&Message::SharedLeave {
+                generation: 0,
+                along: 9,
+            })
+            .await
+            .unwrap();
+            round_trip(&mut peer, 1).await;
+            // close the input queue first so the session drains and ends
+            // cleanly; hanging up first races a heartbeat onto a closed socket
+            drop(capture);
             tokio::time::sleep(Duration::from_millis(50)).await;
-            drop(follower);
-            drop(input);
+            drop(peer);
             seen
         };
-        let (seen, result) = tokio::join!(
-            script,
-            drive(driver, Side::Right, receiver, &mut pointer, &mut board, pending())
+        let mut injector = Recorded::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
         );
+        let (seen, result) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
 
         result.unwrap();
-        assert_eq!(seen, vec![Message::Enter { along: 7 }]);
+        assert_eq!(
+            seen,
+            vec![Message::SharedEnter {
+                generation: 0,
+                along: 7
+            }]
+        );
         assert_eq!(pointer.0, vec![9]);
     }
 
     #[tokio::test]
-    async fn driver_flushes_accepted_input_when_its_queue_closes() {
-        let mut board = no_clipboard();
-        let (driver, mut follower) = channels_with_capacity(1).await;
-        let (input, events) = mpsc::channel(2);
-        input.try_send(Message::Enter { along: 7 }).unwrap();
-        drop(input);
-
+    async fn flushes_accepted_input_when_its_queue_closes() {
+        let (local, mut peer) = channels_with_capacity(1).await;
+        let control = Arc::new(SharedControl::new(true));
+        let (capture, input) = mpsc::channel(2);
+        let enter = Message::SharedEnter {
+            generation: 0,
+            along: 7,
+        };
+        capture.try_send(enter.clone()).unwrap();
+        drop(capture);
         let receive = async {
-            assert_eq!(follower.recv().await.unwrap(), Message::Drive { side: Side::Left });
-            assert_eq!(follower.recv().await.unwrap(), Message::Enter { along: 7 });
+            loop {
+                match peer.recv().await.unwrap() {
+                    Message::Ping { .. } => {}
+                    other => break other,
+                }
+            }
         };
         let mut pointer = Returned::default();
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
-            tokio::join!(
-                drive(driver, Side::Left, events, &mut pointer, &mut board, pending()),
-                receive
-            )
-        })
-        .await
-        .expect("driver did not flush accepted input before closing");
+        let mut injector = Recorded::default();
+        let mut board = no_clipboard();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let (result, received) = tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(session, receive) })
+            .await
+            .expect("the session did not flush accepted input before closing");
 
         result.unwrap();
-    }
-
-    #[tokio::test]
-    async fn two_drivers_are_refused() {
-        let mut board1 = no_clipboard();
-        let mut board2 = no_clipboard();
-        let (left, right) = channels().await;
-        let (_left_input, left_events) = mpsc::channel(16);
-        let (_right_input, right_events) = mpsc::channel(16);
-        let (mut left_pointer, mut right_pointer) = (Returned::default(), Returned::default());
-        let (a, b) = tokio::join!(
-            drive(left, Side::Left, left_events, &mut left_pointer, &mut board1, pending()),
-            drive(
-                right,
-                Side::Right,
-                right_events,
-                &mut right_pointer,
-                &mut board2,
-                pending()
-            )
-        );
-        assert!(a.unwrap_err().to_string().contains("both systems"));
-        assert!(b.unwrap_err().to_string().contains("both systems"));
+        assert_eq!(received, enter);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn driver_gives_up_on_a_silent_peer() {
-        let mut board = no_clipboard();
+    async fn gives_up_on_a_silent_peer() {
         // the peer keeps the connection open but never answers heartbeats
-        let (driver, _silent) = channels().await;
-        let (_input, events) = mpsc::channel(16);
-        let error = drive(
-            driver,
-            Side::Left,
-            events,
-            &mut Returned::default(),
+        let (local, _silent) = channels().await;
+        let control = Arc::new(SharedControl::new(true));
+        let (_capture, input) = mpsc::channel(16);
+        let mut pointer = Returned::default();
+        let mut injector = Recorded::default();
+        let mut board = no_clipboard();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
             &mut board,
             pending(),
-        )
-        .await
-        .unwrap_err();
+        );
+        let error = tokio::time::timeout(Duration::from_secs(10), session)
+            .await
+            .expect("a silent peer kept the session open")
+            .unwrap_err();
         assert!(error.to_string().contains("stopped responding"), "{error}");
         assert!(connection_lost(&error));
     }
 
     #[tokio::test]
-    async fn follower_releases_held_input_when_trust_ends() {
-        let mut board = no_clipboard();
-        let (mut driver, follower) = channels().await;
+    async fn releases_held_input_when_trust_ends() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(false));
+        let (_capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
+        let mut board = no_clipboard();
         let (revoke, revoked) = tokio::sync::oneshot::channel::<()>();
-
         let script = async {
-            driver.send(&Message::Drive { side: Side::Left }).await.unwrap();
-            driver.send(&Message::Enter { along: 0 }).await.unwrap();
-            let press = InputEvent::Button {
-                button: 0,
-                down: true,
-                clicks: 1,
-            };
-            driver.send(&Message::Input { event: press }).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            peer_enters(&mut peer).await;
+            peer_sends(&mut peer, PRESS_BUTTON).await;
+            round_trip(&mut peer, 1).await;
             revoke.send(()).unwrap();
-            driver
+            peer
         };
         let until = async {
             revoked.await.unwrap();
-            anyhow::anyhow!("the Host was forgotten")
+            anyhow::anyhow!("the peer was forgotten")
         };
-        let (_driver, result) = tokio::join!(script, follow(follower, SCREEN, &mut injector, &mut board, until));
+        let mut pointer = Returned::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            until,
+        );
+        let (_peer, result) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
 
         let error = result.unwrap_err();
         assert!(error.to_string().contains("forgotten"), "{error}");
@@ -761,167 +1091,157 @@ mod tests {
             !connection_lost(&error),
             "revoking is deliberate, not a dropped connection"
         );
-        assert!(
-            matches!(
-                injector.0.last(),
-                Some(Action::Button {
-                    button: 0,
-                    down: false,
-                    ..
-                })
-            ),
-            "{:?}",
-            injector.0
-        );
+        assert!(button_released(injector.0.last()), "{:?}", injector.0);
     }
 
     #[tokio::test]
-    async fn cancelling_follower_releases_held_input() {
-        let mut board = no_clipboard();
-        let (mut driver, follower) = channels().await;
+    async fn cancelling_the_session_releases_held_input() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(false));
         let recorded = SharedRecorded::default();
         let actions = recorded.0.clone();
         let task = tokio::spawn(async move {
+            let (_capture, input) = mpsc::channel(16);
             let mut injector = recorded;
-            follow(follower, SCREEN, &mut injector, &mut board, pending()).await
+            together(
+                local,
+                layout(&control),
+                input,
+                &mut Returned::default(),
+                &mut injector,
+                &mut no_clipboard(),
+                pending(),
+            )
+            .await
         });
 
-        driver.send(&Message::Drive { side: Side::Left }).await.unwrap();
-        driver.send(&Message::Enter { along: 0 }).await.unwrap();
-        driver
-            .send(&Message::Input {
-                event: InputEvent::Button {
-                    button: 0,
-                    down: true,
-                    clicks: 1,
-                },
-            })
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
+        peer_enters(&mut peer).await;
+        peer_sends(&mut peer, PRESS_BUTTON).await;
+        round_trip(&mut peer, 1).await;
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        assert!(matches!(
-            actions.lock().unwrap().last(),
-            Some(Action::Button {
-                button: 0,
-                down: false,
-                ..
-            })
-        ));
+        assert!(button_released(actions.lock().unwrap().last()));
     }
 
     #[tokio::test]
-    async fn follower_releases_held_input_when_writes_back_up() {
-        let mut board = no_clipboard();
-        let (mut driver, follower) = channels_with_capacity(1).await;
+    async fn releases_held_input_when_trust_ends_while_writes_back_up() {
+        let (local, mut peer) = channels_with_capacity(1).await;
+        let control = Arc::new(SharedControl::new(false));
+        let (_capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
+        let mut board = no_clipboard();
         let (revoke, revoked) = tokio::sync::oneshot::channel::<()>();
-
         let script = async {
-            driver.send(&Message::Drive { side: Side::Left }).await.unwrap();
-            driver.send(&Message::Enter { along: 0 }).await.unwrap();
-            driver
-                .send(&Message::Input {
-                    event: InputEvent::Button {
-                        button: 0,
-                        down: true,
-                        clicks: 1,
-                    },
-                })
-                .await
-                .unwrap();
-            driver.send(&Message::Ping { nonce: 1 }).await.unwrap();
+            peer_enters(&mut peer).await;
+            peer_sends(&mut peer, PRESS_BUTTON).await;
+            // the answer never gets read, so this system's writes back up
+            peer.send(&Message::Ping { nonce: 1 }).await.unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
             revoke.send(()).unwrap();
-            driver
+            peer
         };
         let until = async {
             revoked.await.unwrap();
-            anyhow::anyhow!("the Host was forgotten")
+            anyhow::anyhow!("the peer was forgotten")
         };
-
-        let (_driver, result) = tokio::time::timeout(Duration::from_secs(1), async {
-            tokio::join!(script, follow(follower, SCREEN, &mut injector, &mut board, until))
-        })
-        .await
-        .expect("follower did not stop while its socket write was blocked");
+        let mut pointer = Returned::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            until,
+        );
+        let (_peer, result) = tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(script, session) })
+            .await
+            .expect("the session did not stop while its socket write was blocked");
 
         assert!(result.unwrap_err().to_string().contains("forgotten"));
-        assert!(matches!(
-            injector.0.last(),
-            Some(Action::Button {
-                button: 0,
-                down: false,
-                ..
-            })
-        ));
+        assert!(button_released(injector.0.last()), "{:?}", injector.0);
     }
 
     #[tokio::test]
-    async fn driver_stops_when_trust_ends() {
-        let mut board = no_clipboard();
-        let (driver, follower) = channels().await;
-        let (_input, events) = mpsc::channel(16);
+    async fn stops_when_trust_ends() {
+        let (local, _peer) = channels().await;
+        let control = Arc::new(SharedControl::new(true));
+        let (_capture, input) = mpsc::channel(16);
         let until = async { anyhow::anyhow!("the peer was forgotten") };
-        let error = drive(driver, Side::Left, events, &mut Returned::default(), &mut board, until)
+        let mut pointer = Returned::default();
+        let mut injector = Recorded::default();
+        let mut board = no_clipboard();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            until,
+        );
+        let error = tokio::time::timeout(Duration::from_secs(1), session)
             .await
+            .expect("the session outlived trust")
             .unwrap_err();
-        drop(follower);
         assert!(error.to_string().contains("forgotten"), "{error}");
     }
 
     #[tokio::test]
-    async fn driver_stops_when_trust_ends_while_socket_write_is_blocked() {
-        let mut board = no_clipboard();
-        let (driver, _peer_that_never_reads) = channels_with_capacity(1).await;
-        let (_input, events) = mpsc::channel(16);
+    async fn stops_when_trust_ends_while_socket_write_is_blocked() {
+        let (local, _peer_that_never_reads) = channels_with_capacity(1).await;
+        let control = Arc::new(SharedControl::new(true));
+        let (_capture, input) = mpsc::channel(16);
         let until = async {
             tokio::time::sleep(Duration::from_millis(50)).await;
             anyhow::anyhow!("the peer was forgotten")
         };
-
-        let error = tokio::time::timeout(
-            Duration::from_secs(1),
-            drive(driver, Side::Left, events, &mut Returned::default(), &mut board, until),
-        )
-        .await
-        .expect("blocked writer prevented trust revocation")
-        .unwrap_err();
-
+        let mut pointer = Returned::default();
+        let mut injector = Recorded::default();
+        let mut board = no_clipboard();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            until,
+        );
+        let error = tokio::time::timeout(Duration::from_secs(1), session)
+            .await
+            .expect("a blocked writer prevented trust revocation")
+            .unwrap_err();
         assert!(error.to_string().contains("forgotten"), "{error}");
     }
 
     #[tokio::test(start_paused = true)]
-    async fn driver_gives_up_on_a_silent_peer_while_socket_write_is_blocked() {
+    async fn gives_up_on_a_silent_peer_while_socket_write_is_blocked() {
+        let (local, _peer_that_never_reads) = channels_with_capacity(1).await;
+        let control = Arc::new(SharedControl::new(true));
+        let (_capture, input) = mpsc::channel(16);
+        let mut pointer = Returned::default();
+        let mut injector = Recorded::default();
         let mut board = no_clipboard();
-        let (driver, _peer_that_never_reads) = channels_with_capacity(1).await;
-        let (_input, events) = mpsc::channel(16);
-
-        let error = tokio::time::timeout(
-            Duration::from_secs(5),
-            drive(
-                driver,
-                Side::Left,
-                events,
-                &mut Returned::default(),
-                &mut board,
-                pending(),
-            ),
-        )
-        .await
-        .expect("blocked writer prevented silence detection")
-        .unwrap_err();
-
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let error = tokio::time::timeout(Duration::from_secs(5), session)
+            .await
+            .expect("a blocked writer prevented silence detection")
+            .unwrap_err();
         assert!(error.to_string().contains("stopped responding"), "{error}");
     }
 
     fn board_with(content: Content, on: bool) -> Sharing<Board> {
-        let board = Board {
-            count: 1,
-            content: Some(content),
-        };
+        let board = Board::default();
+        board.copy(content);
         Sharing::new(board, watch::channel(on).1)
     }
 
@@ -974,176 +1294,254 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn driver_sends_its_clipboard_right_after_crossing() {
-        let mut pointer = Returned::default();
-        let mut board = board_with(text("copied on the host"), true);
-        let (driver, mut follower) = channels().await;
-        let (input, receiver) = mpsc::channel(16);
-        input.try_send(Message::Enter { along: 7 }).unwrap();
+    async fn sends_its_clipboard_right_after_crossing() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(true));
+        let (capture, input) = mpsc::channel(16);
+        let mut board = board_with(text("copied on this system"), true);
+        let enter = Message::SharedEnter {
+            generation: 0,
+            along: 7,
+        };
+        capture.try_send(enter.clone()).unwrap();
         let script = async {
-            assert_eq!(follower.recv().await.unwrap(), Message::Drive { side: Side::Right });
-            let seen = until_snapshot_done(&mut follower).await;
-            // close the driver's input first so it drains and ends cleanly,
-            // then hang up; the other order races a heartbeat onto a closed socket
-            drop(input);
+            let seen = until_snapshot_done(&mut peer).await;
+            drop(capture);
             tokio::time::sleep(Duration::from_millis(50)).await;
-            drop(follower);
+            drop(peer);
             seen
         };
-        let (seen, result) = tokio::join!(
-            script,
-            drive(driver, Side::Right, receiver, &mut pointer, &mut board, pending())
+        let mut pointer = Returned::default();
+        let mut injector = Recorded::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
         );
+        let (seen, result) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
+
         result.unwrap();
-        assert_eq!(seen[0], Message::Enter { along: 7 });
-        assert_eq!(assembled(&seen), Some(text("copied on the host")));
+        assert_eq!(seen[0], enter);
+        assert_eq!(assembled(&seen), Some(text("copied on this system")));
     }
 
     #[tokio::test]
-    async fn driver_writes_the_clipboard_that_comes_back() {
-        let mut pointer = Returned::default();
+    async fn writes_the_clipboard_that_comes_back() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(true));
+        let (capture, input) = mpsc::channel(16);
         let mut board = no_clipboard();
-        let (driver, mut follower) = channels().await;
-        let (input, receiver) = mpsc::channel(16);
         let script = async {
-            assert_eq!(follower.recv().await.unwrap(), Message::Drive { side: Side::Right });
-            // control comes back to the driver, then the guest's clipboard follows
-            follower.send(&Message::Leave { along: 3 }).await.unwrap();
-            let mut guest = board_with(text("copied on the guest"), true);
-            for part in guest.crossing().map(|read| read()).unwrap_or_default() {
-                follower.send(&Message::Clipboard { part }).await.unwrap();
+            // control comes back to this system, then the peer's clipboard follows
+            peer.send(&Message::SharedLeave {
+                generation: 0,
+                along: 3,
+            })
+            .await
+            .unwrap();
+            let mut theirs = board_with(text("copied on the peer"), true);
+            for part in theirs.crossing().map(|read| read()).unwrap_or_default() {
+                peer.send(&Message::Clipboard { part }).await.unwrap();
             }
+            round_trip(&mut peer, 1).await;
+            drop(capture);
             tokio::time::sleep(Duration::from_millis(50)).await;
-            // close the driver's input first so it drains and ends cleanly,
-            // then hang up; the other order races a heartbeat onto a closed socket
-            drop(input);
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            drop(follower);
+            drop(peer);
         };
-        let (_, result) = tokio::join!(
-            script,
-            drive(driver, Side::Right, receiver, &mut pointer, &mut board, pending())
+        let mut pointer = Returned::default();
+        let mut injector = Recorded::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
         );
+        let (_, result) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
+
         result.unwrap();
-        assert_eq!(board.clipboard().content, Some(text("copied on the guest")));
+        assert_eq!(board.clipboard().content(), Some(text("copied on the peer")));
     }
 
-    #[tokio::test]
-    async fn follower_sends_its_clipboard_when_control_leaves() {
-        let mut injector = Recorded::default();
-        let mut board = board_with(text("copied on the guest"), true);
-        let (mut driver, follower) = channels().await;
+    /// The peer takes control of this system, something new is copied here
+    /// while the peer is in control, then the peer hands control back with
+    /// `hand_back`.
+    /// Returns what this system sent from then on.
+    async fn clipboard_after_handing_back(hand_back: &[Message]) -> Vec<Message> {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(false));
+        let (capture, input) = mpsc::channel(16);
+        let mut board = board_with(text("copied before the peer took control"), true);
+        let here = board.clipboard().clone();
         let script = async {
-            driver.send(&Message::Drive { side: Side::Left }).await.unwrap();
-            driver.send(&Message::Enter { along: 0 }).await.unwrap();
-            let away = InputEvent::Motion { dx: 5000.0, dy: 0.0 };
-            driver.send(&Message::Input { event: away }).await.unwrap();
-            let seen = until_snapshot_done(&mut driver).await;
-            drop(driver);
+            peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
+            until_snapshot_done(&mut peer).await;
+            peer.send(&Message::SharedEnter {
+                generation: 1,
+                along: 0,
+            })
+            .await
+            .unwrap();
+            round_trip(&mut peer, 1).await;
+            here.copy(text("copied while the peer was in control"));
+            for message in hand_back {
+                peer.send(message).await.unwrap();
+            }
+            let seen = until_snapshot_done(&mut peer).await;
+            drop(capture);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(peer);
             seen
         };
-        let (seen, result) = tokio::join!(script, follow(follower, SCREEN, &mut injector, &mut board, pending()));
+        let mut pointer = Returned::default();
+        let mut injector = Recorded::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let (seen, result) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
         result.unwrap();
-        assert_eq!(seen[0], Message::Leave { along: 0 });
-        assert_eq!(assembled(&seen), Some(text("copied on the guest")));
+        seen
     }
 
     #[tokio::test]
-    async fn follower_sends_its_clipboard_when_control_is_reclaimed() {
-        let mut injector = Recorded::default();
-        let mut board = board_with(text("copied on the guest"), true);
-        let (mut driver, follower) = channels().await;
+    async fn sends_its_clipboard_when_control_leaves() {
+        let seen = clipboard_after_handing_back(&[Message::SharedInput {
+            generation: 1,
+            event: AWAY,
+        }])
+        .await;
+        assert_eq!(
+            seen[0],
+            Message::SharedLeave {
+                generation: 1,
+                along: 0
+            }
+        );
+        assert_eq!(assembled(&seen), Some(text("copied while the peer was in control")));
+    }
+
+    #[tokio::test]
+    async fn sends_its_clipboard_when_control_is_reclaimed() {
+        let seen = clipboard_after_handing_back(&[Message::SharedReclaim { generation: 1 }]).await;
+        assert_eq!(assembled(&seen), Some(text("copied while the peer was in control")));
+    }
+
+    #[tokio::test]
+    async fn switched_off_sends_and_writes_nothing() {
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(false));
+        let (capture, input) = mpsc::channel(16);
+        let mut board = board_with(text("stays on this system"), false);
         let script = async {
-            driver.send(&Message::Drive { side: Side::Left }).await.unwrap();
-            driver.send(&Message::Enter { along: 0 }).await.unwrap();
-            driver.send(&Message::Reclaim).await.unwrap();
-            let seen = until_snapshot_done(&mut driver).await;
-            drop(driver);
+            peer_enters(&mut peer).await;
+            let mut theirs = board_with(text("from the peer"), true);
+            for part in theirs.crossing().map(|read| read()).unwrap_or_default() {
+                peer.send(&Message::Clipboard { part }).await.unwrap();
+            }
+            peer_sends(&mut peer, AWAY).await;
+            let mut seen = round_trip(&mut peer, 1).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            seen.extend(round_trip(&mut peer, 2).await);
+            drop(capture);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(peer);
+            seen.retain(|m| {
+                !matches!(
+                    m,
+                    Message::Clipboard {
+                        part: ClipboardPart::Ack
+                    }
+                )
+            });
             seen
         };
-        let (seen, result) = tokio::join!(script, follow(follower, SCREEN, &mut injector, &mut board, pending()));
-        result.unwrap();
-        assert_eq!(assembled(&seen), Some(text("copied on the guest")));
-    }
-
-    #[tokio::test]
-    async fn switched_off_the_follower_sends_and_writes_nothing() {
+        let mut pointer = Returned::default();
         let mut injector = Recorded::default();
-        let mut board = board_with(text("stays on the guest"), false);
-        let (mut driver, follower) = channels().await;
-        let script = async {
-            driver.send(&Message::Drive { side: Side::Left }).await.unwrap();
-            driver.send(&Message::Enter { along: 0 }).await.unwrap();
-            let mut host = board_with(text("from the host"), true);
-            for part in host.crossing().map(|read| read()).unwrap_or_default() {
-                driver.send(&Message::Clipboard { part }).await.unwrap();
-            }
-            let away = InputEvent::Motion { dx: 5000.0, dy: 0.0 };
-            driver.send(&Message::Input { event: away }).await.unwrap();
-            let mut reply = driver.recv().await.unwrap();
-            while matches!(
-                reply,
-                Message::Clipboard {
-                    part: ClipboardPart::Ack
-                }
-            ) {
-                reply = driver.recv().await.unwrap();
-            }
-            assert_eq!(reply, Message::Leave { along: 0 });
-            let next = tokio::time::timeout(Duration::from_millis(200), driver.recv()).await;
-            drop(driver);
-            next.is_err()
-        };
-        let (quiet, result) = tokio::join!(script, follow(follower, SCREEN, &mut injector, &mut board, pending()));
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let (seen, result) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
+
         result.unwrap();
-        assert!(quiet, "the follower sent something after Leave");
-        assert_eq!(board.clipboard().content, Some(text("stays on the guest")));
+        assert_eq!(
+            seen,
+            vec![Message::SharedLeave {
+                generation: 1,
+                along: 0
+            }],
+            "this system sent its clipboard while sharing was off"
+        );
+        assert_eq!(board.clipboard().content(), Some(text("stays on this system")));
     }
 
     #[tokio::test]
     async fn a_large_image_neither_overloads_the_session_nor_holds_input_back() {
-        let mut pointer = Returned::default();
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(true));
+        let (capture, input) = mpsc::channel(16);
         let image = Content {
             png: Some(vec![9; crate::clipboard::CHUNK_LEN * 70]),
             ..Content::default()
         };
         let mut board = board_with(image.clone(), true);
-        let (driver, mut follower) = channels().await;
-        let (input, receiver) = mpsc::channel(16);
-        input.try_send(Message::Enter { along: 7 }).unwrap();
+        capture
+            .try_send(Message::SharedEnter {
+                generation: 0,
+                along: 7,
+            })
+            .unwrap();
         let script = async {
-            assert_eq!(follower.recv().await.unwrap(), Message::Drive { side: Side::Right });
             let mut seen = Vec::new();
             let mut sent_motion = false;
             loop {
-                let message = follower.recv().await.unwrap();
-                if matches!(
+                let message = peer.recv().await.unwrap();
+                let chunk = matches!(
                     message,
                     Message::Clipboard {
                         part: ClipboardPart::Chunk { .. }
                     }
-                ) {
-                    follower
-                        .send(&Message::Clipboard {
-                            part: ClipboardPart::Ack,
-                        })
-                        .await
-                        .unwrap();
-                }
-                if !sent_motion
-                    && matches!(
-                        message,
-                        Message::Clipboard {
-                            part: ClipboardPart::Chunk { .. }
-                        }
-                    )
-                {
-                    input
-                        .try_send(Message::Input {
-                            event: InputEvent::Motion { dx: 1.0, dy: 0.0 },
-                        })
-                        .unwrap();
-                    sent_motion = true;
+                );
+                if chunk {
+                    peer.send(&Message::Clipboard {
+                        part: ClipboardPart::Ack,
+                    })
+                    .await
+                    .unwrap();
+                    if !sent_motion {
+                        capture
+                            .try_send(Message::SharedInput {
+                                generation: 0,
+                                event: InputEvent::Motion { dx: 1.0, dy: 0.0 },
+                            })
+                            .unwrap();
+                        sent_motion = true;
+                    }
                 }
                 let done = matches!(
                     message,
@@ -1158,57 +1556,84 @@ mod tests {
                     break;
                 }
             }
-            // close the driver's input first so it drains and ends cleanly,
-            // then hang up; the other order races a heartbeat onto a closed socket
-            drop(input);
+            drop(capture);
             tokio::time::sleep(Duration::from_millis(50)).await;
-            drop(follower);
+            drop(peer);
             seen
         };
-        let (seen, result) = tokio::join!(
-            script,
-            drive(driver, Side::Right, receiver, &mut pointer, &mut board, pending())
+        let mut pointer = Returned::default();
+        let mut injector = Recorded::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
         );
+        let (seen, result) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
+
         result.unwrap();
         assert_eq!(assembled(&seen), Some(image));
-        let motion = seen.iter().position(|m| matches!(m, Message::Input { .. })).unwrap();
+        let motion = seen
+            .iter()
+            .position(|m| matches!(m, Message::SharedInput { .. }))
+            .unwrap();
         assert!(motion < seen.len() - 2, "input waited for the whole image");
     }
 
     #[tokio::test]
     async fn a_peer_that_does_not_acknowledge_gets_no_more_than_the_window() {
-        let mut pointer = Returned::default();
+        let (local, mut peer) = channels().await;
+        let control = Arc::new(SharedControl::new(true));
+        let (capture, input) = mpsc::channel(16);
         let image = Content {
             png: Some(vec![9; crate::clipboard::CHUNK_LEN * 50]),
             ..Content::default()
         };
         let mut board = board_with(image, true);
-        let (driver, mut follower) = channels().await;
-        let (input, receiver) = mpsc::channel(16);
-        input.try_send(Message::Enter { along: 7 }).unwrap();
+        capture
+            .try_send(Message::SharedEnter {
+                generation: 0,
+                along: 7,
+            })
+            .unwrap();
         let script = async {
             let mut chunks = 0;
-            // read everything the driver sends for a while, acknowledging nothing
+            // read everything this system sends for a while, acknowledging nothing
             let _ = tokio::time::timeout(Duration::from_millis(400), async {
                 loop {
                     if let Message::Clipboard {
                         part: ClipboardPart::Chunk { .. },
-                    } = follower.recv().await.unwrap()
+                    } = peer.recv().await.unwrap()
                     {
                         chunks += 1;
                     }
                 }
             })
             .await;
-            drop(input);
+            drop(capture);
             tokio::time::sleep(Duration::from_millis(50)).await;
-            drop(follower);
+            drop(peer);
             chunks
         };
-        let (chunks, _) = tokio::join!(
-            script,
-            drive(driver, Side::Right, receiver, &mut pointer, &mut board, pending())
+        let mut pointer = Returned::default();
+        let mut injector = Recorded::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
         );
+        let (chunks, _) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
         assert_eq!(chunks, crate::clipboard::WINDOW);
     }
 

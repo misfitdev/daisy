@@ -1,11 +1,11 @@
-//! Finding paired Macs on the local network with Bonjour (DNS-SD).
+//! Finding peers on the local network with Bonjour (DNS-SD).
 //!
-//! A Mac waiting for a connection advertises `_daisy._tcp` under a random
+//! A system waiting for a connection advertises `_daisy._tcp` under a random
 //! instance and host name. Its TXT record carries a fresh random nonce and a
-//! short tag derived from its public key and that nonce. A Mac that paired
+//! short tag derived from its public key and that nonce. A peer that paired
 //! with it knows the key, so it can recognise the tag; anyone else learns
-//! neither the Mac's name nor its key, and cannot link one advertisement to
-//! the next. A Mac open to pairing also says so, so a new Mac can find it.
+//! neither the system's name nor its key, and cannot link one advertisement to
+//! the next. A system open to pairing also says so, so a new peer can find it.
 //!
 //! The advertisement only says where to connect. Every connection still runs
 //! the Noise handshake and the trust check, so a forged advertisement can at
@@ -24,11 +24,15 @@ use crate::identity::PublicKey;
 
 pub const SERVICE: &str = "_daisy._tcp.local.";
 const VERSION: &str = "1";
-const NONCE_LEN: usize = 16;
+pub const NONCE_LEN: usize = 16;
 const TAG_LEN: usize = 8;
 const TAG_LABEL: &[u8] = b"daisy beacon v1";
 
-/// A tag a paired Mac can match against the key it pinned.
+/// How long a system the election passed over waits for the peer to connect
+/// before connecting itself, for when the peer cannot see this system.
+pub const OPENER_GRACE: Duration = Duration::from_secs(4);
+
+/// A tag a peer can match against the key it pinned.
 pub fn tag(key: &PublicKey, nonce: &[u8; NONCE_LEN]) -> [u8; TAG_LEN] {
     let digest = Sha256::new()
         .chain_update(TAG_LABEL)
@@ -53,14 +57,14 @@ pub fn properties(key: &PublicKey, nonce: &[u8; NONCE_LEN], pairing: bool) -> Ve
 /// What an advertisement turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seen {
-    /// A Mac this one paired with.
+    /// A peer this system paired with.
     Paired(PublicKey),
-    /// A Mac this one does not know, open to pairing now.
+    /// A system this one does not know, open to pairing now.
     Pairing,
 }
 
 /// Recognises an advertisement from its TXT values, given the keys of the
-/// Macs this one still trusts. Anything else is ignored.
+/// peers this system still trusts. Anything else is ignored.
 pub fn identify<'a>(txt: impl Fn(&str) -> Option<&'a str>, trusted: &[PublicKey]) -> Option<Seen> {
     if txt("v")? != VERSION {
         return None;
@@ -101,25 +105,31 @@ fn random<const N: usize>() -> [u8; N] {
     bytes
 }
 
-/// This Mac's advertisement, withdrawn when dropped.
+/// This system's advertisement, withdrawn when dropped.
 pub struct Advertiser {
     daemon: ServiceDaemon,
     fullname: String,
+    pub election: [u8; NONCE_LEN],
 }
 
 impl Advertiser {
     pub fn start(key: &PublicKey, port: u16, pairing: bool) -> Result<Self> {
         let daemon = ServiceDaemon::new().context("starting Bonjour")?;
-        // random names, so the advertisement does not reveal this Mac
+        // random names, so the advertisement does not reveal this system
         let id = hex(&random::<6>());
         let host = format!("daisy-{id}.local.");
-        let properties = properties(key, &random(), pairing);
+        let election = random();
+        let properties = properties(key, &election, pairing);
         let info = ServiceInfo::new(SERVICE, &format!("Daisy {id}"), &host, "", port, &properties[..])
             .context("describing the Bonjour advertisement")?
             .enable_addr_auto();
         let fullname = info.get_fullname().to_owned();
         daemon.register(info).context("advertising with Bonjour")?;
-        Ok(Self { daemon, fullname })
+        Ok(Self {
+            daemon,
+            fullname,
+            election,
+        })
     }
 }
 
@@ -130,32 +140,53 @@ impl Drop for Advertiser {
     }
 }
 
-/// A Mac found on the network.
+/// A system found on the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub seen: Seen,
     pub address: SocketAddr,
+    pub election: [u8; NONCE_LEN],
+}
+
+/// Paired keys elect one opener; pairing beacons use their random nonce.
+/// An equal key or nonce is our own advertisement and never opens a connection.
+pub fn opens_connection(
+    own: PublicKey,
+    election: Option<[u8; NONCE_LEN]>,
+    found: &Found,
+    pairing: bool,
+    seen_for: Duration,
+) -> bool {
+    let (eligible, elected) = match found.seen {
+        Seen::Paired(key) => (own != key, own.as_bytes() < key.as_bytes()),
+        Seen::Pairing => (
+            pairing && election != Some(found.election),
+            election.is_some_and(|nonce| nonce < found.election),
+        ),
+    };
+    eligible && (elected || seen_for >= OPENER_GRACE)
 }
 
 /// An advertisement as last heard: its TXT values and where to connect.
-/// Kept raw so it can be recognised again when this Mac's trust changes.
+/// Kept raw so it can be recognised again when this system's trust changes.
 #[derive(Debug, Clone)]
 struct Heard {
     txt: HashMap<String, String>,
     address: SocketAddr,
 }
 
-/// What the heard advertisements are, given the keys this Mac trusts now.
-/// A Mac no longer trusted is dropped, or offered anonymously if it is open
+/// What the heard advertisements are, given the keys this system trusts now.
+/// A peer no longer trusted is dropped, or offered anonymously if it is open
 /// to pairing.
 fn classify<'a>(heard: impl IntoIterator<Item = &'a Heard>, trusted: &[PublicKey]) -> Vec<Found> {
     heard
         .into_iter()
-        .filter_map(|mac| {
-            let seen = identify(|key| mac.txt.get(key).map(String::as_str), trusted)?;
+        .filter_map(|heard| {
+            let seen = identify(|key| heard.txt.get(key).map(String::as_str), trusted)?;
             Some(Found {
                 seen,
-                address: mac.address,
+                address: heard.address,
+                election: unhex(heard.txt.get("n")?)?.try_into().ok()?,
             })
         })
         .collect()
@@ -179,7 +210,7 @@ impl Browser {
         })
     }
 
-    /// The Macs heard so far, recognised against `trusted`. Call again after
+    /// The systems heard so far, recognised against `trusted`. Call again after
     /// trust changes; nothing is cached from earlier keys.
     pub fn current(&self, trusted: &[PublicKey]) -> Vec<Found> {
         classify(self.heard.values(), trusted)
@@ -227,17 +258,17 @@ impl Drop for Browser {
     }
 }
 
-/// Looks for the paired Mac with `key`, for up to `wait`.
+/// Looks for the peer with `key`, for up to `wait`.
 pub async fn find(key: PublicKey, wait: Duration) -> Option<SocketAddr> {
     let mut browser = Browser::start().ok()?;
     tokio::time::timeout(wait, async {
         while browser.changed().await {
-            if let Some(mac) = browser
+            if let Some(peer) = browser
                 .current(&[key])
                 .into_iter()
-                .find(|mac| mac.seen == Seen::Paired(key))
+                .find(|peer| peer.seen == Seen::Paired(key))
             {
-                return Some(mac.address);
+                return Some(peer.address);
             }
         }
         None
@@ -256,19 +287,90 @@ mod tests {
         Identity::generate().unwrap().public_key()
     }
 
+    #[test]
+    fn paired_and_anonymous_peers_elect_exactly_one_opener() {
+        let (a, b) = (key(), key());
+        let address = "127.0.0.1:24850".parse().unwrap();
+        let peer_a = Found {
+            seen: Seen::Paired(a),
+            address,
+            election: [1; NONCE_LEN],
+        };
+        let peer_b = Found {
+            seen: Seen::Paired(b),
+            address,
+            election: [2; NONCE_LEN],
+        };
+        let now = Duration::ZERO;
+        assert_ne!(
+            opens_connection(a, None, &peer_b, false, now),
+            opens_connection(b, None, &peer_a, false, now)
+        );
+        assert!(!opens_connection(a, None, &peer_a, false, now));
+        let anonymous_a = Found {
+            seen: Seen::Pairing,
+            ..peer_a
+        };
+        let anonymous_b = Found {
+            seen: Seen::Pairing,
+            ..peer_b
+        };
+        assert!(opens_connection(a, Some([1; NONCE_LEN]), &anonymous_b, true, now));
+        assert!(!opens_connection(b, Some([2; NONCE_LEN]), &anonymous_a, true, now));
+        assert!(!opens_connection(a, Some([1; NONCE_LEN]), &anonymous_a, true, now));
+        assert!(!opens_connection(a, Some([1; NONCE_LEN]), &anonymous_b, false, now));
+    }
+
+    #[test]
+    fn the_other_system_connects_when_the_elected_one_does_not() {
+        let (a, b) = (key(), key());
+        let (low, high) = if a.as_bytes() < b.as_bytes() { (a, b) } else { (b, a) };
+        let address = "127.0.0.1:24850".parse().unwrap();
+        let low_found = Found {
+            seen: Seen::Paired(low),
+            address,
+            election: [1; NONCE_LEN],
+        };
+        let just_under = OPENER_GRACE - Duration::from_millis(1);
+        assert!(!opens_connection(high, None, &low_found, false, just_under));
+        assert!(opens_connection(high, None, &low_found, false, OPENER_GRACE));
+        assert!(!opens_connection(low, None, &low_found, false, OPENER_GRACE));
+
+        let anonymous = Found {
+            seen: Seen::Pairing,
+            ..low_found
+        };
+        assert!(opens_connection(
+            high,
+            Some([2; NONCE_LEN]),
+            &anonymous,
+            true,
+            OPENER_GRACE
+        ));
+        assert!(opens_connection(high, None, &anonymous, true, OPENER_GRACE));
+        assert!(!opens_connection(
+            high,
+            Some([1; NONCE_LEN]),
+            &anonymous,
+            true,
+            OPENER_GRACE
+        ));
+        assert!(!opens_connection(high, None, &anonymous, false, OPENER_GRACE));
+    }
+
     fn lookup<'a>(props: &'a [(&'static str, String)]) -> impl Fn(&str) -> Option<&'a str> {
         |name| props.iter().find(|(k, _)| *k == name).map(|(_, v)| v.as_str())
     }
 
     #[test]
-    fn a_paired_mac_is_recognised() {
+    fn a_paired_peer_is_recognised() {
         let (mine, other) = (key(), key());
         let props = properties(&mine, &[7; NONCE_LEN], false);
         assert_eq!(identify(lookup(&props), &[other, mine]), Some(Seen::Paired(mine)));
     }
 
     #[test]
-    fn an_unknown_mac_is_ignored_unless_it_is_pairing() {
+    fn an_unknown_peer_is_ignored_unless_it_is_pairing() {
         let props = properties(&key(), &[7; NONCE_LEN], false);
         assert_eq!(identify(lookup(&props), &[key()]), None);
         let pairing = properties(&key(), &[7; NONCE_LEN], true);
@@ -336,15 +438,15 @@ mod tests {
     }
 
     #[test]
-    fn a_forgotten_mac_is_dropped_or_offered_only_for_pairing() {
+    fn a_forgotten_peer_is_dropped_or_offered_only_for_pairing() {
         let (quiet, pairing) = (key(), key());
-        let macs = [heard(&quiet, false, 1), heard(&pairing, true, 2)];
-        let trusted = classify(&macs, &[quiet, pairing]);
+        let advertised = [heard(&quiet, false, 1), heard(&pairing, true, 2)];
+        let trusted = classify(&advertised, &[quiet, pairing]);
         assert_eq!(trusted.iter().filter(|m| matches!(m.seen, Seen::Paired(_))).count(), 2);
         // both forgotten: the quiet one disappears, the pairing one loses its name
-        let forgotten = classify(&macs, &[]);
+        let forgotten = classify(&advertised, &[]);
         assert_eq!(forgotten.len(), 1);
         assert_eq!(forgotten[0].seen, Seen::Pairing);
-        assert_eq!(forgotten[0].address, macs[1].address);
+        assert_eq!(forgotten[0].address, advertised[1].address);
     }
 }

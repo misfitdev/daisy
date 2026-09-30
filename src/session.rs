@@ -1,8 +1,8 @@
-//! Encrypted channel between two Macs.
+//! Encrypted channel between two systems.
 //!
 //! Every connection runs a Noise XX handshake: each side learns the other's
 //! long-term key and all later traffic is encrypted and authenticated. XX
-//! alone does not prove the key belongs to the Mac you meant to reach; see
+//! alone does not prove the key belongs to the peer you meant to reach; see
 //! `pairing` for how keys become trusted.
 
 use std::io;
@@ -20,7 +20,7 @@ pub(crate) const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 
 /// Bound into every handshake, so peers running an incompatible protocol
 /// version fail the handshake instead of misreading each other.
-const PROLOGUE: &[u8] = b"daisy/1";
+const PROLOGUE: &[u8] = b"daisy/2";
 
 // Noise caps one message at 65535 bytes, including a 16 byte tag.
 const MAX_FRAME: usize = 65_535;
@@ -51,6 +51,8 @@ pub enum SessionError {
     Malformed(#[from] postcard::Error),
     #[error("peer did not present a key")]
     NoRemoteKey,
+    #[error("the peer runs a different version of Daisy; update Daisy on both systems")]
+    Incompatible,
 }
 
 pub struct Channel<S> {
@@ -97,7 +99,7 @@ where
         write_frame(&mut stream, &buffer[..len]).await?;
         // <- e, ee, s, es
         let frame = read_frame(&mut stream).await?;
-        handshake.read_message(&frame, &mut buffer)?;
+        handshake.read_message(&frame, &mut buffer).map_err(incompatible)?;
         // -> s, se
         let len = handshake.write_message(&[], &mut buffer)?;
         write_frame(&mut stream, &buffer[..len]).await?;
@@ -118,7 +120,7 @@ where
         write_frame(&mut stream, &buffer[..len]).await?;
         // -> s, se
         let frame = read_frame(&mut stream).await?;
-        handshake.read_message(&frame, &mut buffer)?;
+        handshake.read_message(&frame, &mut buffer).map_err(incompatible)?;
 
         Self::finish(stream, handshake, Role::Responder, buffer)
     }
@@ -233,6 +235,14 @@ fn builder(identity: &Identity) -> Result<snow::Builder<'_>, SessionError> {
     Ok(snow::Builder::new(NOISE_PATTERN.parse()?)
         .local_private_key(identity.private_key())?
         .prologue(PROLOGUE)?)
+}
+
+// A different prologue is the only way an unaltered handshake fails to decrypt.
+fn incompatible(error: snow::Error) -> SessionError {
+    match error {
+        snow::Error::Decrypt => SessionError::Incompatible,
+        other => other.into(),
+    }
 }
 
 // Frames are a big-endian u16 length followed by that many bytes.
@@ -435,18 +445,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incompatible_prologue_fails_the_handshake() {
+    async fn a_peer_on_the_previous_protocol_fails_the_handshake() {
         let (a, b) = duplex(2 * MAX_FRAME);
         let initiator = Identity::generate().unwrap();
         let responder = Identity::generate().unwrap();
 
-        // a peer built with a different protocol version
+        // a peer still running 0.1.1
         let other_version = async move {
             let mut stream = b;
             let mut handshake = snow::Builder::new(NOISE_PATTERN.parse().unwrap())
                 .local_private_key(responder.private_key())
                 .unwrap()
-                .prologue(b"daisy/2")
+                .prologue(b"daisy/1")
                 .unwrap()
                 .build_responder()
                 .unwrap();
@@ -459,6 +469,6 @@ mod tests {
         };
 
         let (result, _stream) = tokio::join!(Channel::initiate(a, &initiator), other_version);
-        assert!(matches!(result, Err(SessionError::Noise(_))), "{:?}", result.err());
+        assert!(matches!(result, Err(SessionError::Incompatible)), "{:?}", result.err());
     }
 }

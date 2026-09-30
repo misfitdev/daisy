@@ -3,7 +3,7 @@ name = "daisy"
 version = "0.1.1"
 edition = "2024"
 rust-version = "1.94"
-description = "Share one keyboard, mouse and trackpad swipes between Macs"
+description = "Share one keyboard, mouse and trackpad swipes between macOS systems"
 license = "MIT OR Apache-2.0"
 publish = false
 

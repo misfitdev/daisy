@@ -1,7 +1,7 @@
 # Agent Instructions
 
-Daisy shares one Mac's keyboard, mouse and trackpad swipes with another Mac
-on the same network. It is Rust, macOS only, and uses private WindowServer
+Daisy shares one system's keyboard, mouse and trackpad swipes with a peer on
+the same network. It is Rust, macOS only, and uses private WindowServer
 events for swipes. Read this before changing anything.
 
 ## Build and test
@@ -31,18 +31,19 @@ ReachSec has no upstream `--version` flag; use `mise ls --current` to record
 its pinned revision.
 
 Input capture, injection, cursor pinning and swipes only prove themselves on
-hardware: two Macs, each with Accessibility and Input Monitoring granted to
+hardware: two systems, each with Accessibility and Input Monitoring granted to
 `Daisy.app`. Unit tests cover decisions, not whether macOS acts on the
 events. Do not call hardware behavior verified unless it ran on hardware in
-this session; record the role and macOS version of each Mac.
+this session; record which system was used at each step and the macOS
+version of each system.
 
 ## Architecture
 
 - `src/protocol.rs` is the only wire-message definition.
   `docs/protocol.md` explains it; code wins if they disagree.
 - Pure decision modules contain no macOS calls and are unit tested directly:
-  `input`, `swipe`, `shake`, `pairing`, `trust`, `session` and
-  `share`.
+  `input`, `swipe`, `shake`, `pairing`, `trust`, `session`, `control`,
+  `latency` and `share`.
 - `src/macos/` carries out decisions and nothing more. Undocumented
   WindowServer fields and event types live only in `src/macos/swipe.rs`;
   Mission Control shortcut IDs live only in `src/macos/shortcut.rs`.
@@ -68,6 +69,12 @@ this session; record the role and macOS version of each Mac.
   `test`, `style` and `refactor` are hidden. Write subjects for someone
   installing the release. Do not add attribution trailers.
 - Do not put surnames, email addresses or machine names in the repository.
+- Never call a device a "Mac" in code, comments, UI or CLI text, docs or site
+  copy. A remote device is a peer; the local device is this system or the
+  local system. Whichever system is in use drives; there are no roles to
+  name. Apple platform and product names are fine when that specific thing
+  is meant: "macOS 27", "Apple silicon", "Mission Control". The
+  platform-scope phrase is "Mac-to-Mac".
 - Describe Daisy on its own terms. Public documentation must not mention or
   compare Daisy with other products.
 

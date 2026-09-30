@@ -19,7 +19,7 @@ const controls = [
     id: "identity",
     title: "Device identity",
     rows: [
-      ["Identity key", "Long-term X25519 key pair per Mac"],
+      ["Identity key", "Long-term X25519 key pair per system"],
       ["Storage", "Owner-only file (0600 in a 0700 directory); refused if readable by other users"],
       ["Rotation", "Supported; invalidates every existing pairing"],
     ],
@@ -32,7 +32,7 @@ const controls = [
       ["Key confirmation", "HMAC-SHA256 over the Noise handshake hash, role-labelled against reflection"],
       ["Result", "Peer public key pinned after mutual confirmation"],
       ["Guessing resistance", "One online guess per attempt; at most five unknown-key attempts per ten minutes; window closes after the first success"],
-      ["Consent", "Both Macs must opt in; unknown keys are refused otherwise"],
+      ["Consent", "Both systems must opt in; unknown keys are refused otherwise"],
       ["Timeouts", "Handshake 15 seconds; pairing two minutes"],
     ],
   },
@@ -41,7 +41,7 @@ const controls = [
     title: "Trust lifecycle",
     rows: [
       ["Policies", "Idle expiry after 96 hours (default), fixed term in days, single session, or until revoked"],
-      ["Enforcement", "Each Mac enforces its own policy; a session requires mutual trust, so the stricter policy applies"],
+      ["Enforcement", "Each system enforces its own policy; a session requires mutual trust, so the stricter policy applies"],
       ["Revocation", "Immediate from the app; within one second for changes made outside it; expired trust purged"],
     ],
   },
@@ -49,7 +49,7 @@ const controls = [
     id: "input",
     title: "Input safety",
     rows: [
-      ["Local override", "Control-Option-Command-Escape returns control to the driving Mac"],
+      ["Local override", "Control-Option-Command-Escape returns control to the local system"],
       ["Liveness", "Sessions terminate after three seconds without traffic"],
       ["Input release", "All held keys and buttons released whenever a session ends"],
       ["Fail-safe", "Capture never blocks; on overload, input stays local and the session terminates"],
@@ -59,8 +59,8 @@ const controls = [
     id: "network",
     title: "Network and data",
     rows: [
-      ["Connections", "Direct TCP between paired Macs only (default port 24850, configurable bind address)"],
-      ["Data sent", "Mac name, public key, pairing and liveness messages, input events, control handoffs, and the clipboard when control crosses (switchable)"],
+      ["Connections", "Direct TCP between paired peers only (default port 24850, configurable bind address)"],
+      ["Data sent", "System name, public key, pairing and liveness messages, input events, control handoffs, and the clipboard when control crosses (switchable)"],
       ["Data not sent", "No screen or file content"],
       ["Third parties", "No accounts, telemetry, analytics, update checks, relays or cloud services"],
     ],
