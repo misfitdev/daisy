@@ -50,6 +50,12 @@ struct AppDelegateIvars {
     connection_control: OnceCell<Retained<NSSegmentedControl>>,
     address_label: OnceCell<Retained<NSTextField>>,
     address_field: OnceCell<Retained<NSTextField>>,
+    nearby_popup: OnceCell<Retained<NSPopUpButton>>,
+    nearby: RefCell<Vec<controller::Nearby>>,
+    /// The address and key of the Mac last picked from Nearby; the key is
+    /// used only while the address field still shows that address.
+    nearby_choice: RefCell<Option<(String, String)>>,
+    menu_discoverable: OnceCell<Retained<NSMenuItem>>,
     role_label: OnceCell<Retained<NSTextField>>,
     role_control: OnceCell<Retained<NSSegmentedControl>>,
     role_detail: OnceCell<Retained<NSTextField>>,
@@ -226,6 +232,33 @@ define_class!(
             self.refresh_permissions();
         }
 
+        #[unsafe(method(pickNearby:))]
+        fn pick_nearby(&self, sender: &NSPopUpButton) {
+            // item 0 is the pull-down's title
+            let index = sender.indexOfSelectedItem() - 1;
+            let Some(mac) = usize::try_from(index)
+                .ok()
+                .and_then(|index| self.ivars().nearby.borrow().get(index).cloned())
+            else {
+                return;
+            };
+            if let Some(field) = self.ivars().address_field.get() {
+                field.setStringValue(&NSString::from_str(&mac.address));
+            }
+            *self.ivars().nearby_choice.borrow_mut() = mac.key.map(|key| (mac.address.clone(), key.to_hex()));
+        }
+
+        #[unsafe(method(toggleDiscoverable:))]
+        fn toggle_discoverable(&self, _sender: Option<&AnyObject>) {
+            let on = {
+                let mut settings = self.ivars().settings.borrow_mut();
+                settings.discoverable = !settings.discoverable;
+                settings.discoverable
+            };
+            let _ = self.ivars().controller.send(Command::SetDiscoverable(on));
+            self.refresh_discoverable();
+        }
+
         #[unsafe(method(toggleShareClipboard:))]
         fn toggle_share_clipboard(&self, _sender: Option<&AnyObject>) {
             let on = {
@@ -339,6 +372,10 @@ impl AppDelegate {
             connection_control: OnceCell::new(),
             address_label: OnceCell::new(),
             address_field: OnceCell::new(),
+            nearby_popup: OnceCell::new(),
+            nearby: RefCell::new(Vec::new()),
+            nearby_choice: RefCell::new(None),
+            menu_discoverable: OnceCell::new(),
             role_label: OnceCell::new(),
             role_control: OnceCell::new(),
             role_detail: OnceCell::new(),
@@ -378,6 +415,7 @@ impl AppDelegate {
         let clipboard = self.menu_item("Share Clipboard", Some(sel!(toggleShareClipboard:)), true);
         let launch_login = self.menu_item("Open at Login", Some(sel!(toggleLaunchAtLogin:)), true);
         let reset = self.menu_item("Reset Permissions…", Some(sel!(resetPermissions:)), true);
+        let discoverable = self.menu_item("Discoverable on This Network", Some(sel!(toggleDiscoverable:)), true);
         let refresh = self.menu_item("Refresh Peers", Some(sel!(refreshPeers:)), true);
         let quit = self.menu_item("Quit Daisy", Some(sel!(quitDaisy:)), true);
 
@@ -389,6 +427,7 @@ impl AppDelegate {
         menu.addItem(&peers_parent);
         menu.addItem(&refresh);
         menu.addItem(&clipboard);
+        menu.addItem(&discoverable);
         menu.addItem(&launch_login);
         menu.addItem(&reset);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -403,6 +442,7 @@ impl AppDelegate {
         self.ivars().menu_status.set(status).ok();
         self.ivars().menu_start_stop.set(start_stop).ok();
         self.ivars().menu_launch_login.set(launch_login).ok();
+        self.ivars().menu_discoverable.set(discoverable).ok();
         self.ivars().menu_clipboard.set(clipboard).ok();
         self.ivars().peers_menu.set(peers_menu).ok();
         self.refresh_launch_at_login();
@@ -483,8 +523,18 @@ impl AppDelegate {
         let address = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
         address.setPlaceholderString(Some(&NSString::from_str("studio.local")));
         address.setAccessibilityLabel(Some(&NSString::from_str("Peer address")));
-        address.setFrame(frame(180.0, 384.0, 352.0, 28.0));
+        address.setFrame(frame(180.0, 384.0, 212.0, 28.0));
         content.addSubview(&address);
+        let nearby =
+            NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), frame(400.0, 382.0, 132.0, 30.0), true);
+        nearby.addItemWithTitle(&NSString::from_str("Nearby"));
+        nearby.setAccessibilityLabel(Some(&NSString::from_str("Nearby Macs")));
+        unsafe {
+            nearby.setTarget(Some(self));
+            nearby.setAction(Some(sel!(pickNearby:)));
+        }
+        content.addSubview(&nearby);
+        self.ivars().nearby_popup.set(nearby).ok();
 
         let role_label = self.form_label(&content, "Role", 345.0);
         let control = self.segmented_control(&content, 345.0, &["Host", "Guest"], sel!(controlChanged:));
@@ -576,12 +626,14 @@ impl AppDelegate {
 
     fn handle_event(&self, event: Event) {
         match event {
+            Event::Nearby(nearby) => self.show_nearby(nearby),
             Event::Ready {
                 settings,
                 peers,
                 first_run,
             } => {
                 *self.ivars().settings.borrow_mut() = settings.clone();
+                self.refresh_discoverable();
                 self.refresh_share_clipboard();
                 *self.ivars().peers.borrow_mut() = peers;
                 self.apply_settings(&settings.last_session);
@@ -698,7 +750,14 @@ impl AppDelegate {
                     );
                     return None;
                 }
-                Connection::Connect { address }
+                let peer = self
+                    .ivars()
+                    .nearby_choice
+                    .borrow()
+                    .as_ref()
+                    .filter(|(chosen, _)| *chosen == address)
+                    .map(|(_, key)| key.clone());
+                Connection::Connect { address, peer }
             }
         };
         let drive = match self.ivars().role_control.get()?.selectedSegment() {
@@ -730,10 +789,11 @@ impl AppDelegate {
                     control.setSelectedSegment(0);
                 }
             }
-            Connection::Connect { address } => {
+            Connection::Connect { address, peer } => {
                 if let Some(control) = self.ivars().connection_control.get() {
                     control.setSelectedSegment(1);
                 }
+                *self.ivars().nearby_choice.borrow_mut() = peer.clone().map(|key| (address.clone(), key));
                 if let Some(field) = self.ivars().address_field.get() {
                     field.setStringValue(&NSString::from_str(address));
                 }
@@ -780,6 +840,9 @@ impl AppDelegate {
         if let Some(field) = self.ivars().address_field.get() {
             field.setHidden(!connecting);
         }
+        if let Some(popup) = self.ivars().nearby_popup.get() {
+            popup.setHidden(!connecting);
+        }
 
         if connecting {
             y -= 44.0;
@@ -787,7 +850,10 @@ impl AppDelegate {
                 label.setFrame(frame(48.0, y, 120.0, 24.0));
             }
             if let Some(field) = self.ivars().address_field.get() {
-                field.setFrame(frame(180.0, y - 5.0, 352.0, 28.0));
+                field.setFrame(frame(180.0, y - 5.0, 212.0, 28.0));
+            }
+            if let Some(popup) = self.ivars().nearby_popup.get() {
+                popup.setFrame(frame(400.0, y - 7.0, 132.0, 30.0));
             }
         }
 
@@ -959,6 +1025,33 @@ impl AppDelegate {
             parent.setSubmenu(Some(&submenu));
             menu.addItem(&parent);
         }
+    }
+
+    fn refresh_discoverable(&self) {
+        if let Some(item) = self.ivars().menu_discoverable.get() {
+            item.setState(if self.ivars().settings.borrow().discoverable {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
+    }
+
+    fn show_nearby(&self, nearby: Vec<controller::Nearby>) {
+        if let Some(popup) = self.ivars().nearby_popup.get() {
+            popup.removeAllItems();
+            popup.addItemWithTitle(&NSString::from_str("Nearby"));
+            if nearby.is_empty() {
+                popup.addItemWithTitle(&NSString::from_str("No Macs found"));
+                if let Some(item) = popup.lastItem() {
+                    item.setEnabled(false);
+                }
+            }
+            for mac in &nearby {
+                popup.addItemWithTitle(&NSString::from_str(&nearby_title(mac)));
+            }
+        }
+        *self.ivars().nearby.borrow_mut() = nearby;
     }
 
     fn refresh_share_clipboard(&self) {
@@ -1239,6 +1332,13 @@ fn open_settings(pane: Option<&str>) {
     let Some(pane) = pane else { return };
     if let Some(url) = NSURL::URLWithString(&NSString::from_str(pane)) {
         NSWorkspace::sharedWorkspace().openURL(&url);
+    }
+}
+
+fn nearby_title(mac: &controller::Nearby) -> String {
+    match &mac.name {
+        Some(name) => name.clone(),
+        None => format!("Mac open to pairing at {}", mac.address),
     }
 }
 

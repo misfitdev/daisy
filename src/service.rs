@@ -10,6 +10,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 
 use crate::clipboard::Sharing;
+use crate::discovery::{self, Advertiser};
 use crate::identity::{Identity, PublicKey};
 use crate::input::Side;
 use crate::macos::{self, capture::Capture, inject::Injector, pasteboard::Pasteboard};
@@ -62,6 +63,8 @@ pub struct SessionConfig<'a> {
     pub drive: Option<Side>,
     /// Whether this Mac shares its clipboard; may change mid-session.
     pub clipboard: &'a watch::Receiver<bool>,
+    /// Whether a waiting Mac advertises itself with Bonjour.
+    pub discoverable: &'a watch::Receiver<bool>,
 }
 
 struct PairingGate {
@@ -135,15 +138,23 @@ where
     observer.waiting(config.name, config.identity.public_key(), port, config.pairing);
 
     let mut pairing_gate = PairingGate::new(config.pairing);
+    let mut discoverable = config.discoverable.clone();
     loop {
+        // advertise only while waiting, and only while allowed
+        let _advertiser = advertise(&config, port, &pairing_gate, *discoverable.borrow_and_update());
         let accepted = if let Some(deadline) = pairing_gate.deadline() {
             tokio::select! {
                 result = listener.accept() => Some(result),
                 () = tokio::time::sleep_until(deadline) => None,
+                Ok(()) = discoverable.changed() => continue,
             }
         } else {
-            Some(listener.accept().await)
+            tokio::select! {
+                result = listener.accept() => Some(result),
+                Ok(()) = discoverable.changed() => continue,
+            }
         };
+        drop(_advertiser);
         let Some(accepted) = accepted else {
             pairing_gate.close();
             observer.pairing_closed();
@@ -168,39 +179,89 @@ where
 /// yet is reported. Stops on anything a retry cannot fix: trust ended, a
 /// different Mac answering, or a local or setup error. Only the first
 /// connection may pair; reconnecting never does.
-pub async fn connect<P, O>(config: SessionConfig<'_>, address: &str, prompt: &mut P, observer: &mut O) -> Result<()>
+pub async fn connect<P, O>(
+    config: SessionConfig<'_>,
+    address: &str,
+    peer: Option<PublicKey>,
+    prompt: &mut P,
+    observer: &mut O,
+) -> Result<()>
 where
     P: PairingPrompt + Send,
     O: ServiceObserver + Send,
 {
-    let address = connect_address(address);
-    let mut expected = None;
+    // a Mac chosen from those found on the network is already paired: check its key from the start
+    let mut expected = peer;
+    let mut started = false;
+    // what to call the other Mac while reconnecting: where it was last reached
+    let mut last_reached = connect_address(address);
     let mut waits = reconnect::waits();
     loop {
         let attempt = SessionConfig {
             pairing: pairing_for_attempt(config.pairing, expected.is_some()),
             ..config
         };
-        observer.connecting(&address);
-        let (lasted, result) = connect_once(attempt, &address, &mut expected, prompt, observer).await;
-        if lasted.is_some_and(|lasted| lasted >= reconnect::STABLE) {
-            waits = reconnect::waits();
-        }
+        let result = match locate(expected, address).await {
+            Ok(address) => {
+                observer.connecting(&address);
+                last_reached.clone_from(&address);
+                let (lasted, result) = connect_once(attempt, &address, &mut expected, prompt, observer).await;
+                started |= lasted.is_some();
+                if lasted.is_some_and(|lasted| lasted >= reconnect::STABLE) {
+                    waits = reconnect::waits();
+                }
+                result
+            }
+            Err(error) => Err(error),
+        };
         match result {
             // the other Mac ended the session; wait for it to come back
             Ok(()) => {}
             // Until a session has worked, a failure is more likely a wrong
             // address or a Mac not set up yet than a network blip: say so.
-            Err(error) if expected.is_none() => return Err(error),
+            Err(error) if !started => return Err(error),
             Err(error) if reconnect::retryable(&error) => {
-                tracing::info!(address, error = format!("{error:#}"), "connection lost; reconnecting");
+                tracing::info!(error = format!("{error:#}"), "connection lost; reconnecting");
             }
             Err(error) => return Err(error),
         }
         let wait = waits.next().unwrap_or(Duration::from_secs(10));
-        observer.reconnecting(&address, wait);
+        observer.reconnecting(&last_reached, wait);
         tokio::time::sleep(wait).await;
     }
+}
+
+/// This Mac's Bonjour advertisement while waiting, if allowed. A failure to
+/// advertise is logged, not fatal: connecting by name or address still works.
+fn advertise(config: &SessionConfig<'_>, port: u16, pairing: &PairingGate, allowed: bool) -> Option<Advertiser> {
+    if !allowed {
+        return None;
+    }
+    Advertiser::start(&config.identity.public_key(), port, pairing.is_open())
+        .inspect_err(|error| tracing::warn!(error = format!("{error:#}"), "could not advertise with Bonjour"))
+        .ok()
+}
+
+/// How long each attempt looks for a paired Mac on the network before
+/// falling back to the saved address.
+const FIND_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Where to reach the Mac this attempt: found with Bonjour when its key is
+/// known, otherwise the saved name or address.
+async fn locate(peer: Option<PublicKey>, saved: &str) -> Result<String> {
+    if let Some(key) = peer
+        && let Some(found) = discovery::find(key, FIND_TIMEOUT).await
+    {
+        return Ok(found.to_string());
+    }
+    if saved.trim().is_empty() {
+        return Err(Unreachable {
+            address: "the paired Mac".to_owned(),
+            source: std::io::ErrorKind::NotFound.into(),
+        }
+        .into());
+    }
+    Ok(connect_address(saved))
 }
 
 /// Pairing is offered only until a session has started; reconnecting to that
@@ -436,11 +497,13 @@ mod tests {
     #[derive(Default)]
     struct Recorded {
         waits: Vec<Duration>,
+        reconnecting_to: Vec<String>,
     }
 
     impl ServiceObserver for Recorded {
-        fn reconnecting(&mut self, _address: &str, wait: Duration) {
+        fn reconnecting(&mut self, address: &str, wait: Duration) {
             self.waits.push(wait);
+            self.reconnecting_to.push(address.to_owned());
         }
     }
 
@@ -470,6 +533,7 @@ mod tests {
     }
 
     fn config<'a>(mac: &'a Mac, clipboard: &'a watch::Receiver<bool>) -> SessionConfig<'a> {
+        let discoverable: &'a watch::Receiver<bool> = Box::leak(Box::new(watch::channel(false).1));
         SessionConfig {
             identity: &mac.identity,
             peers: &mac.peers,
@@ -477,6 +541,7 @@ mod tests {
             pairing: None,
             drive: None,
             clipboard,
+            discoverable,
         }
     }
 
@@ -501,7 +566,7 @@ mod tests {
         let clipboard = watch::channel(true).1;
         let mut observer = Recorded::default();
         let address = format!("127.0.0.1:{port}");
-        let attempt = connect(config(&here, &clipboard), &address, &mut prompt, &mut observer);
+        let attempt = connect(config(&here, &clipboard), &address, None, &mut prompt, &mut observer);
         let error = tokio::time::timeout(Duration::from_secs(4), attempt)
             .await
             .expect("the first failure should end connect")
@@ -546,11 +611,60 @@ mod tests {
         };
         let client = tokio::time::timeout(
             Duration::from_secs(8),
-            connect(config(&here, &clipboard), &address, &mut prompt, &mut observer),
+            connect(config(&here, &clipboard), &address, None, &mut prompt, &mut observer),
         );
         let (sessions, _) = tokio::join!(server, client);
         assert_eq!(sessions, 2);
         assert!(!observer.waits.is_empty());
+        assert!(
+            observer.reconnecting_to.iter().all(|to| *to == address),
+            "{:?}",
+            observer.reconnecting_to
+        );
+    }
+
+    // Uses the real network stack: the waiting Mac advertises with Bonjour
+    // and the other finds it from its key alone, with no address.
+    #[tokio::test]
+    #[ignore = "uses the local network; run by hand with --ignored"]
+    async fn a_paired_mac_is_found_and_connected_without_an_address() {
+        let mut prompt = NoCodes;
+        let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (here, there) = (mac(), mac());
+        let now = trust::now();
+        here.peers
+            .pin(there.identity.public_key(), "Studio", Policy::Idle, now)
+            .unwrap();
+        there
+            .peers
+            .pin(here.identity.public_key(), "Laptop", Policy::Idle, now)
+            .unwrap();
+        let _advertiser = Advertiser::start(&there.identity.public_key(), port, false).unwrap();
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut channel = Channel::respond(stream, &there.identity).await.unwrap();
+            establish_trust(&mut channel, &there.peers, "Studio", false, Policy::Idle, &mut NoCodes)
+                .await
+                .unwrap()
+                .0
+        };
+        let clipboard = watch::channel(true).1;
+        let mut observer = Recorded::default();
+        let client = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect(
+                config(&here, &clipboard),
+                "",
+                Some(there.identity.public_key()),
+                &mut prompt,
+                &mut observer,
+            ),
+        );
+        let (peer, _) = tokio::time::timeout(Duration::from_secs(12), async { tokio::join!(server, client) })
+            .await
+            .expect("the paired Mac was never reached");
+        assert_eq!(peer, "Laptop");
     }
 
     #[tokio::test]
@@ -569,7 +683,7 @@ mod tests {
         let mut observer = Recorded::default();
         let client = tokio::time::timeout(
             Duration::from_secs(5),
-            connect(config(&here, &clipboard), &address, &mut prompt, &mut observer),
+            connect(config(&here, &clipboard), &address, None, &mut prompt, &mut observer),
         );
         let (_, result) = tokio::join!(server, client);
         let error = result.expect("connect gave up instead of looping").unwrap_err();

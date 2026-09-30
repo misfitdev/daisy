@@ -12,10 +12,11 @@ Daisy is in beta. It supports:
 - Scrolling, and swipes for Spaces, Mission Control and app windows
 - Clipboard sharing for text, rich text and images
 - Automatic reconnection after sleep or a network change
+- Finding paired Macs on the local network with Bonjour
 - Pairing with a one-time code, managed from the menu bar
 - Immediate return of control with Control-Option-Command-Escape
 
-Planned: automatic discovery on the local network, and layouts that chain more than two screens.
+Planned: layouts that chain more than two screens.
 
 Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes through requires macOS 27 on the Host.
 
@@ -24,7 +25,7 @@ Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes thro
 1. Download the latest release from [Releases](https://github.com/misfitdev/daisy/releases), unzip it and move **Daisy.app** to Applications. Install it on both Macs.
 2. Open Daisy from the menu bar and grant Accessibility and Input Monitoring when prompted. macOS requires both before Daisy can read and send input.
 3. Pair them:
-   - On one, choose **Wait for a peer**. On the other, choose **Connect by Address** and enter the first one's network name, such as `studio.local`.
+   - On one, choose **Wait for a peer**. On the other, choose **Connect by Address** and pick the first one from **Nearby**, or enter its network name, such as `studio.local`.
    - Choose **Host** where you will type and use the trackpad, and **Guest** on the other. On the Host, choose the edge where the Guest sits.
    - Click **Pair a New Peer** on both. Enter the six-digit code shown on one into the other.
 4. Click **Start Sharing** on both, then move the pointer through the chosen edge. The menu bar flower shows a yellow center while connected.

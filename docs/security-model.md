@@ -51,6 +51,10 @@ Each Mac enforces its own policy on its own clock. A session starts only while b
 
 Expired trust is removed from the peer file. The menu-bar app can forget a peer and aborts its active session task immediately; the peer-file watcher remains the backstop for changes made by another process and reacts within one second. The optional CLI provides `daisy forget` and `daisy rotate-key` for bulk revocation and identity rotation.
 
+## Discovery
+
+A waiting Mac advertises `_daisy._tcp` with Bonjour under a random instance and host name. The TXT record holds a random 16-byte nonce and an 8-byte tag, the first 8 bytes of SHA-256 over a fixed label, the Mac's public key and the nonce, plus whether pairing is open. A Mac that pinned the key recognises the tag; anyone else learns neither the key nor the Mac's name, and each new advertisement uses a fresh nonce, so advertisements cannot be linked. An advertisement only suggests where to connect: every connection still runs the Noise handshake and the trust check, so a forged or replayed advertisement can at most send a connection somewhere it fails. Advertising can be turned off.
+
 ## Reconnecting
 
 The Mac that connects keeps a session alive by connecting again after a drop, sleep or network change. Every attempt runs the full Noise handshake and trust check, so an expired or forgotten Mac is refused exactly as on first contact. A reconnect is never allowed to pair: pairing is offered only until the first session starts. If the key that answers is not the key of the Mac it was connected to, Daisy stops instead of retrying. Only network failures are retried (refused, unreachable, reset, silent or timed out); trust, key, protocol and setup failures stop.

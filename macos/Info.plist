@@ -23,6 +23,12 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<!-- no Dock icon: runs in the background, and later from the menu bar -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Daisy connects to your other Mac on the local network and finds it with Bonjour.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_daisy._tcp</string>
+	</array>
 	<key>LSUIElement</key>
 	<true/>
 </dict>
