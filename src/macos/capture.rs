@@ -256,7 +256,7 @@ fn run_tap(
         if tap.is_null() {
             drop(Box::from_raw(context));
             let _ = ready.send(Err(
-                "macOS refused the input tap: grant Daisy Accessibility and Input Monitoring (`daisy permissions --request`)"
+                "macOS refused the input tap: Daisy needs Accessibility and Input Monitoring; if both are already switched on, quit and reopen Daisy, or reset its permissions"
                     .into(),
             ));
             return;

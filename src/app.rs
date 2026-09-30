@@ -27,6 +27,8 @@ use crate::peers::Peer;
 use crate::permissions::{self, Access};
 use crate::trust::Policy;
 
+/// Matches `bundle_id` in the justfile, which writes it into Info.plist.
+const BUNDLE_ID: &str = "dev.misfit.daisy";
 const WINDOW_WIDTH: f64 = 580.0;
 const WINDOW_HEIGHT: f64 = 720.0;
 
@@ -173,6 +175,35 @@ define_class!(
         #[unsafe(method(controlChanged:))]
         fn control_changed(&self, _sender: Option<&AnyObject>) {
             self.update_conditional_controls();
+            self.update_action_buttons();
+        }
+
+        #[unsafe(method(resetPermissions:))]
+        fn reset_permissions(&self, _sender: Option<&AnyObject>) {
+            let alert = NSAlert::new(self.mtm());
+            alert.setMessageText(&NSString::from_str("Reset Daisy's permissions?"));
+            alert.setInformativeText(&NSString::from_str(
+                "Use this when System Settings shows Daisy switched on but Daisy still asks for access. \
+                 macOS ties each permission to the exact copy of the app, so an entry left by an older or \
+                 differently signed copy does not apply. Resetting removes Daisy's entries; Daisy then quits, \
+                 and asks again when you reopen it.",
+            ));
+            alert.addButtonWithTitle(&NSString::from_str("Reset and Quit"));
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            if alert.runModal() != NSAlertFirstButtonReturn {
+                return;
+            }
+            match permissions::reset(BUNDLE_ID) {
+                Ok(()) => NSApplication::sharedApplication(self.mtm()).terminate(None),
+                Err(error) => self.show_alert(
+                    "Permissions could not be reset",
+                    &format!(
+                        "Remove Daisy from Accessibility and Input Monitoring in System Settings → \
+                         Privacy & Security, then reopen Daisy. ({error})"
+                    ),
+                    NSAlertStyle::Warning,
+                ),
+            }
         }
 
         #[unsafe(method(requestAccessibility:))]
@@ -346,6 +377,7 @@ impl AppDelegate {
         peers_parent.setSubmenu(Some(&peers_menu));
         let clipboard = self.menu_item("Share Clipboard", Some(sel!(toggleShareClipboard:)), true);
         let launch_login = self.menu_item("Open at Login", Some(sel!(toggleLaunchAtLogin:)), true);
+        let reset = self.menu_item("Reset Permissions…", Some(sel!(resetPermissions:)), true);
         let refresh = self.menu_item("Refresh Peers", Some(sel!(refreshPeers:)), true);
         let quit = self.menu_item("Quit Daisy", Some(sel!(quitDaisy:)), true);
 
@@ -358,6 +390,7 @@ impl AppDelegate {
         menu.addItem(&refresh);
         menu.addItem(&clipboard);
         menu.addItem(&launch_login);
+        menu.addItem(&reset);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         menu.addItem(&quit);
         status_item.setMenu(Some(&menu));
@@ -624,9 +657,16 @@ impl AppDelegate {
 
     fn start(&self, allow_pairing: bool) {
         if !self.permissions_granted() {
+            let host = self.is_host();
             self.show_alert(
                 "Permissions are required",
-                "Grant Accessibility and Input Monitoring before starting or pairing.",
+                if host {
+                    "The Host needs Accessibility and Input Monitoring. If System Settings already shows Daisy \
+                     switched on, choose Reset Permissions in the Daisy menu."
+                } else {
+                    "The Guest needs Accessibility. If System Settings already shows Daisy switched on, choose \
+                     Reset Permissions in the Daisy menu."
+                },
                 NSAlertStyle::Informational,
             );
             self.open_window();
@@ -841,8 +881,19 @@ impl AppDelegate {
         self.update_action_buttons();
     }
 
+    fn is_host(&self) -> bool {
+        self.ivars()
+            .role_control
+            .get()
+            .is_none_or(|control| control.selectedSegment() == 0)
+    }
+
     fn permissions_granted(&self) -> bool {
-        permissions::accessibility() == Access::Granted && permissions::input_monitoring() == Access::Granted
+        permissions::ready(
+            self.is_host(),
+            permissions::accessibility(),
+            permissions::input_monitoring(),
+        )
     }
 
     fn update_action_buttons(&self) {
