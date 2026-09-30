@@ -398,9 +398,36 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     }
 }
 
-/// Reports the Macs found on the network whenever that set changes. Only
-/// paired Macs this one still trusts are named; others appear only while
+/// How often the Nearby list re-reads which Macs are trusted, so a Mac
+/// forgotten, re-trusted, newly paired or expired is shown correctly even
+/// when the network is quiet.
+const NEARBY_TRUST_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The Nearby list for the Macs heard on the network, given this Mac's
+/// paired Macs now. Only trusted Macs are named; others appear only while
 /// open to pairing.
+fn nearby(found: Vec<discovery::Found>, peers: &[Peer]) -> Vec<Nearby> {
+    let mut nearby: Vec<Nearby> = found
+        .into_iter()
+        .map(|mac| match mac.seen {
+            discovery::Seen::Paired(key) => Nearby {
+                name: peers.iter().find(|peer| peer.key == key).map(|peer| peer.name.clone()),
+                key: Some(key),
+                address: mac.address.to_string(),
+            },
+            discovery::Seen::Pairing => Nearby {
+                name: None,
+                key: None,
+                address: mac.address.to_string(),
+            },
+        })
+        .collect();
+    nearby.sort_by(|a, b| (a.name.is_none(), &a.name, &a.address).cmp(&(b.name.is_none(), &b.name, &b.address)));
+    nearby
+}
+
+/// Reports the Macs found on the network whenever that list changes, from
+/// either the network or this Mac's trust.
 async fn browse_nearby(home: PathBuf, events: Sender<Event>) {
     let mut browser = match discovery::Browser::start() {
         Ok(browser) => browser,
@@ -409,31 +436,23 @@ async fn browse_nearby(home: PathBuf, events: Sender<Event>) {
             return;
         }
     };
+    let mut shown = None;
+    let mut check = tokio::time::interval(NEARBY_TRUST_CHECK);
     loop {
+        tokio::select! {
+            more = browser.changed() => if !more { return },
+            _ = check.tick() => {}
+        }
         let peers = list_peers(&home).unwrap_or_default();
         let keys: Vec<PublicKey> = peers.iter().map(|peer| peer.key).collect();
-        let Some(found) = browser.next(&keys).await else {
-            return;
-        };
-        let mut nearby: Vec<Nearby> = found
-            .into_iter()
-            .map(|mac| match mac.seen {
-                discovery::Seen::Paired(key) => Nearby {
-                    name: peers.iter().find(|peer| peer.key == key).map(|peer| peer.name.clone()),
-                    key: Some(key),
-                    address: mac.address.to_string(),
-                },
-                discovery::Seen::Pairing => Nearby {
-                    name: None,
-                    key: None,
-                    address: mac.address.to_string(),
-                },
-            })
-            .collect();
-        nearby.sort_by(|a, b| (a.name.is_none(), &a.name, &a.address).cmp(&(b.name.is_none(), &b.name, &b.address)));
-        if events.send(Event::Nearby(nearby)).is_err() {
+        let list = nearby(browser.current(&keys), &peers);
+        if shown.as_ref() == Some(&list) {
+            continue;
+        }
+        if events.send(Event::Nearby(list.clone())).is_err() {
             return;
         }
+        shown = Some(list);
     }
 }
 
@@ -697,6 +716,28 @@ const fn default_port() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearby_names_only_trusted_macs() {
+        let studio = Identity::generate().unwrap().public_key();
+        let address: std::net::SocketAddr = "192.168.1.9:24850".parse().unwrap();
+        let found = vec![discovery::Found {
+            seen: discovery::Seen::Paired(studio),
+            address,
+        }];
+        let peer = Peer {
+            name: "Studio".into(),
+            key: studio,
+            policy: Policy::Idle,
+            paired_at: 0,
+            last_seen: 0,
+        };
+        let list = nearby(found.clone(), &[peer]);
+        assert_eq!(list[0].name.as_deref(), Some("Studio"));
+        assert_eq!(list[0].address, "192.168.1.9:24850");
+        // a key that is no longer among the paired Macs is never named
+        assert_eq!(nearby(found, &[])[0].name, None);
+    }
     use std::os::unix::fs::PermissionsExt;
 
     #[test]

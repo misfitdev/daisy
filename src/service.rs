@@ -193,6 +193,8 @@ where
     // a Mac chosen from those found on the network is already paired: check its key from the start
     let mut expected = peer;
     let mut started = false;
+    // what to call the other Mac while reconnecting: where it was last reached
+    let mut last_reached = connect_address(address);
     let mut waits = reconnect::waits();
     loop {
         let attempt = SessionConfig {
@@ -202,6 +204,7 @@ where
         let result = match locate(expected, address).await {
             Ok(address) => {
                 observer.connecting(&address);
+                last_reached.clone_from(&address);
                 let (lasted, result) = connect_once(attempt, &address, &mut expected, prompt, observer).await;
                 started |= lasted.is_some();
                 if lasted.is_some_and(|lasted| lasted >= reconnect::STABLE) {
@@ -223,7 +226,7 @@ where
             Err(error) => return Err(error),
         }
         let wait = waits.next().unwrap_or(Duration::from_secs(10));
-        observer.reconnecting(address, wait);
+        observer.reconnecting(&last_reached, wait);
         tokio::time::sleep(wait).await;
     }
 }
@@ -494,11 +497,13 @@ mod tests {
     #[derive(Default)]
     struct Recorded {
         waits: Vec<Duration>,
+        reconnecting_to: Vec<String>,
     }
 
     impl ServiceObserver for Recorded {
-        fn reconnecting(&mut self, _address: &str, wait: Duration) {
+        fn reconnecting(&mut self, address: &str, wait: Duration) {
             self.waits.push(wait);
+            self.reconnecting_to.push(address.to_owned());
         }
     }
 
@@ -611,6 +616,11 @@ mod tests {
         let (sessions, _) = tokio::join!(server, client);
         assert_eq!(sessions, 2);
         assert!(!observer.waits.is_empty());
+        assert!(
+            observer.reconnecting_to.iter().all(|to| *to == address),
+            "{:?}",
+            observer.reconnecting_to
+        );
     }
 
     // Uses the real network stack: the waiting Mac advertises with Bonjour

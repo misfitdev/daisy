@@ -137,11 +137,35 @@ pub struct Found {
     pub address: SocketAddr,
 }
 
+/// An advertisement as last heard: its TXT values and where to connect.
+/// Kept raw so it can be recognised again when this Mac's trust changes.
+#[derive(Debug, Clone)]
+struct Heard {
+    txt: HashMap<String, String>,
+    address: SocketAddr,
+}
+
+/// What the heard advertisements are, given the keys this Mac trusts now.
+/// A Mac no longer trusted is dropped, or offered anonymously if it is open
+/// to pairing.
+fn classify<'a>(heard: impl IntoIterator<Item = &'a Heard>, trusted: &[PublicKey]) -> Vec<Found> {
+    heard
+        .into_iter()
+        .filter_map(|mac| {
+            let seen = identify(|key| mac.txt.get(key).map(String::as_str), trusted)?;
+            Some(Found {
+                seen,
+                address: mac.address,
+            })
+        })
+        .collect()
+}
+
 /// Watches the network for Daisy advertisements, keeping the current set.
 pub struct Browser {
     daemon: ServiceDaemon,
     events: mdns_sd::Receiver<ServiceEvent>,
-    found: HashMap<String, Found>,
+    heard: HashMap<String, Heard>,
 }
 
 impl Browser {
@@ -151,38 +175,47 @@ impl Browser {
         Ok(Self {
             daemon,
             events,
-            found: HashMap::new(),
+            heard: HashMap::new(),
         })
     }
 
-    /// Waits for the next change and returns the Macs found so far, given
-    /// the keys this Mac trusts now. `None` when browsing has stopped.
-    pub async fn next(&mut self, trusted: &[PublicKey]) -> Option<Vec<Found>> {
+    /// The Macs heard so far, recognised against `trusted`. Call again after
+    /// trust changes; nothing is cached from earlier keys.
+    pub fn current(&self, trusted: &[PublicKey]) -> Vec<Found> {
+        classify(self.heard.values(), trusted)
+    }
+
+    /// Waits for the next advertisement to appear, change or go away.
+    /// `false` when browsing has stopped.
+    pub async fn changed(&mut self) -> bool {
         loop {
-            match self.events.recv_async().await.ok()? {
+            let Ok(event) = self.events.recv_async().await else {
+                return false;
+            };
+            match event {
                 ServiceEvent::ServiceResolved(service) => {
-                    let seen = identify(|key| service.get_property_val_str(key), trusted);
-                    let address = pick_address(
+                    let Some(address) = pick_address(
                         service.get_addresses().iter().map(|ip| ip.to_ip_addr()),
                         service.get_port(),
-                    );
-                    match (seen, address) {
-                        (Some(seen), Some(address)) => {
-                            self.found
-                                .insert(service.get_fullname().to_owned(), Found { seen, address });
-                        }
-                        _ => continue,
-                    }
+                    ) else {
+                        continue;
+                    };
+                    let txt = ["v", "n", "t", "p"]
+                        .into_iter()
+                        .filter_map(|key| Some((key.to_owned(), service.get_property_val_str(key)?.to_owned())))
+                        .collect();
+                    self.heard
+                        .insert(service.get_fullname().to_owned(), Heard { txt, address });
                 }
                 ServiceEvent::ServiceRemoved(_, fullname) => {
-                    if self.found.remove(&fullname).is_none() {
+                    if self.heard.remove(&fullname).is_none() {
                         continue;
                     }
                 }
-                ServiceEvent::SearchStopped(_) => return None,
+                ServiceEvent::SearchStopped(_) => return false,
                 _ => continue,
             }
-            return Some(self.found.values().cloned().collect());
+            return true;
         }
     }
 }
@@ -198,8 +231,12 @@ impl Drop for Browser {
 pub async fn find(key: PublicKey, wait: Duration) -> Option<SocketAddr> {
     let mut browser = Browser::start().ok()?;
     tokio::time::timeout(wait, async {
-        while let Some(found) = browser.next(&[key]).await {
-            if let Some(mac) = found.iter().find(|mac| mac.seen == Seen::Paired(key)) {
+        while browser.changed().await {
+            if let Some(mac) = browser
+                .current(&[key])
+                .into_iter()
+                .find(|mac| mac.seen == Seen::Paired(key))
+            {
                 return Some(mac.address);
             }
         }
@@ -286,5 +323,28 @@ mod tests {
         let _advertiser = Advertiser::start(&mine, 24999, false).unwrap();
         let found = find(mine, Duration::from_secs(8)).await;
         assert_eq!(found.map(|a| a.port()), Some(24999));
+    }
+
+    fn heard(key: &PublicKey, pairing: bool, last: u8) -> Heard {
+        Heard {
+            txt: properties(key, &[last; NONCE_LEN], pairing)
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect(),
+            address: SocketAddr::from(([192, 168, 1, last], 24850)),
+        }
+    }
+
+    #[test]
+    fn a_forgotten_mac_is_dropped_or_offered_only_for_pairing() {
+        let (quiet, pairing) = (key(), key());
+        let macs = [heard(&quiet, false, 1), heard(&pairing, true, 2)];
+        let trusted = classify(&macs, &[quiet, pairing]);
+        assert_eq!(trusted.iter().filter(|m| matches!(m.seen, Seen::Paired(_))).count(), 2);
+        // both forgotten: the quiet one disappears, the pairing one loses its name
+        let forgotten = classify(&macs, &[]);
+        assert_eq!(forgotten.len(), 1);
+        assert_eq!(forgotten[0].seen, Seen::Pairing);
+        assert_eq!(forgotten[0].address, macs[1].address);
     }
 }
