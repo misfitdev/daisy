@@ -1,9 +1,9 @@
-//! The arrangement at the top of Daisy's window: this system's screen and,
-//! while connected, the peer's beside it. Like Displays → Arrange, the
-//! peer's screen can be dragged to another side.
+//! The arrangement at the top of Daisy's window: every display of every
+//! system in the group, as Displays shows monitors. A peer's displays move
+//! together; dragging them places that system.
 
 use std::cell::{Cell, RefCell};
-use std::time::Duration;
+use std::collections::BTreeMap;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
@@ -15,133 +15,173 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{MainThreadMarker, NSDictionary, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
-use super::{coral_color, flower_image, span};
+use super::{coral_color, flower_image};
 use crate::control::Link;
-use crate::input::Side;
+use crate::identity::PublicKey;
+use crate::input::{Rect, Side};
+use crate::layout::{Group, Offset};
 
-/// A screen tile's size before scaling to fit, about a 16:10 display.
-const TILE: (f64, f64) = (148.0, 94.0);
-/// Space between the two tiles.
-const GAP: f64 = 4.0;
+/// Display sizes are drawn at most this fraction of their size, so one
+/// display alone is not drawn huge.
+const MAX_SCALE: f64 = 0.1;
+const MARGIN: f64 = 6.0;
 const INACTIVE_ALPHA: f64 = 0.45;
 
-/// What the arrangement shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Arrangement {
-    pub here: Tile,
-    /// The peer, and the side of this screen it sits on, while connected.
-    pub there: Option<(Tile, Side)>,
-    pub link: String,
-    pub link_hint: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Tile {
+/// One system as the arrangement shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shown {
+    pub key: PublicKey,
     pub name: String,
+    /// Its displays in its own coordinates, and where they sit in the group.
+    pub displays: Vec<Rect>,
+    pub offset: Offset,
+    pub me: bool,
     /// `None` until a session reports who has control.
     pub in_control: Option<bool>,
+    pub locked: bool,
     pub hint: String,
 }
 
-/// The running session's latest report, and how long it has run.
-pub type Live = Option<(Link, Duration)>;
+impl Shown {
+    fn placed(&self) -> impl Iterator<Item = Rect> + '_ {
+        self.displays.iter().map(|display| Rect {
+            x: display.x + self.offset.0,
+            y: display.y + self.offset.1,
+            ..*display
+        })
+    }
 
-/// `connected` is the peer, where it sits, and how the session is going.
-pub fn arrangement(local: &str, connected: Option<(&str, Side, Live)>) -> Arrangement {
-    let Some((peer, side, live)) = connected else {
-        return Arrangement {
-            here: Tile {
-                name: local.to_owned(),
-                in_control: None,
-                hint: String::new(),
-            },
-            there: None,
-            link: String::new(),
-            link_hint: String::new(),
+    /// The display its name is drawn on: the largest.
+    fn main(&self) -> Option<Rect> {
+        self.placed()
+            .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
+    }
+}
+
+/// What the arrangement shows: `layout` while the group runs, or just this
+/// system's `displays` when it is alone.
+pub fn scene(
+    me: PublicKey,
+    names: &BTreeMap<PublicKey, String>,
+    layout: Option<&Group<PublicKey>>,
+    displays: &[Rect],
+    links: &BTreeMap<PublicKey, Link>,
+) -> Vec<Shown> {
+    let alone = Group::alone(me, displays.to_vec());
+    let layout = layout
+        .filter(|layout| layout.members.iter().any(|member| member.key == me))
+        .unwrap_or(&alone);
+    let here_in_control = links.values().next().map(|link| link.in_control);
+    layout
+        .members
+        .iter()
+        .map(|member| {
+            let link = links.get(&member.key);
+            let mine = member.key == me;
+            let in_control = if mine {
+                here_in_control
+            } else {
+                link.map(|link| link.peer_in_control)
+            };
+            let locked = link.is_some_and(|link| link.peer_locked);
+            let hint = match (mine, in_control, locked) {
+                (_, Some(true), _) => "Has control",
+                (true, Some(false), _) => "⌃⌥⌘⎋ takes control back",
+                (true, None, _) => "",
+                (false, _, true) => "Locked; unlock it there",
+                (false, _, false) => "Drag to rearrange",
+            };
+            Shown {
+                key: member.key,
+                name: names.get(&member.key).cloned().unwrap_or_default(),
+                displays: member.displays.clone(),
+                offset: member.offset,
+                me: mine,
+                in_control,
+                locked,
+                hint: hint.to_owned(),
+            }
+        })
+        .collect()
+}
+
+/// How the group's space maps onto a view: `scale` points of view per point
+/// of display, after moving by `origin`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fit {
+    pub scale: f64,
+    pub origin: (f64, f64),
+}
+
+impl Fit {
+    /// The whole scene, centered in a view of `size`.
+    pub fn of(scene: &[Shown], size: (f64, f64)) -> Self {
+        let all: Vec<Rect> = scene.iter().flat_map(Shown::placed).collect();
+        let Some(bounds) = crate::layout::bounds(&all) else {
+            return Self {
+                scale: MAX_SCALE,
+                origin: (0.0, 0.0),
+            };
         };
-    };
-    let here_in_control = live.map(|(link, _)| link.in_control);
-    let here = Tile {
-        name: local.to_owned(),
-        in_control: here_in_control,
-        hint: match here_in_control {
-            Some(true) => "Has control".to_owned(),
-            Some(false) => "⌃⌥⌘⎋ takes control back".to_owned(),
-            None => String::new(),
-        },
-    };
-    let there = Tile {
-        name: peer.to_owned(),
-        in_control: here_in_control.map(|here| !here),
-        hint: match here_in_control {
-            Some(false) => "Has control. Drag to rearrange.".to_owned(),
-            _ => "Drag to rearrange".to_owned(),
-        },
-    };
-    let (link, link_hint) = match live {
-        Some((link, connected_for)) => (
-            link.latency_ms.map(|ms| format!("{ms} ms")).unwrap_or_default(),
-            format!("Connected for {}", span(connected_for)),
-        ),
-        None => (String::new(), String::new()),
-    };
-    Arrangement {
-        here,
-        there: Some((there, side)),
-        link,
-        link_hint,
+        let scale = ((size.0 - 2.0 * MARGIN) / bounds.width)
+            .min((size.1 - 2.0 * MARGIN) / bounds.height)
+            .min(MAX_SCALE);
+        let origin = (
+            (size.0 - bounds.width * scale) / 2.0 - bounds.x * scale,
+            (size.1 - bounds.height * scale) / 2.0 - bounds.y * scale,
+        );
+        Self { scale, origin }
+    }
+
+    pub fn to_view(self, rect: Rect) -> Rect {
+        Rect {
+            x: rect.x * self.scale + self.origin.0,
+            y: rect.y * self.scale + self.origin.1,
+            width: rect.width * self.scale,
+            height: rect.height * self.scale,
+        }
+    }
+
+    /// A move of `by` view points, in the group's space.
+    pub fn to_group(self, by: (f64, f64)) -> (f64, f64) {
+        (by.0 / self.scale, by.1 / self.scale)
     }
 }
 
-/// `(x, y, width, height)`, with y growing upward as in AppKit.
-pub type Frame = (f64, f64, f64, f64);
-
-/// Where the tiles go in a view of `size`: this system's screen, and the
-/// peer's on `side` of it. The pair is centered and scaled to fit.
-pub fn frames(size: (f64, f64), side: Option<Side>) -> (Frame, Option<Frame>) {
-    let (columns, rows) = match side {
-        None => (1.0, 1.0),
-        Some(Side::Left | Side::Right) => (2.0, 1.0),
-        Some(Side::Above | Side::Below) => (1.0, 2.0),
+/// Where `member` sits relative to this system, for people who cannot see
+/// the drawing.
+pub fn relation(member: &Shown, me: &Shown) -> &'static str {
+    let (Some(theirs), Some(mine)) = (
+        crate::layout::bounds(&member.placed().collect::<Vec<_>>()),
+        crate::layout::bounds(&me.placed().collect::<Vec<_>>()),
+    ) else {
+        return "beside";
     };
-    let extent = (
-        TILE.0 * columns + GAP * (columns - 1.0),
-        TILE.1 * rows + GAP * (rows - 1.0),
-    );
-    let scale = ((size.0 - 8.0) / extent.0).min((size.1 - 8.0) / extent.1).min(1.0);
-    let (width, height) = (TILE.0 * scale, TILE.1 * scale);
-    let gap = GAP * scale;
-    let origin = ((size.0 - extent.0 * scale) / 2.0, (size.1 - extent.1 * scale) / 2.0);
-    let (here, there) = match side {
-        None => ((origin.0, origin.1), None),
-        Some(Side::Right) => ((origin.0, origin.1), Some((origin.0 + width + gap, origin.1))),
-        Some(Side::Left) => ((origin.0 + width + gap, origin.1), Some((origin.0, origin.1))),
-        Some(Side::Above) => ((origin.0, origin.1), Some((origin.0, origin.1 + height + gap))),
-        Some(Side::Below) => ((origin.0, origin.1 + height + gap), Some((origin.0, origin.1))),
-    };
-    (
-        (here.0, here.1, width, height),
-        there.map(|there| (there.0, there.1, width, height)),
-    )
-}
-
-/// The side a peer's screen dropped `offset` from this one's center (y
-/// upward) snaps to. Width and height weigh the distances, so a drop on
-/// the diagonal of a wide screen goes to the nearer edge.
-pub fn side_at(offset: (f64, f64)) -> Side {
-    if offset.0.abs() * TILE.1 >= offset.1.abs() * TILE.0 {
-        if offset.0 < 0.0 { Side::Left } else { Side::Right }
-    } else if offset.1 > 0.0 {
-        Side::Above
+    let dx = (theirs.x + theirs.width / 2.0) - (mine.x + mine.width / 2.0);
+    let dy = (theirs.y + theirs.height / 2.0) - (mine.y + mine.height / 2.0);
+    if dx.abs() * mine.height >= dy.abs() * mine.width {
+        if dx < 0.0 { "left of" } else { "right of" }
+    } else if dy < 0.0 {
+        "above"
     } else {
-        Side::Below
+        "below"
     }
 }
+
+/// The offset that puts `member` flush against `side` of this system.
+pub fn beside(member: &Shown, me: &Shown, side: Side) -> Offset {
+    let flush = crate::layout::beside(&me.displays, &member.displays, side);
+    (me.offset.0 + flush.0, me.offset.1 + flush.1)
+}
+
+/// The member being dragged, where it was grabbed, and how far it moved.
+type Drag = (usize, NSPoint, (f64, f64));
 
 pub struct ArrangeIvars {
-    shown: RefCell<Option<Arrangement>>,
-    /// Where the peer's tile is while dragged, and where it was grabbed.
-    drag: Cell<Option<(NSPoint, NSPoint)>>,
+    scene: RefCell<Vec<Shown>>,
+    drag: Cell<Option<Drag>>,
+    /// A member a person just placed, for the action to read.
+    placed: Cell<Option<(PublicKey, Offset)>>,
     target: RefCell<Weak<AnyObject>>,
     action: Cell<Option<Sel>>,
     /// Tooltip owners; AppKit does not retain them.
@@ -159,64 +199,84 @@ define_class!(
     unsafe impl NSObjectProtocol for ArrangeView {}
 
     impl ArrangeView {
+        // y grows downward, as in the group's space
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            let Some(shown) = self.ivars().shown.borrow().clone() else {
-                return;
-            };
-            let (here, there) = self.tile_rects(&shown);
-            draw_tile(&shown.here, here, shown.there.is_none());
-            if let (Some((tile, _)), Some(rect)) = (&shown.there, there) {
-                draw_tile(tile, rect, false);
+            let scene = self.ivars().scene.borrow();
+            let fit = self.fit(&scene);
+            let drag = self.ivars().drag.get();
+            let someone_in_control = scene.iter().any(|shown| shown.in_control == Some(true));
+            for (index, shown) in scene.iter().enumerate() {
+                let moved = drag
+                    .filter(|(dragged, _, _)| *dragged == index)
+                    .map_or((0.0, 0.0), |(_, _, by)| by);
+                let faded = someone_in_control && shown.in_control != Some(true);
+                let main = shown.main();
+                for display in shown.placed() {
+                    let mut view = fit.to_view(display);
+                    view.x += moved.0;
+                    view.y += moved.1;
+                    draw_display(shown, view, faded, main == Some(display), scene.len() == 1);
+                }
             }
         }
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let point = self.convertPoint_fromView(event.locationInWindow(), None);
-            let shown = self.ivars().shown.borrow().clone();
-            if let Some(shown) = shown
-                && let (_, Some(there)) = self.tile_rects(&shown)
-                && contains(there, point)
-            {
-                self.ivars().drag.set(Some((there.origin, NSPoint::new(point.x - there.origin.x, point.y - there.origin.y))));
+            let scene = self.ivars().scene.borrow();
+            let fit = self.fit(&scene);
+            let grabbed = scene
+                .iter()
+                .position(|shown| !shown.me && shown.placed().any(|display| contains(fit.to_view(display), point)));
+            drop(scene);
+            if let Some(index) = grabbed {
+                self.ivars().drag.set(Some((index, point, (0.0, 0.0))));
             }
         }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            let Some((_, grab)) = self.ivars().drag.get() else {
+            let Some((index, grabbed, _)) = self.ivars().drag.get() else {
                 return;
             };
             let point = self.convertPoint_fromView(event.locationInWindow(), None);
-            self.ivars().drag.set(Some((NSPoint::new(point.x - grab.x, point.y - grab.y), grab)));
+            self.ivars()
+                .drag
+                .set(Some((index, grabbed, (point.x - grabbed.x, point.y - grabbed.y))));
             self.setNeedsDisplay(true);
         }
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
-            let Some((dropped, _)) = self.ivars().drag.take() else {
+            let Some((index, _, by)) = self.ivars().drag.take() else {
                 return;
             };
-            let shown = self.ivars().shown.borrow().clone();
-            if let Some(shown) = shown {
-                let size = self.bounds().size;
-                let (here, _) = frames((size.width, size.height), shown.there.as_ref().map(|(_, side)| *side));
-                let offset = (
-                    dropped.x + here.2 / 2.0 - (here.0 + here.2 / 2.0),
-                    dropped.y + here.3 / 2.0 - (here.1 + here.3 / 2.0),
-                );
-                self.choose(side_at(offset));
+            let dropped = {
+                let scene = self.ivars().scene.borrow();
+                let fit = self.fit(&scene);
+                scene.get(index).map(|shown| {
+                    let by = fit.to_group(by);
+                    (shown.key, (shown.offset.0 + by.0, shown.offset.1 + by.1))
+                })
+            };
+            if let Some((key, offset)) = dropped {
+                self.place(key, offset);
             }
-            self.setNeedsDisplay(true);
         }
 
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
-            self.ivars().shown.borrow().as_ref().is_some_and(|shown| shown.there.is_some())
+            self.ivars().scene.borrow().iter().any(|shown| !shown.me)
         }
 
-        // Arrow keys move the peer's screen, for people not using a pointer.
+        // Arrow keys put the first peer against that side of this system,
+        // for people not using a pointer.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let side = event.charactersIgnoringModifiers().and_then(|keys| match keys.to_string().chars().next() {
@@ -226,31 +286,28 @@ define_class!(
                 Some('\u{F701}') => Some(Side::Below),
                 _ => None,
             });
-            match side {
-                Some(side) => self.choose(side),
+            let placed = side.and_then(|side| {
+                let scene = self.ivars().scene.borrow();
+                let me = scene.iter().find(|shown| shown.me)?;
+                let peer = scene.iter().find(|shown| !shown.me)?;
+                Some((peer.key, beside(peer, me, side)))
+            });
+            match placed {
+                Some((key, offset)) => self.place(key, offset),
                 // SAFETY: NSView implements keyDown:
                 None => unsafe { msg_send![super(self), keyDown: event] },
             }
-        }
-
-        #[unsafe(method(focusRingMaskBounds))]
-        fn focus_ring_mask_bounds(&self) -> NSRect {
-            self.peer_rect()
-        }
-
-        #[unsafe(method(drawFocusRingMask))]
-        fn draw_focus_ring_mask(&self) {
-            NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(self.peer_rect(), 8.0, 8.0).fill();
         }
     }
 );
 
 impl ArrangeView {
-    /// Sends `action` to `target` when the peer's screen is moved.
+    /// Sends `action` to `target` when a person places a peer's displays.
     pub fn new(mtm: MainThreadMarker, frame: NSRect, target: &AnyObject, action: Sel) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ArrangeIvars {
-            shown: RefCell::new(None),
+            scene: RefCell::new(Vec::new()),
             drag: Cell::new(None),
+            placed: Cell::new(None),
             target: RefCell::new(Weak::from(target)),
             action: Cell::new(Some(action)),
             hints: RefCell::new(Vec::new()),
@@ -259,44 +316,36 @@ impl ArrangeView {
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
 
-    /// The side the peer's screen was last moved to.
-    pub fn side(&self) -> Option<Side> {
-        self.ivars()
-            .shown
-            .borrow()
-            .as_ref()?
-            .there
-            .as_ref()
-            .map(|(_, side)| *side)
+    /// The member a person just placed, and where.
+    pub fn take_placed(&self) -> Option<(PublicKey, Offset)> {
+        self.ivars().placed.take()
     }
 
-    pub fn show(&self, arrangement: Arrangement) {
-        let label = match &arrangement.there {
-            Some((there, side)) => format!("{} is {} {}", there.name, place(*side), arrangement.here.name),
-            None => arrangement.here.name.clone(),
+    pub fn show(&self, scene: Vec<Shown>) {
+        let me = scene.iter().find(|shown| shown.me).cloned();
+        let label = match &me {
+            Some(me) if scene.len() > 1 => scene
+                .iter()
+                .filter(|shown| !shown.me)
+                .map(|shown| format!("{} is {} this system", shown.name, relation(shown, me)))
+                .collect::<Vec<_>>()
+                .join(". "),
+            _ => "This system".to_owned(),
         };
         self.setAccessibilityElement(true);
         self.setAccessibilityLabel(Some(&NSString::from_str(&label)));
-        *self.ivars().shown.borrow_mut() = Some(arrangement);
+        if self.ivars().drag.get().is_none() {
+            *self.ivars().scene.borrow_mut() = scene;
+        }
         self.refresh_hints();
         self.setNeedsDisplay(true);
     }
 
-    fn choose(&self, side: Side) {
-        let changed = {
-            let mut shown = self.ivars().shown.borrow_mut();
-            match shown.as_mut().and_then(|shown| shown.there.as_mut()) {
-                Some((_, current)) if *current != side => {
-                    *current = side;
-                    true
-                }
-                _ => false,
-            }
-        };
-        self.refresh_hints();
+    fn place(&self, key: PublicKey, offset: Offset) {
+        self.ivars().placed.set(Some((key, offset)));
         self.setNeedsDisplay(true);
         let target = self.ivars().target.borrow().load();
-        if changed && let (Some(target), Some(action)) = (target, self.ivars().action.get()) {
+        if let (Some(target), Some(action)) = (target, self.ivars().action.get()) {
             // SAFETY: the target implements the action with an object sender
             unsafe {
                 NSApplication::sharedApplication(self.mtm()).sendAction_to_from(action, Some(&target), Some(self));
@@ -304,83 +353,49 @@ impl ArrangeView {
         }
     }
 
-    fn peer_rect(&self) -> NSRect {
-        let shown = self.ivars().shown.borrow().clone();
-        shown
-            .and_then(|shown| self.tile_rects(&shown).1)
-            .unwrap_or(NSRect::ZERO)
-    }
-
-    fn tile_rects(&self, shown: &Arrangement) -> (NSRect, Option<NSRect>) {
+    fn fit(&self, scene: &[Shown]) -> Fit {
         let size = self.bounds().size;
-        let (here, there) = frames((size.width, size.height), shown.there.as_ref().map(|(_, side)| *side));
-        let there = there.map(|there| match self.ivars().drag.get() {
-            Some((origin, _)) => rect((origin.x, origin.y, there.2, there.3)),
-            None => rect(there),
-        });
-        (rect(here), there)
+        Fit::of(scene, (size.width, size.height))
     }
 
     fn refresh_hints(&self) {
         self.removeAllToolTips();
         let mut hints = self.ivars().hints.borrow_mut();
         hints.clear();
-        let Some(shown) = self.ivars().shown.borrow().clone() else {
-            return;
-        };
-        let (here, there) = self.tile_rects(&shown);
-        let tiles = [
-            (Some(&shown.here), Some(here)),
-            (shown.there.as_ref().map(|(tile, _)| tile), there),
-        ];
-        for (tile, rect) in tiles {
-            if let (Some(tile), Some(rect)) = (tile, rect)
-                && !tile.hint.is_empty()
-            {
-                let hint = NSString::from_str(&tile.hint);
+        let scene = self.ivars().scene.borrow();
+        let fit = self.fit(&scene);
+        for shown in scene.iter().filter(|shown| !shown.hint.is_empty()) {
+            for display in shown.placed() {
+                let hint = NSString::from_str(&shown.hint);
                 // SAFETY: the hint is kept alive in the ivars until the
                 // tooltips are removed
-                unsafe { self.addToolTipRect_owner_userData(rect, &hint, std::ptr::null_mut()) };
+                unsafe {
+                    self.addToolTipRect_owner_userData(ns_rect(fit.to_view(display)), &hint, std::ptr::null_mut())
+                };
                 hints.push(hint);
             }
         }
     }
 }
 
-fn place(side: Side) -> &'static str {
-    match side {
-        Side::Left => "left of",
-        Side::Right => "right of",
-        Side::Above => "above",
-        Side::Below => "below",
-    }
+fn ns_rect(rect: Rect) -> NSRect {
+    NSRect::new(NSPoint::new(rect.x, rect.y), NSSize::new(rect.width, rect.height))
 }
 
-fn rect(frame: Frame) -> NSRect {
-    NSRect::new(NSPoint::new(frame.0, frame.1), NSSize::new(frame.2, frame.3))
+fn contains(rect: Rect, point: NSPoint) -> bool {
+    point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= rect.y && point.y <= rect.y + rect.height
 }
 
-fn contains(rect: NSRect, point: NSPoint) -> bool {
-    point.x >= rect.origin.x
-        && point.x <= rect.origin.x + rect.size.width
-        && point.y >= rect.origin.y
-        && point.y <= rect.origin.y + rect.size.height
-}
-
-/// One screen: coral with the daisy while it has control, faded while the
-/// other one does. `alone` is this system's screen with nothing connected.
-fn draw_tile(tile: &Tile, rect: NSRect, alone: bool) {
-    let alpha = if tile.in_control == Some(false) {
-        INACTIVE_ALPHA
-    } else {
-        1.0
-    };
-    let active = tile.in_control == Some(true);
+/// One display of `shown`: coral with the daisy on the system in control,
+/// faded while another system has it. Its name goes on its main display.
+fn draw_display(shown: &Shown, view: Rect, faded: bool, main: bool, alone: bool) {
+    let alpha = if faded { INACTIVE_ALPHA } else { 1.0 };
+    let active = shown.in_control == Some(true);
     let inset = NSRect::new(
-        NSPoint::new(rect.origin.x + 1.0, rect.origin.y + 1.0),
-        NSSize::new(rect.size.width - 2.0, rect.size.height - 2.0),
+        NSPoint::new(view.x + 1.0, view.y + 1.0),
+        NSSize::new(view.width - 2.0, view.height - 2.0),
     );
-    let shape = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(inset, 8.0, 8.0);
+    let shape = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(inset, 6.0, 6.0);
     let fill = if active {
         coral_color().colorWithAlphaComponent(0.14)
     } else {
@@ -396,30 +411,50 @@ fn draw_tile(tile: &Tile, rect: NSRect, alone: bool) {
     stroke.setStroke();
     shape.setLineWidth(width);
     shape.stroke();
+    if !main {
+        return;
+    }
 
-    if active || alone {
-        let size = (rect.size.height * 0.34).min(30.0);
+    let with_daisy = active || alone;
+    if with_daisy {
+        let size = (view.height * 0.34).min(28.0);
         if let Some(daisy) = flower_image(active, size) {
             let at = NSRect::new(
                 NSPoint::new(
-                    rect.origin.x + (rect.size.width - size) / 2.0,
-                    rect.origin.y + rect.size.height / 2.0 + 2.0,
+                    view.x + (view.width - size) / 2.0,
+                    view.y + view.height / 2.0 - size - 2.0,
                 ),
                 NSSize::new(size, size),
             );
-            daisy.drawInRect(at);
+            // respectFlipped keeps the daisy upright in this flipped view
+            // SAFETY: a zero source rect draws the whole image; no hints
+            unsafe {
+                daisy.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
+                    at,
+                    NSRect::ZERO,
+                    objc2_app_kit::NSCompositingOperation::SourceOver,
+                    1.0,
+                    true,
+                    None,
+                )
+            };
         }
     }
-    let name_height = 18.0;
-    let name_y = if active || alone {
-        rect.origin.y + rect.size.height / 2.0 - name_height - 2.0
+    let name = if shown.locked {
+        format!("{} · Locked", shown.name)
     } else {
-        rect.origin.y + (rect.size.height - name_height) / 2.0
+        shown.name.clone()
+    };
+    let name_height = 16.0;
+    let name_y = if with_daisy {
+        view.y + view.height / 2.0 + 2.0
+    } else {
+        view.y + (view.height - name_height) / 2.0
     };
     let font = if active {
-        NSFont::boldSystemFontOfSize(12.0)
+        NSFont::boldSystemFontOfSize(11.0)
     } else {
-        NSFont::systemFontOfSize(12.0)
+        NSFont::systemFontOfSize(11.0)
     };
     let color = NSColor::labelColor().colorWithAlphaComponent(alpha);
     let style = NSMutableParagraphStyle::new();
@@ -437,102 +472,116 @@ fn draw_tile(tile: &Tile, rect: NSRect, alone: bool) {
         )
     };
     let name_rect = NSRect::new(
-        NSPoint::new(rect.origin.x + 6.0, name_y),
-        NSSize::new(rect.size.width - 12.0, name_height),
+        NSPoint::new(view.x + 4.0, name_y),
+        NSSize::new(view.width - 8.0, name_height),
     );
     // SAFETY: the attributes are valid string-drawing attributes
-    unsafe { NSString::from_str(&tile.name).drawInRect_withAttributes(name_rect, Some(&attributes)) };
+    unsafe { NSString::from_str(&name).drawInRect_withAttributes(name_rect, Some(&attributes)) };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn live(in_control: bool, latency_ms: Option<u64>) -> Live {
-        Some((
-            Link {
-                latency_ms,
-                in_control,
-                ..Link::default()
-            },
-            Duration::from_secs(35 * 60),
-        ))
+    fn key(byte: u8) -> PublicKey {
+        PublicKey::from_bytes(&[byte; 32]).unwrap()
+    }
+
+    const LAPTOP: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1512.0,
+        height: 982.0,
+    };
+
+    fn names() -> BTreeMap<PublicKey, String> {
+        BTreeMap::from([(key(1), "Laptop".to_owned()), (key(2), "Studio".to_owned())])
+    }
+
+    fn pair() -> Group<PublicKey> {
+        let mut group = Group::alone(key(1), vec![LAPTOP]);
+        group.members.push(crate::layout::Member {
+            key: key(2),
+            displays: vec![LAPTOP],
+            offset: (1512.0, 0.0),
+        });
+        group
+    }
+
+    fn link(in_control: bool, peer_in_control: bool, peer_locked: bool) -> Link {
+        Link {
+            in_control,
+            peer_in_control,
+            peer_locked,
+            ..Link::default()
+        }
     }
 
     #[test]
-    fn only_this_screen_shows_while_not_connected() {
-        let shown = arrangement("Laptop", None);
-        assert_eq!(shown.here.name, "Laptop");
-        assert_eq!(shown.there, None);
-        let (here, there) = frames((500.0, 140.0), None);
-        assert_eq!(there, None);
-        assert!((here.0 + here.2 / 2.0 - 250.0).abs() < 0.01, "centered: {here:?}");
+    fn alone_only_this_system_shows() {
+        let shown = scene(key(1), &names(), None, &[LAPTOP], &BTreeMap::new());
+        assert_eq!(shown.len(), 1);
+        assert!(shown[0].me);
+        assert_eq!(shown[0].in_control, None);
     }
 
     #[test]
-    fn the_peer_sits_on_its_side() {
-        let (here, there) = frames((500.0, 140.0), Some(Side::Right));
-        assert!(there.unwrap().0 > here.0);
-        let (here, there) = frames((500.0, 140.0), Some(Side::Left));
-        assert!(there.unwrap().0 < here.0);
-        let (here, there) = frames((500.0, 140.0), Some(Side::Above));
-        assert!(there.unwrap().1 > here.1);
-        let (here, there) = frames((500.0, 140.0), Some(Side::Below));
-        assert!(there.unwrap().1 < here.1);
+    fn every_member_shows_where_the_group_put_it() {
+        let links = BTreeMap::from([(key(2), link(true, false, false))]);
+        let shown = scene(key(1), &names(), Some(&pair()), &[LAPTOP], &links);
+        assert_eq!(shown.len(), 2);
+        let studio = shown.iter().find(|shown| !shown.me).unwrap();
+        assert_eq!((studio.name.as_str(), studio.offset), ("Studio", (1512.0, 0.0)));
+        assert_eq!(relation(studio, &shown[0]), "right of");
     }
 
     #[test]
-    fn stacked_screens_shrink_to_fit() {
-        let (here, there) = frames((500.0, 140.0), Some(Side::Above));
-        let there = there.unwrap();
-        assert!(here.1 >= 0.0 && there.1 + there.3 <= 140.0, "{here:?} {there:?}");
-    }
-
-    #[test]
-    fn a_drop_snaps_to_the_nearest_side() {
-        assert_eq!(side_at((200.0, 10.0)), Side::Right);
-        assert_eq!(side_at((-200.0, -10.0)), Side::Left);
-        assert_eq!(side_at((10.0, 120.0)), Side::Above);
-        assert_eq!(side_at((-10.0, -120.0)), Side::Below);
-        // on the diagonal of a wide screen, the side wins
-        assert_eq!(side_at((148.0, 94.0)), Side::Right);
-        assert_eq!(side_at((100.0, 94.0)), Side::Above);
-    }
-
-    #[test]
-    fn only_the_system_in_control_is_marked() {
-        let shown = arrangement("Laptop", Some(("Studio", Side::Right, live(true, Some(12)))));
-        let (there, _) = shown.there.clone().unwrap();
-        assert_eq!((shown.here.in_control, there.in_control), (Some(true), Some(false)));
-        assert_eq!(shown.here.hint, "Has control");
-        assert_eq!(there.hint, "Drag to rearrange");
-
-        let shown = arrangement("Laptop", Some(("Studio", Side::Right, live(false, Some(12)))));
-        let (there, _) = shown.there.clone().unwrap();
-        assert_eq!((shown.here.in_control, there.in_control), (Some(false), Some(true)));
-        assert_eq!(shown.here.hint, "⌃⌥⌘⎋ takes control back");
-
-        let shown = arrangement("Laptop", Some(("Studio", Side::Right, None)));
-        assert_eq!(shown.here.in_control, None);
-    }
-
-    #[test]
-    fn the_link_shows_latency_and_hints_duration() {
-        let shown = arrangement("Laptop", Some(("Studio", Side::Right, live(true, Some(12)))));
-        assert_eq!(shown.link, "12 ms");
-        assert_eq!(shown.link_hint, "Connected for 35 min");
-        let shown = arrangement("Laptop", Some(("Studio", Side::Right, live(true, None))));
-        assert_eq!(shown.link, "");
-    }
-
-    #[test]
-    fn hover_hints_stay_short() {
-        for live in [None, live(true, Some(12)), live(false, None)] {
-            let shown = arrangement("Laptop", Some(("Studio", Side::Below, live)));
-            let (there, _) = shown.there.clone().unwrap();
-            for hint in [&shown.here.hint, &there.hint, &shown.link_hint] {
-                assert!(hint.split_whitespace().count() <= 5, "{hint:?}");
+    fn only_the_system_in_control_is_marked_and_hints_stay_short() {
+        for (link, mine, theirs) in [
+            (link(true, false, false), Some(true), Some(false)),
+            (link(false, true, false), Some(false), Some(true)),
+            (link(false, false, true), Some(false), Some(false)),
+        ] {
+            let links = BTreeMap::from([(key(2), link)]);
+            let shown = scene(key(1), &names(), Some(&pair()), &[LAPTOP], &links);
+            assert_eq!((shown[0].in_control, shown[1].in_control), (mine, theirs));
+            for shown in &shown {
+                assert!(shown.hint.split_whitespace().count() <= 5, "{:?}", shown.hint);
             }
         }
+        let locked = scene(
+            key(1),
+            &names(),
+            Some(&pair()),
+            &[LAPTOP],
+            &BTreeMap::from([(key(2), link(true, false, true))]),
+        );
+        assert!(locked[1].locked);
+        assert_eq!(locked[1].hint, "Locked; unlock it there");
+    }
+
+    #[test]
+    fn the_whole_group_fits_the_view_and_a_drag_is_measured_in_display_points() {
+        let shown = scene(key(1), &names(), Some(&pair()), &[LAPTOP], &BTreeMap::new());
+        let fit = Fit::of(&shown, (500.0, 140.0));
+        for display in shown.iter().flat_map(Shown::placed) {
+            let view = fit.to_view(display);
+            assert!(view.x >= 0.0 && view.y >= 0.0, "{view:?}");
+            assert!(
+                view.x + view.width <= 500.0 && view.y + view.height <= 140.0,
+                "{view:?}"
+            );
+        }
+        assert_eq!(fit.to_group((fit.scale * 100.0, -fit.scale * 50.0)), (100.0, -50.0));
+        // one display alone is not drawn huge
+        let alone = scene(key(1), &names(), None, &[LAPTOP], &BTreeMap::new());
+        assert_eq!(Fit::of(&alone, (5000.0, 5000.0)).scale, MAX_SCALE);
+    }
+
+    #[test]
+    fn an_arrow_key_puts_the_peer_flush_against_that_side() {
+        let shown = scene(key(1), &names(), Some(&pair()), &[LAPTOP], &BTreeMap::new());
+        assert_eq!(beside(&shown[1], &shown[0], Side::Left), (-1512.0, 0.0));
+        assert_eq!(beside(&shown[1], &shown[0], Side::Below), (0.0, 982.0));
     }
 }

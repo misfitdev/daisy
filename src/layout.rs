@@ -293,6 +293,30 @@ impl<K: Copy + Ord> Placement<K> {
         true
     }
 
+    /// Puts `key`'s displays where a person dropped them, snapped and clear
+    /// of every other member, as a new version. This system stays where it
+    /// is. Returns whether that moved them.
+    pub fn put(&mut self, key: K, wanted: Offset, now: u64) -> bool {
+        if key == self.me || !self.displays.contains_key(&key) {
+            return false;
+        }
+        let mut group = self.group();
+        if !group.members.iter().any(|member| member.key == key) {
+            group.members.push(Member {
+                key,
+                displays: self.displays[&key].clone(),
+                offset: wanted,
+            });
+        }
+        let placed = group.place(key, wanted);
+        if self.offsets.get(&key) == Some(&placed) {
+            return false;
+        }
+        self.offsets.insert(key, placed);
+        self.version = (now.max(self.version.0 + 1), self.me);
+        true
+    }
+
     /// Moves any member that now overlaps another, as after a display was
     /// added or resized, the shortest way clear, as a new version.
     pub fn clear_overlaps(&mut self, now: u64) -> bool {
@@ -652,6 +676,25 @@ mod tests {
         let group = here.group();
         let offset = group.members.iter().find(|m| m.key == 1).unwrap().offset;
         assert!(!group.overlaps(1, offset), "{offset:?}");
+    }
+
+    #[test]
+    fn a_member_is_put_where_it_was_dropped_snapped_and_clear() {
+        let mut here = Placement::new(0u8, vec![LAPTOP]);
+        here.show(1, vec![PEER]);
+        here.place(1, Side::Right, 1);
+        // dropped near the laptop's left edge, a little low
+        assert!(here.put(1, (-1440.0 - 5.0, 4.0), 2));
+        let offset = here.group().members.iter().find(|m| m.key == 1).unwrap().offset;
+        assert_eq!(offset, (-1440.0, 0.0));
+        // dropped on top of the laptop: pushed clear
+        assert!(here.put(1, (10.0, 10.0), 3));
+        let group = here.group();
+        let offset = group.members.iter().find(|m| m.key == 1).unwrap().offset;
+        assert!(!group.overlaps(1, offset), "{offset:?}");
+        // this system is never moved, and the same spot changes nothing
+        assert!(!here.put(0, (500.0, 0.0), 4));
+        assert!(!here.put(1, offset, 5));
     }
 
     #[test]

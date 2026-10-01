@@ -198,8 +198,11 @@ impl<O: ServiceObserver> ServiceObserver for Shared<'_, '_, O> {
     fn connected(&mut self, peer: &str, key: PublicKey, side: Side) {
         self.lock().connected(peer, key, side);
     }
-    fn link(&mut self, peer: &str, link: crate::control::Link) {
-        self.lock().link(peer, link);
+    fn link(&mut self, peer: &str, key: PublicKey, link: crate::control::Link) {
+        self.lock().link(peer, key, link);
+    }
+    fn arranged(&mut self, layout: &share::Layout) {
+        self.lock().arranged(layout);
     }
     fn disconnected(&mut self, peer: &str) {
         self.lock().disconnected(peer);
@@ -227,8 +230,10 @@ pub trait ServiceObserver {
     fn reconnecting(&mut self, _address: &str, _peer: Option<&str>, _wait: Duration) {}
     fn paired(&mut self, _peer: &str, _key: PublicKey, _policy: Policy) {}
     fn connected(&mut self, _peer: &str, _key: PublicKey, _side: Side) {}
-    /// Latency or who has control changed in the running session.
-    fn link(&mut self, _peer: &str, _link: crate::control::Link) {}
+    /// Latency or who has control changed on the link with `peer`.
+    fn link(&mut self, _peer: &str, _key: PublicKey, _link: crate::control::Link) {}
+    /// Where every member's displays now sit.
+    fn arranged(&mut self, _layout: &share::Layout) {}
     fn disconnected(&mut self, _peer: &str) {}
     fn pairing_closed(&mut self) {}
     fn connection_failed(&mut self, _address: &str, _error: &anyhow::Error) {}
@@ -257,8 +262,8 @@ pub struct SessionConfig<'a> {
     pub clipboard: &'a watch::Receiver<bool>,
     /// Whether a waiting system advertises itself with Bonjour.
     pub discoverable: &'a watch::Receiver<bool>,
-    /// Sides chosen on this system while a session runs, if it can rearrange.
-    pub arrangement: Option<&'a watch::Receiver<Option<Side>>>,
+    /// Members moved on this system while a session runs, if it can rearrange.
+    pub arrangement: Option<&'a watch::Receiver<Option<share::Placing>>>,
     /// Signs this system's introductions and revocations.
     pub signer: &'a crate::introduce::Signer,
 }
@@ -687,6 +692,7 @@ where
     let (done, mut ended) = tokio::sync::oneshot::channel();
     let (agreed_tx, mut agreed_rx) = mpsc::unbounded_channel();
     let mut reports = hub.reports();
+    let mut arranged = hub.arranged.subscribe();
     let _member = hub.join(share::Joining {
         channel,
         agreed: (side, chosen),
@@ -711,8 +717,12 @@ where
             Ok(()) = reports.changed() => {
                 let current = reports.borrow_and_update().get(&key).copied();
                 if let Some(current) = current {
-                    observer.link(peer, current);
+                    observer.link(peer, key, current);
                 }
+            }
+            Ok(()) = arranged.changed() => {
+                let layout = arranged.borrow_and_update().clone();
+                observer.arranged(&layout);
             }
             Some((side, chosen)) = agreed_rx.recv() => {
                 if let Err(error) = peers.agree_side(&key, side, chosen) {
@@ -821,9 +831,10 @@ pub struct Hub {
     me: PublicKey,
     peers: PeerStore,
     clipboard: watch::Receiver<bool>,
-    choices: watch::Receiver<Option<Side>>,
+    choices: watch::Receiver<Option<share::Placing>>,
     running: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<share::Membership<TcpStream>>>>>,
     reports: std::sync::Arc<watch::Sender<share::Reports>>,
+    arranged: std::sync::Arc<watch::Sender<share::Layout>>,
     members: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -845,6 +856,7 @@ impl Hub {
             choices: session_choices(config.arrangement),
             running: std::sync::Arc::default(),
             reports: std::sync::Arc::new(watch::Sender::new(share::Reports::new())),
+            arranged: std::sync::Arc::new(watch::Sender::new(share::Layout { members: Vec::new() })),
             members: std::sync::Arc::default(),
         }
     }
@@ -1001,6 +1013,7 @@ async fn run_core_once(
         displays: watched,
         control,
         choices: choices.clone(),
+        arranged: hub.arranged.clone(),
         saved: peers.arrangement(),
         save,
         reports: reports.clone(),
@@ -1067,7 +1080,9 @@ fn introduction_of(config: &SessionConfig<'_>, key: PublicKey) -> Result<Option<
 /// Sides chosen on this system during a session. Without a way to choose,
 /// as from the command line, it never changes, and the peer's choices still
 /// apply.
-fn session_choices(arrangement: Option<&watch::Receiver<Option<Side>>>) -> watch::Receiver<Option<Side>> {
+fn session_choices(
+    arrangement: Option<&watch::Receiver<Option<share::Placing>>>,
+) -> watch::Receiver<Option<share::Placing>> {
     let mut choices = arrangement.cloned().unwrap_or_else(|| watch::channel(None).1);
     // only choices made during this session count
     choices.mark_unchanged();

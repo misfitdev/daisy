@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn the_lock_state_is_read_without_crashing() {
-        // this system is in use while tests run, so it is not locked
-        assert!(!screen_locked());
+        // whether this system is locked while tests run is not known
+        let _ = screen_locked();
     }
 }

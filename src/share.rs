@@ -35,7 +35,10 @@ pub trait Pointer {
     fn arrange(&mut self, _layout: Layout) {}
 }
 
-type Layout = crate::layout::Group<PublicKey>;
+pub type Layout = crate::layout::Group<PublicKey>;
+
+/// A member's displays, and where a person dropped them in the group.
+pub type Placing = (PublicKey, crate::layout::Offset);
 
 pub struct SharedLayout {
     pub screen: Rect,
@@ -49,8 +52,8 @@ pub struct Arranging {
     /// The relation both systems agreed on, and when it was chosen.
     pub agreed: (Side, crate::trust::Timestamp),
     pub initiator: bool,
-    /// Sides chosen on this system during the session.
-    pub choices: tokio::sync::watch::Receiver<Option<Side>>,
+    /// Members a person moved on this system during the session.
+    pub choices: tokio::sync::watch::Receiver<Option<Placing>>,
     /// Each newly agreed relation, to store and show.
     pub agreed_tx: mpsc::UnboundedSender<(Side, crate::trust::Timestamp)>,
 }
@@ -73,8 +76,11 @@ pub struct Group {
     /// This system's displays, in its own coordinates, as they change.
     pub displays: tokio::sync::watch::Receiver<Vec<Rect>>,
     pub control: std::sync::Arc<crate::control::SharedControl>,
-    /// Sides chosen on this system, applied to every link.
-    pub choices: tokio::sync::watch::Receiver<Option<Side>>,
+    /// Members a person moved on this system: whose displays, and the offset
+    /// they were dropped at.
+    pub choices: tokio::sync::watch::Receiver<Option<Placing>>,
+    /// The arrangement as it stands, for the window to draw.
+    pub arranged: std::sync::Arc<tokio::sync::watch::Sender<Layout>>,
     /// The arrangement kept from before, and where to keep each new one.
     pub saved: Option<crate::peers::Arrangement>,
     pub save: mpsc::UnboundedSender<crate::peers::Arrangement>,
@@ -135,6 +141,7 @@ where
         displays: tokio::sync::watch::channel(vec![layout.screen]).1,
         control: layout.control,
         choices: layout.arranging.choices,
+        arranged: std::sync::Arc::new(tokio::sync::watch::Sender::new(Layout { members: Vec::new() })),
         saved: None,
         save: mpsc::unbounded_channel().0,
         reports: std::sync::Arc::new(tokio::sync::watch::Sender::new(Reports::new())),
@@ -259,7 +266,7 @@ where
                 }
             }
             if placement.remove(key) {
-                arrange(&placement, release.target, pointer);
+                arrange(&placement, release.target, pointer, &group.arranged);
             }
             publish(&control, &links, &group.reports);
         }
@@ -523,27 +530,17 @@ where
                 if rearranged {
                     rearranged = false;
                     settle(&mut placement, &links, &mut ended);
-                    arrange(&placement, release.target, pointer);
+                    arrange(&placement, release.target, pointer, &group.arranged);
                 }
                 publish(&control, &links, &group.reports);
             }
             Ok(()) = choices.changed() => {
                 let chosen = *choices.borrow_and_update();
-                if let Some(side) = chosen {
-                    let mut moved = false;
-                    for (key, link) in links.iter_mut() {
-                        if side == link.agreed.0 { continue; }
-                        moved = placement.place(*key, side, now_ms()) || moved;
-                        link.agreed = (side, crate::trust::now());
-                        if let Err(error) = link.outgoing.send(Message::Layout { side, chosen: link.agreed.1 }) {
-                            ended.push((*key, Err(error)));
-                        }
-                        let _ = link.agreed_tx.send(link.agreed);
-                    }
-                    if moved {
-                        broadcast(&links, arrangement(&placement), &mut ended);
-                        arrange(&placement, release.target, pointer);
-                    }
+                if let Some((key, offset)) = chosen
+                    && placement.put(key, offset, now_ms())
+                {
+                    broadcast(&links, arrangement(&placement), &mut ended);
+                    arrange(&placement, release.target, pointer, &group.arranged);
                 }
             }
             Ok(()) = locked.changed() => {
@@ -557,7 +554,7 @@ where
                     if placement.clear_overlaps(now_ms()) {
                         broadcast(&links, arrangement(&placement), &mut ended);
                     }
-                    arrange(&placement, release.target, pointer);
+                    arrange(&placement, release.target, pointer, &group.arranged);
                 }
             }
             error = &mut until => return Err(error),
@@ -622,10 +619,17 @@ fn arrangement(placement: &crate::layout::Placement<PublicKey>) -> Message {
     }
 }
 
-/// Gives the capture and the replay the arrangement as it now stands.
-fn arrange(placement: &crate::layout::Placement<PublicKey>, target: &mut Target, pointer: &mut impl Pointer) {
+/// Gives the capture, the replay and the window the arrangement as it now
+/// stands.
+fn arrange(
+    placement: &crate::layout::Placement<PublicKey>,
+    target: &mut Target,
+    pointer: &mut impl Pointer,
+    arranged: &tokio::sync::watch::Sender<Layout>,
+) {
     let layout = placement.group();
     target.arrange(layout.clone());
+    arranged.send_replace(layout.clone());
     pointer.arrange(layout);
 }
 
@@ -1329,7 +1333,7 @@ mod tests {
 
     struct Scene {
         peer: Channel<DuplexStream>,
-        choose: watch::Sender<Option<Side>>,
+        choose: watch::Sender<Option<Placing>>,
         me: crate::identity::PublicKey,
         /// The peer's own key.
         them: crate::identity::PublicKey,
@@ -1459,49 +1463,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_side_chosen_here_is_sent_to_the_peer() {
-        let (sent, agreed, arranged) = arranging(false, |mut scene: Scene| async move {
+    async fn a_member_moved_here_is_sent_to_the_peer() {
+        let ((), _, arranged) = arranging(false, |mut scene: Scene| async move {
             scene
                 .peer
                 .send(&Message::Displays { displays: vec![SCREEN] })
                 .await
                 .unwrap();
             settle(&mut scene.peer, 1).await;
-            scene.choose.send_replace(Some(Side::Above));
-            let mut layout = None;
-            let mut offsets = None;
-            while layout.is_none() || offsets.is_none() {
-                match scene.peer.recv().await.unwrap() {
-                    Message::Layout { side, chosen } => layout = Some((side, chosen)),
-                    Message::Arrangement { offsets: sent, .. } if sent.iter().any(|(_, at)| *at == (0.0, -500.0)) => {
-                        offsets = Some(sent)
-                    }
-                    _ => {}
+            scene.choose.send_replace(Some((scene.them, (3.0, -503.0))));
+            loop {
+                if let Message::Arrangement { offsets, .. } = scene.peer.recv().await.unwrap()
+                    && offsets.contains(&(scene.them, (0.0, -500.0)))
+                {
+                    break;
                 }
             }
-            layout.unwrap()
         })
         .await;
-        assert_eq!(sent.0, Side::Above);
-        assert!(sent.1 > 100);
-        assert_eq!(agreed, [sent]);
+        // dropped near the edge above, and snapped flush to it
         assert_eq!(arranged.last(), Some(&Some((0.0, -500.0))));
     }
 
     #[tokio::test]
-    async fn choosing_the_current_side_changes_nothing() {
-        let (before, agreed, arranged) = arranging(false, |mut scene: Scene| async move {
+    async fn putting_a_member_where_it_already_is_changes_nothing() {
+        let ((), agreed, arranged) = arranging(false, |mut scene: Scene| async move {
             scene
                 .peer
                 .send(&Message::Displays { displays: vec![SCREEN] })
                 .await
                 .unwrap();
             settle(&mut scene.peer, 1).await;
-            scene.choose.send_replace(Some(Side::Left));
+            scene.choose.send_replace(Some((scene.them, LEFT)));
             settle(&mut scene.peer, 2).await;
         })
         .await;
-        let () = before;
         assert!(agreed.is_empty());
         assert_eq!(arranged, [Some(LEFT)]);
     }
@@ -1576,6 +1572,7 @@ mod tests {
             displays: watch::channel(vec![SCREEN]).1,
             control: control.clone(),
             choices: watch::channel(None).1,
+            arranged: Arc::new(watch::Sender::new(Layout { members: Vec::new() })),
             saved: None,
             save: mpsc::unbounded_channel().0,
             reports: Arc::new(watch::Sender::new(Reports::new())),

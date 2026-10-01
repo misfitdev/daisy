@@ -25,7 +25,6 @@ pub fn test_modal_menu_actions() {
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use objc2::rc::Retained;
@@ -56,9 +55,12 @@ struct AppDelegateIvars {
     settings: RefCell<AppSettings>,
     peers: RefCell<Vec<Peer>>,
     status: RefCell<Status>,
-    /// Latency and control in the running session, once reported.
-    link: Cell<Option<Link>>,
-    connected_at: Cell<Option<Instant>>,
+    /// This system's key, once the controller reports it.
+    me: Cell<Option<crate::identity::PublicKey>>,
+    /// Each running link, as it last reported.
+    links: RefCell<std::collections::BTreeMap<crate::identity::PublicKey, Link>>,
+    /// Where every member's displays sit, while the group runs.
+    arranged: RefCell<Option<crate::share::Layout>>,
     main: OnceCell<window::MainViews>,
     advanced: OnceCell<window::AdvancedViews>,
     /// This system's name, as the arrangement shows it.
@@ -403,16 +405,10 @@ define_class!(
         }
 
         #[unsafe(method(arrangePeer:))]
-        fn arrange_peer(&self, sender: &AnyObject) {
-            let Some(views) = self.ivars().main.get() else {
-                return;
-            };
-            if !std::ptr::eq(sender, (&*views.arrange as &AnyObject) as *const AnyObject) {
-                return;
-            }
-            if let Some(side) = views.arrange.side() {
-                self.ivars().settings.borrow_mut().last_session.side = side;
-                let _ = self.ivars().controller.send(Command::Arrange(side));
+        fn arrange_peer(&self, _sender: Option<&AnyObject>) {
+            let placed = self.ivars().main.get().and_then(|views| views.arrange.take_placed());
+            if let Some((key, offset)) = placed {
+                let _ = self.ivars().controller.send(Command::Place(key, offset));
             }
         }
 
@@ -477,8 +473,9 @@ impl AppDelegate {
             settings: RefCell::new(AppSettings::default()),
             peers: RefCell::new(Vec::new()),
             status: RefCell::new(Status::Idle),
-            link: Cell::new(None),
-            connected_at: Cell::new(None),
+            me: Cell::new(None),
+            links: RefCell::new(std::collections::BTreeMap::new()),
+            arranged: RefCell::new(None),
             main: OnceCell::new(),
             advanced: OnceCell::new(),
             local_name: RefCell::new(controller::computer_name()),
@@ -718,15 +715,22 @@ impl AppDelegate {
     fn handle_event(&self, event: Event) {
         match event {
             Event::Nearby(nearby) => self.show_nearby(nearby),
-            Event::Link { link, .. } => {
-                self.ivars().link.set(Some(link));
+            Event::Link { key, link } => {
+                self.ivars().links.borrow_mut().insert(key, link);
+                self.render_status();
+                self.rebuild_peers_list();
+            }
+            Event::Arranged(layout) => {
+                *self.ivars().arranged.borrow_mut() = Some(layout);
                 self.render_status();
             }
             Event::Ready {
                 settings,
                 peers,
                 first_run,
+                me,
             } => {
+                self.ivars().me.set(Some(me));
                 *self.ivars().settings.borrow_mut() = settings.clone();
                 self.refresh_discoverable();
                 self.refresh_share_clipboard();
@@ -780,16 +784,16 @@ impl AppDelegate {
     }
 
     fn apply_status(&self, status: Status) {
-        if let Status::Connected { side, .. } = &status {
-            self.ivars().settings.borrow_mut().last_session.side = *side;
-        }
-        let was_connected = matches!(*self.ivars().status.borrow(), Status::Connected { .. });
-        if !matches!(status, Status::Connected { .. }) {
-            self.ivars().connected_at.set(None);
-            self.ivars().link.set(None);
-        } else if !was_connected {
-            self.ivars().connected_at.set(Some(Instant::now()));
-            self.ivars().link.set(None);
+        match &status {
+            Status::Connected { peers } => self
+                .ivars()
+                .links
+                .borrow_mut()
+                .retain(|key, _| peers.iter().any(|(_, linked)| linked == key)),
+            _ => {
+                self.ivars().links.borrow_mut().clear();
+                *self.ivars().arranged.borrow_mut() = None;
+            }
         }
         if let Some(item) = self.ivars().menu_start_stop.get() {
             item.setTitle(&NSString::from_str(if is_active(&status) {
@@ -808,28 +812,28 @@ impl AppDelegate {
     }
 
     fn render_status(&self) {
-        let live = self
-            .ivars()
-            .link
-            .get()
-            .zip(self.ivars().connected_at.get().map(|at| at.elapsed()));
         let status = self.ivars().status.borrow();
-        let copy = status_copy(&status, live);
-        if let Some(views) = self.ivars().main.get() {
-            let connected = match &*status {
-                Status::Connected { peer, side, .. } => Some((peer.as_str(), *side, live)),
-                _ => None,
-            };
-            let shown = map::arrangement(&self.ivars().local_name.borrow(), connected);
-            let detail = if copy.connected {
-                shown.link.clone()
-            } else {
-                copy.detail.clone()
-            };
-            let hint = (!shown.link_hint.is_empty()).then(|| NSString::from_str(&shown.link_hint));
-            views.detail.setToolTip(hint.as_deref());
+        let links = self.ivars().links.borrow();
+        let copy = status_copy(&status, &links);
+        if let Some(views) = self.ivars().main.get()
+            && let Some(me) = self.ivars().me.get()
+        {
+            let mut names: std::collections::BTreeMap<_, _> = self
+                .ivars()
+                .peers
+                .borrow()
+                .iter()
+                .map(|peer| (peer.key, peer.name.clone()))
+                .collect();
+            if let Status::Connected { peers } = &*status {
+                names.extend(peers.iter().map(|(name, key)| (*key, name.clone())));
+            }
+            names.insert(me, self.ivars().local_name.borrow().clone());
+            let displays = crate::macos::displays().unwrap_or_default();
+            let arranged = self.ivars().arranged.borrow();
+            let shown = map::scene(me, &names, arranged.as_ref(), &displays, &links);
             views.title.setStringValue(&NSString::from_str(&copy.title));
-            views.detail.setStringValue(&NSString::from_str(&detail));
+            views.detail.setStringValue(&NSString::from_str(&copy.detail));
             views.arrange.show(shown);
         }
         if let Some(item) = self.ivars().menu_status.get() {
@@ -941,15 +945,20 @@ impl AppDelegate {
         let Some(views) = self.ivars().main.get() else {
             return;
         };
-        let rows: Vec<window::PeerRow> = self
-            .ivars()
-            .peers
-            .borrow()
+        let peers = self.ivars().peers.borrow();
+        let links = self.ivars().links.borrow();
+        let rows: Vec<window::PeerRow> = peers
             .iter()
-            .map(|peer| window::PeerRow {
-                name: peer.name.clone(),
-                fingerprint: peer.key.fingerprint(),
-                trust: peer.policy.label(),
+            .map(|peer| {
+                let introducer = peer
+                    .introduced_by
+                    .and_then(|key| peers.iter().find(|other| other.key == key))
+                    .map(|other| other.name.as_str());
+                window::PeerRow {
+                    name: peer.name.clone(),
+                    detail: peer_detail(&peer.key.fingerprint(), introducer, links.get(&peer.key)),
+                    trust: peer.policy.label(),
+                }
             })
             .collect();
         views.show_peers(&rows, self);
@@ -1096,6 +1105,24 @@ pub fn run(home: PathBuf, name: String) -> Result<()> {
     Ok(())
 }
 
+/// The line under a peer's name: its fingerprint, who introduced it, and
+/// how its link is doing while it runs.
+fn peer_detail(fingerprint: &str, introducer: Option<&str>, link: Option<&Link>) -> String {
+    let mut parts = vec![fingerprint.to_owned()];
+    if let Some(introducer) = introducer {
+        parts.push(format!("via {introducer}"));
+    }
+    match link {
+        Some(link) if link.peer_locked => parts.push("Locked".to_owned()),
+        Some(Link {
+            latency_ms: Some(ms), ..
+        }) => parts.push(format!("Connected, {ms} ms")),
+        Some(_) => parts.push("Connected".to_owned()),
+        None => {}
+    }
+    parts.join(" · ")
+}
+
 /// What the window and menu say about the session.
 #[derive(Debug, PartialEq, Eq)]
 struct StatusCopy {
@@ -1106,8 +1133,8 @@ struct StatusCopy {
     connected: bool,
 }
 
-/// `live` is the running session's latest report and how long it has run.
-fn status_copy(status: &Status, live: Option<(Link, Duration)>) -> StatusCopy {
+/// `links` is each running link's latest report.
+fn status_copy(status: &Status, links: &std::collections::BTreeMap<crate::identity::PublicKey, Link>) -> StatusCopy {
     let plain = |title: String, detail: String| StatusCopy {
         menu: title.clone(),
         title,
@@ -1143,31 +1170,47 @@ fn status_copy(status: &Status, live: Option<(Link, Duration)>) -> StatusCopy {
                 wait.as_secs().max(1)
             ),
         ),
-        Status::Connected { peer, .. } => {
-            let title = format!("Connected to {peer}");
-            let menu = match live.and_then(|(link, _)| link.latency_ms) {
-                Some(ms) => format!("{title} · {ms} ms"),
-                None => title.clone(),
+        Status::Connected { peers } => {
+            let names: Vec<&str> = peers.iter().map(|(name, _)| name.as_str()).collect();
+            let title = match names.as_slice() {
+                [] => "Connected".to_owned(),
+                [one] => format!("Connected to {one}"),
+                [first, second] => format!("Connected to {first} and {second}"),
+                [first, rest @ ..] => format!("Connected to {first} and {} others", rest.len()),
+            };
+            let latencies: Vec<String> = peers
+                .iter()
+                .filter_map(|(name, key)| {
+                    let ms = links.get(key)?.latency_ms?;
+                    Some(if peers.len() == 1 {
+                        format!("{ms} ms")
+                    } else {
+                        format!("{name} {ms} ms")
+                    })
+                })
+                .collect();
+            let locked: Vec<&str> = peers
+                .iter()
+                .filter(|(_, key)| links.get(key).is_some_and(|link| link.peer_locked))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let menu = match latencies.as_slice() {
+                [] => title.clone(),
+                latencies => format!("{title} · {}", latencies.join(", ")),
+            };
+            let detail = match locked.as_slice() {
+                [] => latencies.join(" · "),
+                [one] => format!("{one} is locked; unlock it there."),
+                many => format!("{} are locked; unlock them there.", many.join(", ")),
             };
             StatusCopy {
                 title,
-                detail: String::new(),
+                detail,
                 menu,
                 connected: true,
             }
         }
         Status::Problem { summary, recovery } => plain(summary.clone(), recovery.clone()),
-    }
-}
-
-/// How long a session has run, to the minute.
-fn span(elapsed: Duration) -> String {
-    let minutes = elapsed.as_secs() / 60;
-    match (minutes / 60, minutes % 60) {
-        (0, 0) => "less than a minute".to_owned(),
-        (0, minutes) => format!("{minutes} min"),
-        (hours, 0) => format!("{hours} h"),
-        (hours, minutes) => format!("{hours} h {minutes} min"),
     }
 }
 
@@ -1225,36 +1268,68 @@ fn frame(x: f64, y: f64, width: f64, height: f64) -> NSRect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::Identity;
-    use crate::input::Side;
 
-    fn connected() -> Status {
+    fn key(byte: u8) -> crate::identity::PublicKey {
+        crate::identity::PublicKey::from_bytes(&[byte; 32]).unwrap()
+    }
+
+    fn connected(names: &[&str]) -> Status {
         Status::Connected {
-            peer: "Studio".to_owned(),
-            key: Identity::generate().unwrap().public_key(),
-            side: Side::Left,
+            peers: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| ((*name).to_owned(), key(index as u8 + 1)))
+                .collect(),
+        }
+    }
+
+    fn measured(ms: Option<u64>, locked: bool) -> Link {
+        Link {
+            latency_ms: ms,
+            peer_locked: locked,
+            ..Link::default()
         }
     }
 
     #[test]
-    fn the_menu_shows_latency_once_measured() {
-        let link = Link {
-            latency_ms: Some(4),
-            in_control: false,
-            ..Link::default()
-        };
-        let copy = status_copy(&connected(), Some((link, Duration::from_secs(65 * 60))));
+    fn the_menu_names_the_group_and_its_round_trips() {
+        let links = std::collections::BTreeMap::from([(key(1), measured(Some(4), false))]);
+        let copy = status_copy(&connected(&["Studio"]), &links);
         assert!(copy.connected);
         assert_eq!(copy.title, "Connected to Studio");
         assert_eq!(copy.menu, "Connected to Studio · 4 ms");
+        assert_eq!(
+            status_copy(&connected(&["Studio"]), &Default::default()).menu,
+            "Connected to Studio"
+        );
 
-        let unmeasured = Link {
-            latency_ms: None,
-            in_control: true,
-            ..Link::default()
-        };
-        let copy = status_copy(&connected(), Some((unmeasured, Duration::from_secs(30))));
-        assert_eq!(copy.menu, "Connected to Studio");
+        let links =
+            std::collections::BTreeMap::from([(key(1), measured(Some(4), false)), (key(2), measured(Some(12), false))]);
+        let copy = status_copy(&connected(&["Studio", "Desk"]), &links);
+        assert_eq!(copy.title, "Connected to Studio and Desk");
+        assert_eq!(copy.menu, "Connected to Studio and Desk · Studio 4 ms, Desk 12 ms");
+        let copy = status_copy(&connected(&["Studio", "Desk", "Den"]), &Default::default());
+        assert_eq!(copy.title, "Connected to Studio and 2 others");
+    }
+
+    #[test]
+    fn a_peer_row_says_who_introduced_it_and_how_its_link_is() {
+        assert_eq!(peer_detail("4074-8321", None, None), "4074-8321");
+        assert_eq!(
+            peer_detail("4074-8321", Some("Laptop"), Some(&measured(Some(12), false))),
+            "4074-8321 · via Laptop · Connected, 12 ms"
+        );
+        assert_eq!(
+            peer_detail("4074-8321", None, Some(&measured(None, true))),
+            "4074-8321 · Locked"
+        );
+    }
+
+    #[test]
+    fn a_locked_member_says_how_to_unlock_it() {
+        let links = std::collections::BTreeMap::from([(key(2), measured(None, true))]);
+        let copy = status_copy(&connected(&["Studio", "Desk"]), &links);
+        assert_eq!(copy.detail, "Desk is locked; unlock it there.");
     }
 
     #[test]
@@ -1266,7 +1341,7 @@ mod tests {
                     pairing,
                     looking_for: looking_for.map(str::to_owned),
                 },
-                None,
+                &Default::default(),
             )
             .title
         };
@@ -1282,16 +1357,16 @@ mod tests {
                 address: "192.168.1.20:24850".to_owned(),
                 peer: Some("Studio".to_owned()),
             },
-            None,
+            &Default::default(),
         );
         assert_eq!(connecting.title, "Connecting to Studio…");
         let reconnecting = status_copy(
             &Status::Reconnecting {
                 address: "192.168.1.20:24850".to_owned(),
                 peer: Some("Studio".to_owned()),
-                wait: Duration::from_secs(2),
+                wait: std::time::Duration::from_secs(2),
             },
-            None,
+            &Default::default(),
         );
         assert_eq!(reconnecting.title, "Reconnecting to Studio…");
         assert!(reconnecting.detail.starts_with("The connection to Studio was lost."));
@@ -1300,16 +1375,9 @@ mod tests {
                 address: "192.168.1.20:24850".to_owned(),
                 peer: None,
             },
-            None,
+            &Default::default(),
         );
         assert_eq!(unknown.title, "Connecting…");
-        assert_eq!(status_copy(&Status::Idle, None).title, "Stopped");
-    }
-
-    #[test]
-    fn spans_read_to_the_minute() {
-        assert_eq!(span(Duration::from_secs(59)), "less than a minute");
-        assert_eq!(span(Duration::from_secs(12 * 60 + 30)), "12 min");
-        assert_eq!(span(Duration::from_secs(2 * 3600)), "2 h");
+        assert_eq!(status_copy(&Status::Idle, &Default::default()).title, "Stopped");
     }
 }

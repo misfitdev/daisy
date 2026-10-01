@@ -118,8 +118,8 @@ pub enum Command {
     SetDiscoverable(bool),
     /// Choose whether Command-Q quits Daisy or closes its windows.
     SetCommandQQuits(bool),
-    /// Move the connected peer's screen to this side.
-    Arrange(Side),
+    /// Put a member's displays where a person dropped them in the group.
+    Place(PublicKey, crate::layout::Offset),
     Shutdown,
 }
 
@@ -143,10 +143,9 @@ pub enum Status {
         peer: Option<String>,
         wait: std::time::Duration,
     },
+    /// Linked with these members, by name, in the order they joined.
     Connected {
-        peer: String,
-        key: PublicKey,
-        side: Side,
+        peers: Vec<(String, PublicKey)>,
     },
     Problem {
         summary: String,
@@ -159,6 +158,8 @@ pub enum Event {
         settings: AppSettings,
         peers: Vec<Peer>,
         first_run: bool,
+        /// This system's key.
+        me: PublicKey,
     },
     Status(Status),
     Peers(Vec<Peer>),
@@ -181,12 +182,13 @@ pub enum Event {
     },
     /// Peers, and systems open to pairing, found on the network.
     Nearby(Vec<Nearby>),
-    /// Latency or who has control changed in the running session.
     /// How one peer's link is doing.
     Link {
-        peer: String,
+        key: PublicKey,
         link: crate::control::Link,
     },
+    /// Where every member's displays sit, while the group runs.
+    Arranged(crate::share::Layout),
 }
 
 /// A system found on the network, as the interface shows it.
@@ -275,12 +277,20 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
     let (share_discoverable, discoverable) = watch::channel(stored.discoverable);
     let (arrange, arrangement) = watch::channel(None);
+    let me = match Identity::load_or_create(&home.join("identity")) {
+        Ok(identity) => identity.public_key(),
+        Err(error) => {
+            let _ = send_problem(&events, "Daisy's key could not be read", format!("{error:#}"));
+            return;
+        }
+    };
     tokio::spawn(browse_nearby(home.clone(), events.clone()));
     if events
         .send(Event::Ready {
             settings,
             peers,
             first_run,
+            me,
         })
         .is_err()
     {
@@ -395,8 +405,8 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     );
                 }
             }
-            Command::Arrange(side) => {
-                arrange.send_replace(Some(side));
+            Command::Place(key, offset) => {
+                arrange.send_replace(Some((key, offset)));
             }
             Command::SetCommandQQuits(on) => {
                 stored.command_q_quits = on;
@@ -502,7 +512,7 @@ async fn run_session(
     start: Start,
     clipboard: watch::Receiver<bool>,
     discoverable: watch::Receiver<bool>,
-    arrangement: watch::Receiver<Option<Side>>,
+    arrangement: watch::Receiver<Option<crate::share::Placing>>,
     events: Sender<Event>,
 ) {
     let Start {
@@ -522,6 +532,7 @@ async fn run_session(
             home: home.clone(),
             waiting: None,
             stats: std::collections::BTreeMap::new(),
+            linked: Vec::new(),
         };
         let pairing = allow_pairing.then_some(settings.trust);
         let config = service::SessionConfig {
@@ -595,6 +606,8 @@ struct ControllerObserver {
     waiting: Option<(u16, bool)>,
     /// Each running link's round trips, kept for `daisy stats`.
     stats: std::collections::BTreeMap<String, crate::latency::LinkStats>,
+    /// The members with a running link, in the order they joined.
+    linked: Vec<(String, PublicKey)>,
 }
 
 impl ControllerObserver {
@@ -642,11 +655,8 @@ impl ServiceObserver for ControllerObserver {
         }));
     }
 
-    fn link(&mut self, peer: &str, link: crate::control::Link) {
-        let _ = self.events.send(Event::Link {
-            peer: peer.to_owned(),
-            link,
-        });
+    fn link(&mut self, peer: &str, key: PublicKey, link: crate::control::Link) {
+        let _ = self.events.send(Event::Link { key, link });
         let now = trust::now();
         let fresh = self
             .stats
@@ -666,19 +676,29 @@ impl ServiceObserver for ControllerObserver {
         }
     }
 
-    fn connected(&mut self, peer: &str, key: PublicKey, side: Side) {
+    fn connected(&mut self, peer: &str, key: PublicKey, _side: Side) {
+        if !self.linked.iter().any(|(_, linked)| *linked == key) {
+            self.linked.push((peer.to_owned(), key));
+        }
         let _ = self.events.send(Event::Status(Status::Connected {
-            peer: peer.to_owned(),
-            key,
-            side,
+            peers: self.linked.clone(),
         }));
+    }
+
+    fn arranged(&mut self, layout: &crate::share::Layout) {
+        let _ = self.events.send(Event::Arranged(layout.clone()));
     }
 
     fn disconnected(&mut self, peer: &str) {
         if self.stats.remove(peer).is_some() {
             self.save_stats();
         }
-        if let Some((port, pairing)) = self.waiting {
+        self.linked.retain(|(name, _)| name != peer);
+        if !self.linked.is_empty() {
+            let _ = self.events.send(Event::Status(Status::Connected {
+                peers: self.linked.clone(),
+            }));
+        } else if let Some((port, pairing)) = self.waiting {
             self.send_waiting(port, pairing);
         }
     }
@@ -1002,6 +1022,7 @@ mod tests {
             home: directory.path().to_owned(),
             waiting: None,
             stats: std::collections::BTreeMap::new(),
+            linked: Vec::new(),
         };
         observer.waiting("Studio", key, service::DEFAULT_PORT, Some(Policy::IDLE));
         assert!(matches!(

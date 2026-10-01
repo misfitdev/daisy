@@ -1,7 +1,9 @@
 //! AppKit requires the main thread, so this test has its own harness.
 
 #[cfg(target_os = "macos")]
-pub use daisy::{control, controller, identity, input, macos, peers, permissions, service, setup, trust};
+pub use daisy::{
+    control, controller, identity, input, layout, macos, peers, permissions, service, setup, share, trust,
+};
 
 #[cfg(target_os = "macos")]
 #[path = "../src/app.rs"]
