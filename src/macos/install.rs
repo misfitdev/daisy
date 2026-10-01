@@ -60,25 +60,24 @@ pub fn offer(home: &Path) -> Option<Move> {
 /// this process exits. The caller then quits.
 pub fn carry_out(planned: &Move, bundle_id: &str) -> Result<()> {
     quit_other_copies(bundle_id)?;
-    if planned.replaces {
-        let url = NSURL::fileURLWithPath(&NSString::from_str(&planned.destination.display().to_string()));
+    let copy = |from: &Path, to: &Path| {
+        let copied = std::process::Command::new("/usr/bin/ditto")
+            .arg(from)
+            .arg(to)
+            .status()
+            .context("running ditto")?;
+        if !copied.success() {
+            bail!("copying to {} failed: {copied}", to.display());
+        }
+        Ok(())
+    };
+    let trash = |path: &Path| {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.display().to_string()));
         NSFileManager::defaultManager()
             .trashItemAtURL_resultingItemURL_error(&url, None)
             .map_err(|error| anyhow::anyhow!("{}", error.localizedDescription()))
-            .context("moving the existing copy to the Trash")?;
-    }
-    if let Some(parent) = planned.destination.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let copied = std::process::Command::new("/usr/bin/ditto")
-        .arg(&planned.source)
-        .arg(&planned.destination)
-        .status()
-        .context("running ditto")?;
-    if !copied.success() {
-        let _ = std::fs::remove_dir_all(&planned.destination);
-        bail!("copying to {} failed: {copied}", planned.destination.display());
-    }
+    };
+    install::replace(&planned.source, &planned.destination, copy, trash)?;
     // a copy that keeps the download's quarantine would be translocated again
     let _ = std::process::Command::new("/usr/bin/xattr")
         .args(["-dr", "com.apple.quarantine"])

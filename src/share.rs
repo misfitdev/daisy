@@ -36,7 +36,7 @@ pub struct SharedLayout {
     pub screen: Rect,
     pub side: Side,
     pub control: std::sync::Arc<crate::control::SharedControl>,
-    pub arranging: Option<Arranging>,
+    pub arranging: Arranging,
 }
 
 /// Rearranging the two screens while the session runs.
@@ -51,14 +51,21 @@ pub struct Arranging {
 }
 
 impl Arranging {
-    async fn choice(arranging: &mut Option<Arranging>) -> Option<Side> {
-        let Some(arranging) = arranging else {
-            return std::future::pending().await;
-        };
-        if arranging.choices.changed().await.is_err() {
+    /// Agreed on `agreed`, with no way to choose a side here.
+    pub fn fixed(agreed: (Side, crate::trust::Timestamp), initiator: bool) -> Self {
+        Self {
+            agreed,
+            initiator,
+            choices: tokio::sync::watch::channel(None).1,
+            agreed_tx: mpsc::unbounded_channel().0,
+        }
+    }
+
+    async fn choice(&mut self) -> Option<Side> {
+        if self.choices.changed().await.is_err() {
             return std::future::pending().await;
         }
-        *arranging.choices.borrow_and_update()
+        *self.choices.borrow_and_update()
     }
 }
 
@@ -138,14 +145,12 @@ where
                     }
                     Message::Clipboard { part } => receive_clipboard(part, &outgoing, sharing)?,
                     Message::Layout { side, chosen } => {
-                        if let Some(arranging) = arranging.as_mut() {
-                            let agreed = crate::control::agreed_side(arranging.initiator, arranging.agreed, (side, chosen));
-                            if agreed != arranging.agreed {
-                                arranging.agreed = agreed;
-                                release.target.arrange(agreed.0);
-                                pointer.arrange(agreed.0);
-                                let _ = arranging.agreed_tx.send(agreed);
-                            }
+                        let agreed = crate::control::agreed_side(arranging.initiator, arranging.agreed, (side, chosen));
+                        if agreed != arranging.agreed {
+                            arranging.agreed = agreed;
+                            release.target.arrange(agreed.0);
+                            pointer.arrange(agreed.0);
+                            let _ = arranging.agreed_tx.send(agreed);
                         }
                     }
                     Message::ControlClaim { generation } => {
@@ -198,8 +203,8 @@ where
                     other => bail!("unexpected message in shared session: {other:?}"),
                 }
             }
-            choice = Arranging::choice(&mut arranging) => {
-                if let (Some(side), Some(arranging)) = (choice, arranging.as_mut())
+            choice = arranging.choice() => {
+                if let Some(side) = choice
                     && side != arranging.agreed.0
                 {
                     arranging.agreed = (side, crate::trust::now());
@@ -591,7 +596,7 @@ mod tests {
                 screen: SCREEN,
                 side: Side::Left,
                 control: control.clone(),
-                arranging: None,
+                arranging: Arranging::fixed((Side::Left, 0), true),
             },
             input,
             &mut pointer,
@@ -630,7 +635,7 @@ mod tests {
                 screen: SCREEN,
                 side: Side::Left,
                 control: control.clone(),
-                arranging: None,
+                arranging: Arranging::fixed((Side::Left, 0), true),
             },
             input,
             &mut pointer,
@@ -681,7 +686,7 @@ mod tests {
                 screen: SCREEN,
                 side: Side::Left,
                 control: control.clone(),
-                arranging: None,
+                arranging: Arranging::fixed((Side::Left, 0), true),
             },
             input,
             &mut pointer,
@@ -789,7 +794,7 @@ mod tests {
                 screen: SCREEN,
                 side: Side::Left,
                 control: control.clone(),
-                arranging: None,
+                arranging: Arranging::fixed((Side::Left, 0), true),
             },
             input,
             &mut pointer,
@@ -846,12 +851,12 @@ mod tests {
         let mut pointer = Arranged::default();
         let mut board = no_clipboard();
         let layout = SharedLayout {
-            arranging: Some(Arranging {
+            arranging: Arranging {
                 agreed: (Side::Left, 100),
                 initiator,
                 choices,
                 agreed_tx,
-            }),
+            },
             ..layout(&control)
         };
         let session = together(local, layout, input, &mut pointer, &mut injector, &mut board, pending());
@@ -919,6 +924,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_session_that_cannot_choose_still_follows_the_peer() {
+        let ((), agreed, arranged) = arranging(true, |mut peer, choose| async move {
+            drop(choose);
+            settle(&mut peer, 1).await;
+            peer.send(&Message::Layout {
+                side: Side::Left,
+                chosen: 200,
+            })
+            .await
+            .unwrap();
+            settle(&mut peer, 2).await;
+        })
+        .await;
+        assert_eq!(agreed, [(Side::Right, 200)]);
+        assert_eq!(arranged, [Side::Right]);
+    }
+
+    #[tokio::test]
     async fn choosing_the_current_side_changes_nothing() {
         let ((), agreed, arranged) = arranging(false, |mut peer, choose| async move {
             choose.send_replace(Some(Side::Left));
@@ -934,7 +957,7 @@ mod tests {
             screen: SCREEN,
             side: Side::Left,
             control: control.clone(),
-            arranging: None,
+            arranging: Arranging::fixed((Side::Left, 0), true),
         }
     }
 

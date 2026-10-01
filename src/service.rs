@@ -553,17 +553,12 @@ where
     let (messages, input) = mpsc::channel(INPUT_QUEUE_CAPACITY);
     let (mut capture, overflowed) = Capture::start(screen, side, messages, control.clone())?;
     let (agreed_tx, mut agreed_rx) = mpsc::unbounded_channel();
-    let arranging = arrangement.map(|choices| {
-        let mut choices = choices.clone();
-        // only choices made during this session count
-        choices.mark_unchanged();
-        share::Arranging {
-            agreed: (side, chosen),
-            initiator,
-            choices,
-            agreed_tx,
-        }
-    });
+    let arranging = share::Arranging {
+        agreed: (side, chosen),
+        initiator,
+        choices: session_choices(arrangement),
+        agreed_tx,
+    };
     let until = async {
         tokio::select! {
             error = peers.watch(key, peer) => error,
@@ -611,6 +606,16 @@ where
         visit.dropped();
     }
     result
+}
+
+/// Sides chosen on this system during a session. Without a way to choose,
+/// as from the command line, it never changes, and the peer's choices still
+/// apply.
+fn session_choices(arrangement: Option<&watch::Receiver<Option<Side>>>) -> watch::Receiver<Option<Side>> {
+    let mut choices = arrangement.cloned().unwrap_or_else(|| watch::channel(None).1);
+    // only choices made during this session count
+    choices.mark_unchanged();
+    choices
 }
 
 /// Add the default Daisy port when the address has none.

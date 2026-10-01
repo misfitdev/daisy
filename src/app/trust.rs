@@ -38,7 +38,7 @@ pub fn ask(
             return None;
         }
         choice = form.choice();
-        if let Some(policy) = choice.policy() {
+        if let Some(policy) = choice.confirmed(current) {
             return Some(policy);
         }
     }

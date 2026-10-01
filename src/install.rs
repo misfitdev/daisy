@@ -48,6 +48,33 @@ pub fn image_mount_point(hdiutil_info: &[u8], original: &Path) -> Option<PathBuf
         .find(|mount| original.starts_with(mount))
 }
 
+/// Puts a copy of `source` at `destination`. The copy is made beside the
+/// destination first, so an existing copy goes to `trash` only once the
+/// new one is complete.
+pub fn replace(
+    source: &Path,
+    destination: &Path,
+    copy: impl FnOnce(&Path, &Path) -> anyhow::Result<()>,
+    trash: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let parent = destination.parent().context("the destination has no folder")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let staging = parent.join(".Daisy.app.installing");
+    let _ = std::fs::remove_dir_all(&staging);
+    if let Err(error) = copy(source, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if destination.exists()
+        && let Err(error) = trash(destination)
+    {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error.context("moving the existing copy to the Trash"));
+    }
+    std::fs::rename(&staging, destination).with_context(|| format!("moving the copy to {}", destination.display()))
+}
+
 /// `/bin/sh` arguments that wait for process `pid` to exit, open `bundle`,
 /// then eject `eject` if given. Paths travel as positional parameters, never
 /// as script text.
@@ -149,6 +176,59 @@ mod tests {
             image_mount_point(b"not a plist", Path::new("/Volumes/Daisy/Daisy.app")),
             None
         );
+    }
+
+    fn bundle(path: &Path, marker: &str) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("marker"), marker).unwrap();
+    }
+
+    fn copy_tree(from: &Path, to: &Path) -> anyhow::Result<()> {
+        bundle(to, &std::fs::read_to_string(from.join("marker"))?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_copy_keeps_the_existing_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let (source, destination) = (
+            directory.path().join("new/Daisy.app"),
+            directory.path().join("Apps/Daisy.app"),
+        );
+        bundle(&source, "new");
+        bundle(&destination, "old");
+        let result = replace(
+            &source,
+            &destination,
+            |_, _| anyhow::bail!("disk full"),
+            |_| panic!("trashed"),
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(destination.join("marker")).unwrap(), "old");
+        assert!(!directory.path().join("Apps/.Daisy.app.installing").exists());
+    }
+
+    #[test]
+    fn a_complete_copy_replaces_the_existing_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let (source, destination) = (
+            directory.path().join("new/Daisy.app"),
+            directory.path().join("Apps/Daisy.app"),
+        );
+        let trash = directory.path().join("Trash");
+        bundle(&source, "new");
+        bundle(&destination, "old");
+        replace(&source, &destination, copy_tree, |old| {
+            std::fs::create_dir_all(&trash)?;
+            Ok(std::fs::rename(old, trash.join("Daisy.app"))?)
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(destination.join("marker")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(trash.join("Daisy.app/marker")).unwrap(), "old");
+
+        let fresh = directory.path().join("Fresh/Daisy.app");
+        replace(&source, &fresh, copy_tree, |_| panic!("nothing to trash")).unwrap();
+        assert_eq!(std::fs::read_to_string(fresh.join("marker")).unwrap(), "new");
     }
 
     #[test]

@@ -183,6 +183,17 @@ impl Choice {
         }
     }
 
+    /// The policy to keep after a person confirms this choice, starting from
+    /// `current`. An untouched choice keeps `current`, so confirming a
+    /// fixed deadline shown as days does not turn it into idle trust.
+    pub fn confirmed(self, current: Policy) -> Option<Policy> {
+        if self == Choice::of(current) {
+            Some(current)
+        } else {
+            self.policy()
+        }
+    }
+
     /// The choice showing `policy`. A fixed deadline, set from the command
     /// line, shows as its length in days.
     pub fn of(policy: Policy) -> Choice {
@@ -330,6 +341,13 @@ mod tests {
             assert_eq!(Choice::of(policy).policy(), Some(policy));
         }
         assert_eq!(Choice::of(Policy::Days(30)), Choice::Unused { amount: 30, days: true });
+        let deadline = Policy::Days(30);
+        assert_eq!(Choice::of(deadline).confirmed(deadline), Some(deadline));
+        assert_eq!(
+            Choice::Unused { amount: 2, days: true }.confirmed(deadline),
+            Some(Policy::Idle(48))
+        );
+        assert_eq!(Choice::Session.confirmed(deadline), Some(Policy::Once));
     }
 
     #[test]
