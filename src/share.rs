@@ -84,6 +84,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut until = pin!(until);
+    let peer = channel.remote_key();
     let (sender, receiver) = channel.split();
     let mut incoming = spawn_receiver(receiver);
     let mut outgoing = spawn_sender(sender);
@@ -155,7 +156,7 @@ where
                     }
                     Message::ControlClaim { generation } => {
                         let mut state = layout.control.state.lock().unwrap_or_else(|e| e.into_inner());
-                        let changed = state.claim(generation);
+                        let changed = state.claim(generation, peer);
                         drop(state);
                         if changed {
                             pointer.yield_control();
@@ -177,7 +178,7 @@ where
                     | Message::Input { generation, .. }
                     | Message::Reclaim { generation } => {
                         let state = layout.control.state.lock().unwrap_or_else(|e| e.into_inner());
-                        let receives = state.receives(generation, layout.control.now()) && !layout.control.local_busy();
+                        let receives = state.receives(generation, peer, layout.control.now()) && !layout.control.local_busy();
                         drop(state);
                         if !receives {
                             if let Message::Enter { along, .. } = message {
@@ -510,6 +511,14 @@ mod tests {
         Sharing::new(Board::default(), watch::channel(true).1)
     }
 
+    /// This system's control for a session on `local`; `owns` says whether
+    /// it starts with control and wins a tie with the peer.
+    fn control(local: &Channel<DuplexStream>, owns: bool) -> Arc<SharedControl> {
+        let peer = local.remote_key();
+        let me = crate::identity::PublicKey::from_bytes(&[if owns { 0xff } else { 0 }; 32]).unwrap();
+        Arc::new(SharedControl::new(me, if owns { me } else { peer }))
+    }
+
     async fn channels() -> (Channel<DuplexStream>, Channel<DuplexStream>) {
         channels_with_capacity(1 << 17).await
     }
@@ -568,7 +577,7 @@ mod tests {
     #[tokio::test]
     async fn the_session_reports_latency_and_who_has_control() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(crate::control::SharedControl::new(true));
+        let control = control(&local, true);
         let mut link = control.watch_link();
         let (_capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
@@ -620,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn giving_up_control_sends_the_clipboard() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (_capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
         let mut pointer = Returned::default();
@@ -657,7 +666,7 @@ mod tests {
     #[tokio::test]
     async fn a_busy_system_sends_the_pointer_back_where_it_crossed() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(false));
+        let control = control(&local, false);
         let (_capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
         let mut pointer = Returned::default();
@@ -708,7 +717,7 @@ mod tests {
     #[tokio::test]
     async fn shared_handoff_releases_keys_and_rejects_queued_input() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(false));
+        let control = control(&local, false);
         let (capture, input) = mpsc::channel(16);
         let actions = Arc::new(Mutex::new(Vec::new()));
         let mut injector = SharedRecorded(actions.clone());
@@ -843,7 +852,7 @@ mod tests {
         script: impl FnOnce(Channel<DuplexStream>, tokio::sync::watch::Sender<Option<Side>>) -> F,
     ) -> (F::Output, Vec<(Side, crate::trust::Timestamp)>, Vec<Side>) {
         let (local, peer) = channels().await;
-        let control = Arc::new(SharedControl::new(initiator));
+        let control = control(&local, initiator);
         let (_capture, input) = mpsc::channel(16);
         let (choose, choices) = tokio::sync::watch::channel(None);
         let (agreed_tx, mut agreed_rx) = mpsc::unbounded_channel();
@@ -1027,7 +1036,7 @@ mod tests {
     #[tokio::test]
     async fn replays_input_and_hands_control_back() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(false));
+        let control = control(&local, false);
         let (capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
         let mut board = no_clipboard();
@@ -1082,7 +1091,7 @@ mod tests {
     #[tokio::test]
     async fn releases_held_input_when_the_peer_vanishes() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(false));
+        let control = control(&local, false);
         let (_capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
         let mut board = no_clipboard();
@@ -1115,7 +1124,7 @@ mod tests {
     #[tokio::test]
     async fn sends_input_and_takes_control_back() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (capture, input) = mpsc::channel(16);
         let mut pointer = Returned::default();
         let mut board = no_clipboard();
@@ -1175,7 +1184,7 @@ mod tests {
     #[tokio::test]
     async fn flushes_accepted_input_when_its_queue_closes() {
         let (local, mut peer) = channels_with_capacity(1).await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (capture, input) = mpsc::channel(2);
         let enter = Message::Enter {
             generation: 0,
@@ -1215,7 +1224,7 @@ mod tests {
     async fn gives_up_on_a_silent_peer() {
         // the peer keeps the connection open but never answers heartbeats
         let (local, _silent) = channels().await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (_capture, input) = mpsc::channel(16);
         let mut pointer = Returned::default();
         let mut injector = Recorded::default();
@@ -1240,7 +1249,7 @@ mod tests {
     #[tokio::test]
     async fn releases_held_input_when_trust_ends() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(false));
+        let control = control(&local, false);
         let (_capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
         let mut board = no_clipboard();
@@ -1282,7 +1291,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_the_session_releases_held_input() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(false));
+        let control = control(&local, false);
         let recorded = SharedRecorded::default();
         let actions = recorded.0.clone();
         let task = tokio::spawn(async move {
@@ -1311,7 +1320,7 @@ mod tests {
     #[tokio::test]
     async fn releases_held_input_when_trust_ends_while_writes_back_up() {
         let (local, mut peer) = channels_with_capacity(1).await;
-        let control = Arc::new(SharedControl::new(false));
+        let control = control(&local, false);
         let (_capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
         let mut board = no_clipboard();
@@ -1350,7 +1359,7 @@ mod tests {
     #[tokio::test]
     async fn stops_when_trust_ends() {
         let (local, _peer) = channels().await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (_capture, input) = mpsc::channel(16);
         let until = async { anyhow::anyhow!("the peer was forgotten") };
         let mut pointer = Returned::default();
@@ -1375,7 +1384,7 @@ mod tests {
     #[tokio::test]
     async fn stops_when_trust_ends_while_socket_write_is_blocked() {
         let (local, _peer_that_never_reads) = channels_with_capacity(1).await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (_capture, input) = mpsc::channel(16);
         let until = async {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1403,7 +1412,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn gives_up_on_a_silent_peer_while_socket_write_is_blocked() {
         let (local, _peer_that_never_reads) = channels_with_capacity(1).await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (_capture, input) = mpsc::channel(16);
         let mut pointer = Returned::default();
         let mut injector = Recorded::default();
@@ -1481,7 +1490,7 @@ mod tests {
     #[tokio::test]
     async fn sends_its_clipboard_right_after_crossing() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (capture, input) = mpsc::channel(16);
         let mut board = board_with(text("copied on this system"), true);
         let enter = Message::Enter {
@@ -1519,7 +1528,7 @@ mod tests {
     #[tokio::test]
     async fn writes_the_clipboard_that_comes_back() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (capture, input) = mpsc::channel(16);
         let mut board = no_clipboard();
         let script = async {
@@ -1564,7 +1573,7 @@ mod tests {
     /// Returns what this system sent from then on.
     async fn clipboard_after_handing_back(hand_back: &[Message]) -> Vec<Message> {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(false));
+        let control = control(&local, false);
         let (capture, input) = mpsc::channel(16);
         let mut board = board_with(text("copied before the peer took control"), true);
         let here = board.clipboard().clone();
@@ -1632,7 +1641,7 @@ mod tests {
     #[tokio::test]
     async fn switched_off_sends_and_writes_nothing() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(false));
+        let control = control(&local, false);
         let (capture, input) = mpsc::channel(16);
         let mut board = board_with(text("stays on this system"), false);
         let script = async {
@@ -1688,7 +1697,7 @@ mod tests {
     #[tokio::test]
     async fn a_large_image_neither_overloads_the_session_nor_holds_input_back() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (capture, input) = mpsc::channel(16);
         let image = Content {
             png: Some(vec![9; crate::clipboard::CHUNK_LEN * 70]),
@@ -1770,7 +1779,7 @@ mod tests {
     #[tokio::test]
     async fn a_peer_that_does_not_acknowledge_gets_no_more_than_the_window() {
         let (local, mut peer) = channels().await;
-        let control = Arc::new(SharedControl::new(true));
+        let control = control(&local, true);
         let (capture, input) = mpsc::channel(16);
         let image = Content {
             png: Some(vec![9; crate::clipboard::CHUNK_LEN * 50]),

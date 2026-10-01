@@ -423,16 +423,7 @@ where
         }
         *expected = Some(channel.remote_key());
         let started = tokio::time::Instant::now();
-        let session = run_session(
-            channel,
-            config.peers,
-            &peer,
-            take_side_choice(&config),
-            config.clipboard,
-            config.arrangement,
-            observer,
-        )
-        .await;
+        let session = run_session(channel, &config, &peer, take_side_choice(&config), observer).await;
         lasted = Some(started.elapsed());
         observer.disconnected(&peer);
         session
@@ -473,16 +464,7 @@ where
     if pairing_was_open && !pairing.is_open() {
         observer.pairing_closed();
     }
-    run_session(
-        channel,
-        config.peers,
-        &peer,
-        take_side_choice(config),
-        config.clipboard,
-        config.arrangement,
-        observer,
-    )
-    .await?;
+    run_session(channel, config, &peer, take_side_choice(config), observer).await?;
     Ok(peer)
 }
 
@@ -509,17 +491,17 @@ where
 
 async fn run_session<S, O>(
     mut channel: Channel<S>,
-    peers: &PeerStore,
+    config: &SessionConfig<'_>,
     peer: &str,
     chosen_side: Option<Side>,
-    clipboard: &watch::Receiver<bool>,
-    arrangement: Option<&watch::Receiver<Option<Side>>>,
     observer: &mut O,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     O: ServiceObserver + Send,
 {
+    let (peers, clipboard, arrangement) = (config.peers, config.clipboard, config.arrangement);
+    let me = config.identity.public_key();
     let screen = macos::screen_bounds()?;
     let initiator = channel.role() == crate::session::Role::Initiator;
     let key = channel.remote_key();
@@ -547,7 +529,8 @@ where
     let mut sharing = Sharing::new(Pasteboard, clipboard.clone());
     let mut visit = peers.visit(key)?;
     observer.connected(peer, key, side);
-    let control = std::sync::Arc::new(crate::control::SharedControl::new(initiator));
+    // the system that opened the connection has control until someone moves
+    let control = std::sync::Arc::new(crate::control::SharedControl::new(me, if initiator { me } else { key }));
     let mut link = control.watch_link();
     let mut injector = Injector::new();
     let (messages, input) = mpsc::channel(INPUT_QUEUE_CAPACITY);

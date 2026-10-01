@@ -586,9 +586,13 @@ fn try_lock<T>(state: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
 mod tests {
     use super::*;
 
+    fn test_key(byte: u8) -> crate::identity::PublicKey {
+        crate::identity::PublicKey::from_bytes(&[byte; 32]).unwrap()
+    }
+
     #[test]
     fn injected_events_do_not_claim_control() {
-        let control = Arc::new(SharedControl::new(false));
+        let control = Arc::new(SharedControl::new(test_key(1), test_key(2)));
         let (messages, mut input) = mpsc::channel(1);
         let context = Context {
             driver: Arc::new(Mutex::new(Driver::new(
@@ -643,7 +647,7 @@ mod tests {
             messages,
             overflow: overflow.clone(),
             tap: std::ptr::null_mut(),
-            control: Arc::new(SharedControl::new(false)),
+            control: Arc::new(SharedControl::new(test_key(1), test_key(2))),
         };
 
         let _held = lock(&context.cursor);
