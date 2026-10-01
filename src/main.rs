@@ -136,10 +136,15 @@ fn main() -> Result<()> {
 
 async fn run_cli(command: Command, home: PathBuf, name: String) -> Result<()> {
     let identity = Identity::load_or_create(&home.join("identity"))?;
+    let signer = daisy::introduce::Signer::load_or_create(&home.join("signing"))?;
     let peers = PeerStore::open(&home)?;
+    let keys = Keys {
+        identity: &identity,
+        signer: &signer,
+    };
 
     tokio::select! {
-        result = execute(command, &home, &identity, &peers, &name) => result,
+        result = execute(command, &home, keys, &peers, &name) => result,
         () = launcher::launcher_gone() => {
             tracing::info!("the terminal that launched Daisy exited; stopping");
             Ok(())
@@ -147,7 +152,15 @@ async fn run_cli(command: Command, home: PathBuf, name: String) -> Result<()> {
     }
 }
 
-async fn execute(command: Command, home: &Path, identity: &Identity, peers: &PeerStore, name: &str) -> Result<()> {
+/// This system's Noise identity and the key it signs introductions with.
+#[derive(Clone, Copy)]
+struct Keys<'a> {
+    identity: &'a Identity,
+    signer: &'a daisy::introduce::Signer,
+}
+
+async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStore, name: &str) -> Result<()> {
+    let Keys { identity, signer } = keys;
     match command {
         Command::Id => {
             println!("{name}\n{}", identity.public_key());
@@ -177,6 +190,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     clipboard: &clipboard,
                     discoverable: &discoverable,
                     arrangement: None,
+                    signer,
                 },
                 &bind,
                 port,
@@ -207,6 +221,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     clipboard: &clipboard,
                     discoverable: &discoverable,
                     arrangement: None,
+                    signer,
                 },
                 &address,
                 None,
@@ -259,10 +274,13 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
         }
         Command::Forget { peers: selectors, all } => {
             let now = trust::now();
+            // forgetting everything is this system leaving; forgetting one
+            // system removes it from the whole group
             let (removed, unmatched) = if all {
                 (peers.forget_all(now)?, Vec::new())
             } else {
                 let forgotten = peers.forget(&selectors, now)?;
+                peers.record_revocations(signer, identity.public_key(), &forgotten.keys, now)?;
                 (forgotten.removed, forgotten.unmatched)
             };
             if removed > 0 {
@@ -277,6 +295,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
         }
         Command::RotateKey => {
             let rotated = Identity::rotate(&home.join("identity"))?;
+            daisy::introduce::Signer::generate().save(&home.join("signing"))?;
             println!(
                 "This system's key changed from {} to {}.\nEvery peer must pair again. Restart Daisy if it is running.",
                 identity.public_key(),

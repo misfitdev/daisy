@@ -4,7 +4,7 @@ What Daisy protects, how it does so, and what it does not protect. To report a v
 
 ## What is at stake
 
-Each system lets its paired peer type and click on it. A paired peer can type and click anything the user could. Trust between two peers is therefore total; the design's job is to ensure that only the peer explicitly paired can act in that role.
+Each system lets every system in its group type and click on it. A member can type and click anything the user could. Trust between members is therefore total; the design's job is to ensure that only systems paired into the group, directly or through a member, can act in that role.
 
 ## Threat model
 
@@ -15,7 +15,7 @@ In scope:
 
 Out of scope:
 
-- A peer that was deliberately paired. Trusted input is the capability pairing grants.
+- A system that was deliberately paired, and what it does as a member: trusted input is the capability pairing grants. A member can also introduce a new system to the group, or revoke one (see [Groups](#groups)), so a compromised member can admit or remove systems.
 - Someone with the user's account or root on either system. They can read the key or grant themselves the same permissions.
 
 ## Connections
@@ -51,6 +51,17 @@ Each system chooses the policy when pairing completes. Changing a policy restart
 
 Expired trust is removed from the peer file. The menu-bar app can forget a peer and aborts its active session task immediately; the peer-file watcher remains the backstop for changes made by another process and reacts within one second. The optional CLI provides `daisy forget` and `daisy rotate-key` for bulk revocation and identity rotation.
 
+## Groups
+
+A group is every system a member trusts, up to eight, each holding an encrypted session with every other. A new system joins by pairing with any one member; that member introduces it to the rest.
+
+- **Signing keys.** Each system has an Ed25519 key used only to sign introductions and revocations, `signing` beside its identity. It sends the public half over each authenticated session, and the other side pins it to that system's Noise key; a key once pinned cannot change.
+- **Introductions.** An introduction names the introducer, the newcomer's Noise and signing keys, its name, the introducer's trust policy for it, and when the introducer began trusting it. It is signed by the introducer. A system accepts an introduction only from the member it names as introducer, with that member's pinned signing key, and not dated more than five minutes ahead of its own clock. It trusts the newcomer under whichever policy ends sooner: its own for the introducer, or the introducer's for the newcomer. Trust in an introduced system ends when trust in its introducer ends.
+- **Revocations.** Forgetting one system signs a revocation naming it. Every member that trusts the signer removes that system and every system it introduced, keeps the revocation, and passes it on. An introduction dated before a known revocation of its newcomer is refused, so a member that has not yet heard cannot bring a revoked system back; pairing it again directly does. A system ignores a revocation of itself. **Forget All** and `daisy forget --all` only leave the group; they revoke nothing.
+- **Catching up.** Whenever a session starts, each side sends the other an introduction of every system it trusts and every revocation it knows, so a member that was away catches up.
+
+Introductions widen trust beyond the pairing a person performed: pairing A with B, and A with C, makes B and C trust each other. A member that is compromised, or whose key is stolen, can introduce a system of the attacker's choosing to every member, and can revoke members. Forgetting that member on any one system removes it, and everything it introduced, from the whole group.
+
 ## Discovery
 
 Each system advertises `_daisy._tcp` with Bonjour under a random instance and host name. The TXT record holds a random 16-byte nonce and an 8-byte tag, the first 8 bytes of SHA-256 over a fixed label, the advertiser's public key and the nonce, plus whether pairing is open. A peer that pinned the key recognises the tag; anyone else learns neither the key nor the advertiser's name, and each new advertisement uses a fresh nonce, so advertisements cannot be linked. An advertisement only suggests where to connect: every connection still runs the Noise handshake and the trust check, so a forged or replayed advertisement can at most send a connection somewhere it fails. Advertising can be turned off.
@@ -77,9 +88,9 @@ that use the standard macOS markers.
 
 ## Keys at rest
 
-Each system's long-term private key is `~/Library/Application Support/daisy/identity`, readable only by the user (`0600` in a `0700` directory). Daisy refuses to load a key file readable by other users.
+Each system's long-term private key is `~/Library/Application Support/daisy/identity`, readable only by the user (`0600` in a `0700` directory). Daisy refuses to load a key file readable by other users. Its signing key is `signing` beside it, also `0600`; `daisy rotate-key` replaces both.
 
-Paired public keys and trust policies live in `peers.toml` beside it. Every update locks, rereads and rewrites the only copy, preventing a running process from resurrecting a peer forgotten by another command.
+Paired public keys, their signing keys, who introduced them, and trust policies live in `peers.toml` beside it; revocations live in `revocations.toml`. Every update locks, rereads and rewrites the only copy, preventing a running process from resurrecting a peer forgotten by another command.
 
 ## Release integrity
 

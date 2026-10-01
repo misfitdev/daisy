@@ -259,6 +259,8 @@ pub struct SessionConfig<'a> {
     pub discoverable: &'a watch::Receiver<bool>,
     /// Sides chosen on this system while a session runs, if it can rearrange.
     pub arrangement: Option<&'a watch::Receiver<Option<Side>>>,
+    /// Signs this system's introductions and revocations.
+    pub signer: &'a crate::introduce::Signer,
 }
 
 struct PairingGate {
@@ -540,7 +542,17 @@ where
         }
         *expected = Some(channel.remote_key());
         let started = tokio::time::Instant::now();
-        let session = run_session(channel, &config, hub, &peer, take_side_choice(&config), observer).await;
+        let newly_paired = trust_status == Trust::NewlyPaired;
+        let session = run_session(
+            channel,
+            &config,
+            hub,
+            &peer,
+            take_side_choice(&config),
+            newly_paired,
+            observer,
+        )
+        .await;
         lasted = Some(started.elapsed());
         observer.disconnected(&peer);
         session
@@ -580,7 +592,17 @@ where
     }
     gate().paired(trust_status);
     busy.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
-    let result = run_session(channel, config, hub, &peer, take_side_choice(config), observer).await;
+    let newly_paired = trust_status == Trust::NewlyPaired;
+    let result = run_session(
+        channel,
+        config,
+        hub,
+        &peer,
+        take_side_choice(config),
+        newly_paired,
+        observer,
+    )
+    .await;
     busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
     result?;
     Ok(peer)
@@ -613,6 +635,7 @@ async fn run_session<O>(
     hub: &Hub,
     peer: &str,
     chosen_side: Option<Side>,
+    newly_paired: bool,
     observer: &mut O,
 ) -> Result<()>
 where
@@ -642,6 +665,24 @@ where
     };
     let (side, chosen) = crate::control::agreed_side(initiator, local, remote);
     peers.agree_side(&key, side, chosen)?;
+    channel
+        .send(&crate::protocol::Message::SigningKey {
+            key: config.signer.public(),
+        })
+        .await?;
+    match tokio::time::timeout(Duration::from_secs(5), channel.recv())
+        .await
+        .context("the peer did not send its signing key")??
+    {
+        crate::protocol::Message::SigningKey { key: signing } => peers.set_signing(&key, signing)?,
+        _ => anyhow::bail!("the peer runs a different version of Daisy; update Daisy on both systems"),
+    }
+    for message in catch_up(config, key)? {
+        channel.send(&message).await?;
+    }
+    if newly_paired && let Some(newcomer) = introduction_of(config, key)? {
+        hub.send(newcomer);
+    }
     let mut visit = peers.visit(key)?;
     let (done, mut ended) = tokio::sync::oneshot::channel();
     let (agreed_tx, mut agreed_rx) = mpsc::unbounded_channel();
@@ -697,12 +738,85 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Acts on introductions and revocations members send: each must be signed
+/// by the member that sent it, with the signing key it presented.
+async fn handle_trust(hub: Hub, mut received: mpsc::UnboundedReceiver<(PublicKey, crate::protocol::Message)>) {
+    while let Some((from, message)) = received.recv().await {
+        if let Err(error) = act_on_trust(&hub, from, message) {
+            tracing::warn!(error = format!("{error:#}"), "a member's trust message was refused");
+        }
+    }
+}
+
+fn act_on_trust(hub: &Hub, from: PublicKey, message: crate::protocol::Message) -> Result<()> {
+    let now = trust::now();
+    let signing = hub
+        .peers
+        .trusted(&from, now)?
+        .and_then(|peer| peer.signing)
+        .context("the member's signing key is not known yet")?;
+    match message {
+        crate::protocol::Message::Introduce { introduction } => {
+            if introduction.body.introducer != from {
+                anyhow::bail!("a member introduced a system on another's behalf");
+            }
+            let introduction = introduction.verify(&signing, now)?;
+            if introduction.newcomer != hub.me && hub.peers.introduce(introduction, now)? {
+                tracing::info!(name = introduction.name, "a member introduced a system");
+            }
+        }
+        crate::protocol::Message::Revoke { revocation } => {
+            // members pass revocations on, so the signer may not be the sender
+            let by = revocation.body.by;
+            let signing = if by == from {
+                signing
+            } else {
+                hub.peers
+                    .trusted(&by, now)?
+                    .and_then(|peer| peer.signing)
+                    .context("the revoking member is not trusted here")?
+            };
+            revocation.verify(&signing, now)?;
+            if revocation.body.revoked == hub.me {
+                return Ok(());
+            }
+            if let Some(removed) = hub.peers.revoke(revocation.clone(), now)? {
+                for key in removed {
+                    hub.drop_link(key);
+                }
+                hub.send(crate::protocol::Message::Revoke { revocation });
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Sends every member each revocation made here while the group runs, as
+/// when someone forgets a system.
+async fn send_revocations(hub: Hub) {
+    let mut known = hub.peers.revocations().len();
+    let mut every = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        every.tick().await;
+        let revocations = hub.peers.revocations();
+        if revocations.len() < known {
+            known = revocations.len();
+        }
+        for revocation in revocations.into_iter().skip(known) {
+            known += 1;
+            hub.send(crate::protocol::Message::Revoke { revocation });
+        }
+    }
+}
+
 /// The most systems a group holds, this one included.
 pub const MAX_GROUP: usize = 8;
 
 /// The one input core every link on this system shares: one event tap, one
 /// injector and one owner of control. It starts with the first link and
 /// stops after the last.
+#[derive(Clone)]
 pub struct Hub {
     me: PublicKey,
     peers: PeerStore,
@@ -769,15 +883,7 @@ impl Hub {
         let (members, membership) = mpsc::unbounded_channel();
         let _ = members.send(share::Membership::Join(joining));
         *running = Some(members);
-        tokio::spawn(run_core(
-            self.me,
-            self.peers.clone(),
-            self.clipboard.clone(),
-            self.choices.clone(),
-            membership,
-            self.running.clone(),
-            self.reports.clone(),
-        ));
+        tokio::spawn(run_core(self.clone(), membership));
         Ok(member)
     }
 
@@ -787,33 +893,22 @@ impl Hub {
             let _ = core.send(share::Membership::Drop(key));
         }
     }
+
+    /// Sends `message` to every member with a running link.
+    fn send(&self, message: crate::protocol::Message) {
+        if let Some(core) = self.running.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let _ = core.send(share::Membership::Send(message));
+        }
+    }
 }
 
 /// Runs the input core while it has links. A link that arrives as the
 /// last one ends starts it again rather than being lost.
-async fn run_core(
-    me: PublicKey,
-    peers: PeerStore,
-    clipboard: watch::Receiver<bool>,
-    choices: watch::Receiver<Option<Side>>,
-    mut membership: mpsc::UnboundedReceiver<share::Membership<TcpStream>>,
-    running: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<share::Membership<TcpStream>>>>>,
-    reports: std::sync::Arc<watch::Sender<share::Reports>>,
-) {
+async fn run_core(hub: Hub, mut membership: mpsc::UnboundedReceiver<share::Membership<TcpStream>>) {
     let mut waiting = std::collections::VecDeque::new();
     loop {
         waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
-        if let Err(error) = run_core_once(
-            me,
-            &peers,
-            &clipboard,
-            &choices,
-            &mut waiting,
-            &mut membership,
-            &reports,
-        )
-        .await
-        {
+        if let Err(error) = run_core_once(&hub, &mut waiting, &mut membership).await {
             tracing::warn!(error = format!("{error:#}"), "input sharing stopped");
             let reason = format!("{error:#}");
             for change in waiting
@@ -825,7 +920,7 @@ async fn run_core(
                 }
             }
         }
-        let mut slot = running.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = hub.running.lock().unwrap_or_else(|e| e.into_inner());
         waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
         if waiting.is_empty() {
             *slot = None;
@@ -835,14 +930,11 @@ async fn run_core(
 }
 
 async fn run_core_once(
-    me: PublicKey,
-    peers: &PeerStore,
-    clipboard: &watch::Receiver<bool>,
-    choices: &watch::Receiver<Option<Side>>,
+    hub: &Hub,
     waiting: &mut std::collections::VecDeque<share::Membership<TcpStream>>,
     membership: &mut mpsc::UnboundedReceiver<share::Membership<TcpStream>>,
-    reports: &std::sync::Arc<watch::Sender<share::Reports>>,
 ) -> Result<()> {
+    let (me, peers, clipboard, choices, reports) = (hub.me, &hub.peers, &hub.clipboard, &hub.choices, &hub.reports);
     let displays = macos::displays()?;
     let control = std::sync::Arc::new(crate::control::SharedControl::new(me, me));
     let mut injector = Injector::new();
@@ -890,6 +982,9 @@ async fn run_core_once(
     let _awake = macos::power::KeepAwake::new(c"Daisy is sharing input with a group")
         .inspect_err(|error| tracing::warn!(error = format!("{error:#}"), "could not keep this system awake"))
         .ok();
+    let (trusted, received) = mpsc::unbounded_channel();
+    let _trust = AbortOnDrop(tokio::spawn(handle_trust(hub.clone(), received)));
+    let _revocations = AbortOnDrop(tokio::spawn(send_revocations(hub.clone())));
     let (save, mut saving) = mpsc::unbounded_channel::<crate::peers::Arrangement>();
     let store = peers.clone();
     let _saver = AbortOnDrop(tokio::spawn(async move {
@@ -910,6 +1005,7 @@ async fn run_core_once(
         save,
         reports: reports.clone(),
         locked,
+        trust: trusted,
     };
     let run = share::run(
         group,
@@ -922,6 +1018,50 @@ async fn run_core_once(
         until,
     );
     run.await
+}
+
+/// What a member starting a link with `key` is told: every system this one
+/// trusts, introduced, and every revocation it knows.
+fn catch_up(config: &SessionConfig<'_>, key: PublicKey) -> Result<Vec<crate::protocol::Message>> {
+    let now = trust::now();
+    let mut messages = Vec::new();
+    for peer in config.peers.list(now)? {
+        if peer.key != key
+            && let Some(introduction) = introduction_of(config, peer.key)?
+        {
+            messages.push(introduction);
+        }
+    }
+    messages.extend(
+        config
+            .peers
+            .revocations()
+            .into_iter()
+            .map(|revocation| crate::protocol::Message::Revoke { revocation }),
+    );
+    Ok(messages)
+}
+
+/// This system's signed introduction of the peer with `key`, once its
+/// signing key is known.
+fn introduction_of(config: &SessionConfig<'_>, key: PublicKey) -> Result<Option<crate::protocol::Message>> {
+    let Some(peer) = config.peers.trusted(&key, trust::now())? else {
+        return Ok(None);
+    };
+    let Some(signing) = peer.signing else {
+        return Ok(None);
+    };
+    let introduction = crate::introduce::Introduction {
+        introducer: config.identity.public_key(),
+        newcomer: peer.key,
+        newcomer_signing: signing,
+        name: peer.name,
+        policy: peer.policy,
+        trusted_since: peer.paired_at,
+    };
+    Ok(Some(crate::protocol::Message::Introduce {
+        introduction: crate::introduce::Signed::<crate::introduce::Introduction>::new(config.signer, introduction)?,
+    }))
 }
 
 /// Sides chosen on this system during a session. Without a way to choose,
@@ -1043,6 +1183,7 @@ mod tests {
             clipboard,
             discoverable,
             arrangement: None,
+            signer: Box::leak(Box::new(crate::introduce::Signer::generate())),
         }
     }
 
@@ -1232,6 +1373,132 @@ mod tests {
         assert_eq!(*shared.lock().unwrap(), [2, 1]);
         let never = tokio::time::timeout(Duration::from_millis(20), running.next()).await;
         assert!(never.is_err(), "an empty set never finishes");
+    }
+
+    /// A member this system trusts, with the key it signs with.
+    fn member(here: &System, name: &str) -> (PublicKey, crate::introduce::Signer) {
+        let key = Identity::generate().unwrap().public_key();
+        let signer = crate::introduce::Signer::generate();
+        here.peers.pin(key, name, Policy::Forever, trust::now()).unwrap();
+        here.peers.set_signing(&key, signer.public()).unwrap();
+        (key, signer)
+    }
+
+    fn introduce(
+        signer: &crate::introduce::Signer,
+        introducer: PublicKey,
+        newcomer: PublicKey,
+    ) -> crate::protocol::Message {
+        let introduction = crate::introduce::Introduction {
+            introducer,
+            newcomer,
+            newcomer_signing: crate::introduce::Signer::generate().public(),
+            name: "Studio".to_owned(),
+            policy: Policy::Forever,
+            trusted_since: trust::now(),
+        };
+        crate::protocol::Message::Introduce {
+            introduction: crate::introduce::Signed::<crate::introduce::Introduction>::new(signer, introduction)
+                .unwrap(),
+        }
+    }
+
+    fn revoke(signer: &crate::introduce::Signer, by: PublicKey, revoked: PublicKey) -> crate::protocol::Message {
+        let revocation = crate::introduce::Revocation {
+            by,
+            revoked,
+            at: trust::now(),
+        };
+        crate::protocol::Message::Revoke {
+            revocation: crate::introduce::Signed::<crate::introduce::Revocation>::new(signer, revocation).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_member_introduces_a_system_with_its_own_signature_only() {
+        let here = system();
+        let clipboard = watch::channel(true).1;
+        let hub = Hub::new(&config(&here, &clipboard));
+        let (laptop, laptop_signs) = member(&here, "Laptop");
+        let (desk, desk_signs) = member(&here, "Desk");
+        let studio = Identity::generate().unwrap().public_key();
+        let trusted = |key| here.peers.trusted(&key, trust::now()).unwrap().is_some();
+
+        // signed by someone else
+        let forged = introduce(&crate::introduce::Signer::generate(), laptop, studio);
+        assert!(act_on_trust(&hub, laptop, forged).is_err());
+        // signed by the desk, but in the laptop's name
+        assert!(act_on_trust(&hub, desk, introduce(&desk_signs, laptop, studio)).is_err());
+        assert!(!trusted(studio));
+
+        act_on_trust(&hub, laptop, introduce(&laptop_signs, laptop, studio)).unwrap();
+        assert!(trusted(studio));
+        // a member never introduces this system to itself
+        act_on_trust(&hub, laptop, introduce(&laptop_signs, laptop, hub.me)).unwrap();
+        assert!(!trusted(hub.me));
+    }
+
+    #[tokio::test]
+    async fn a_revocation_passed_on_by_a_member_is_checked_against_its_maker() {
+        let here = system();
+        let clipboard = watch::channel(true).1;
+        let hub = Hub::new(&config(&here, &clipboard));
+        let (laptop, _) = member(&here, "Laptop");
+        let (desk, desk_signs) = member(&here, "Desk");
+        let (studio, _) = member(&here, "Studio");
+        let trusted = |key| here.peers.trusted(&key, trust::now()).unwrap().is_some();
+
+        // the laptop passes on the desk's revocation, but forged
+        let forged = revoke(&crate::introduce::Signer::generate(), desk, studio);
+        assert!(act_on_trust(&hub, laptop, forged).is_err());
+        assert!(trusted(studio));
+        // revoking this system is ignored here
+        act_on_trust(&hub, laptop, revoke(&desk_signs, desk, hub.me)).unwrap();
+        // the desk's own, passed on by the laptop
+        act_on_trust(&hub, laptop, revoke(&desk_signs, desk, studio)).unwrap();
+        assert!(!trusted(studio));
+        assert!(trusted(laptop) && trusted(desk));
+    }
+
+    #[test]
+    fn a_new_link_hears_of_every_trusted_system_and_revocation() {
+        let here = system();
+        let clipboard = watch::channel(true).1;
+        let config = config(&here, &clipboard);
+        let (laptop, laptop_signs) = member(&here, "Laptop");
+        let (desk, _) = member(&here, "Desk");
+        // a peer whose signing key is not known yet is not introduced
+        let quiet = Identity::generate().unwrap().public_key();
+        here.peers.pin(quiet, "Quiet", Policy::Forever, trust::now()).unwrap();
+        let gone = Identity::generate().unwrap().public_key();
+        let crate::protocol::Message::Revoke { revocation } = revoke(&laptop_signs, laptop, gone) else {
+            unreachable!()
+        };
+        here.peers.revoke(revocation, trust::now()).unwrap();
+
+        let messages = catch_up(&config, laptop).unwrap();
+        let introduced: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                crate::protocol::Message::Introduce { introduction } => Some(introduction.body.newcomer),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            introduced,
+            [desk],
+            "neither the link's own peer nor one without a signing key"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, crate::protocol::Message::Revoke { .. }))
+        );
+        for message in messages {
+            if let crate::protocol::Message::Introduce { introduction } = message {
+                introduction.verify(&config.signer.public(), trust::now()).unwrap();
+            }
+        }
     }
 
     #[tokio::test]

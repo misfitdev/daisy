@@ -9,6 +9,7 @@ pub mod discovery;
 pub mod identity;
 pub mod input;
 pub mod install;
+pub mod introduce;
 pub mod latency;
 pub mod launcher;
 pub mod layout;

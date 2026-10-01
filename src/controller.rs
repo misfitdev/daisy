@@ -512,6 +512,7 @@ async fn run_session(
     } = start;
     let result = async {
         let identity = Identity::load_or_create(&home.join("identity"))?;
+        let signer = crate::introduce::Signer::load_or_create(&home.join("signing"))?;
         let peers = PeerStore::open(&home)?;
         let choose_side = AtomicBool::new(side_chosen);
         let mut prompt = ControllerPrompt { events: events.clone() };
@@ -533,6 +534,7 @@ async fn run_session(
             clipboard: &clipboard,
             discoverable: &discoverable,
             arrangement: Some(&arrangement),
+            signer: &signer,
         };
         match settings.connection {
             Connection::Automatic => service::automatic(config, &mut prompt, &mut observer).await,
@@ -723,13 +725,19 @@ fn list_peers(home: &Path) -> Result<Vec<Peer>> {
     PeerStore::open(home)?.list(trust::now())
 }
 
+/// Forgets the peer `selector` names here and, through a signed
+/// revocation, across the group.
 fn forget_peer(home: &Path, selector: &str) -> Result<Vec<Peer>> {
     let store = PeerStore::open(home)?;
-    let forgotten = store.forget(&[selector.to_owned()], trust::now())?;
+    let now = trust::now();
+    let forgotten = store.forget(&[selector.to_owned()], now)?;
     if forgotten.removed == 0 {
         bail!("no paired peer matches {selector:?}");
     }
-    store.list(trust::now())
+    let me = Identity::load_or_create(&home.join("identity"))?.public_key();
+    let signer = crate::introduce::Signer::load_or_create(&home.join("signing"))?;
+    store.record_revocations(&signer, me, &forgotten.keys, now)?;
+    store.list(now)
 }
 
 fn set_trust(home: &Path, selector: &str, policy: Policy) -> Result<(String, Vec<Peer>)> {
@@ -872,6 +880,8 @@ mod tests {
             policy: Policy::IDLE,
             paired_at: 0,
             last_seen: 0,
+            signing: None,
+            introduced_by: None,
         };
         let list = nearby(found.clone(), &[peer]);
         assert_eq!(list[0].name.as_deref(), Some("Studio"));

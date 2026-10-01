@@ -93,6 +93,19 @@ pub enum Message {
     Locked {
         locked: bool,
     },
+    /// The key the sender signs introductions and revocations with, sent
+    /// once when a session starts.
+    SigningKey {
+        key: [u8; 32],
+    },
+    /// The sender trusts a system, and introduces it, signed.
+    Introduce {
+        introduction: crate::introduce::Signed<crate::introduce::Introduction>,
+    },
+    /// A member no longer trusts a system, signed by that member.
+    Revoke {
+        revocation: crate::introduce::Signed<crate::introduce::Revocation>,
+    },
 }
 
 /// A clipboard snapshot is its items, each a `Begin`, its `Chunk`s and an
@@ -339,6 +352,32 @@ mod tests {
         };
         assert_eq!(arrangement.encode().unwrap()[0], 14);
         assert_eq!(Message::Locked { locked: true }.encode().unwrap()[0], 15);
+        assert_eq!(Message::SigningKey { key: [0; 32] }.encode().unwrap()[0], 16);
+        let introduction = Message::Introduce {
+            introduction: crate::introduce::Signed {
+                body: crate::introduce::Introduction {
+                    introducer: key,
+                    newcomer: key,
+                    newcomer_signing: [0; 32],
+                    name: String::new(),
+                    policy: crate::trust::Policy::Forever,
+                    trusted_since: 0,
+                },
+                signature: vec![],
+            },
+        };
+        assert_eq!(introduction.encode().unwrap()[0], 17);
+        let revocation = Message::Revoke {
+            revocation: crate::introduce::Signed {
+                body: crate::introduce::Revocation {
+                    by: key,
+                    revoked: key,
+                    at: 0,
+                },
+                signature: vec![],
+            },
+        };
+        assert_eq!(revocation.encode().unwrap()[0], 18);
     }
 
     #[test]

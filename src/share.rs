@@ -82,6 +82,8 @@ pub struct Group {
     pub reports: std::sync::Arc<tokio::sync::watch::Sender<Reports>>,
     /// Whether this system's screen is locked, as it changes.
     pub locked: tokio::sync::watch::Receiver<bool>,
+    /// Introductions and revocations from members, with who sent each.
+    pub trust: mpsc::UnboundedSender<(PublicKey, Message)>,
 }
 
 /// Each peer's link, as a person sees it.
@@ -102,6 +104,8 @@ pub enum Membership<S> {
     Join(Joining<S>),
     /// Drop the link with this peer, as when its trust ends.
     Drop(PublicKey),
+    /// Send this to every member.
+    Send(Message),
 }
 
 /// Both sides capture physical input and either may take control. Generation
@@ -135,6 +139,7 @@ where
         save: mpsc::unbounded_channel().0,
         reports: std::sync::Arc::new(tokio::sync::watch::Sender::new(Reports::new())),
         locked: tokio::sync::watch::channel(false).1,
+        trust: mpsc::unbounded_channel().0,
     };
     let mut membership = membership;
     let result = run(
@@ -302,6 +307,7 @@ where
                     publish(&control, &links, &group.reports);
                 }
                 Membership::Drop(key) => ended.push((key, Err(anyhow::anyhow!("the link was dropped")))),
+                Membership::Send(message) => broadcast(&links, message, &mut ended),
             }
         }
         if !ended.is_empty() {
@@ -417,6 +423,9 @@ where
                             }
                         }
                         Message::Locked { locked } => link.locked = locked,
+                        message @ (Message::Introduce { .. } | Message::Revoke { .. }) => {
+                            let _ = group.trust.send((peer, message));
+                        }
                         Message::Arrangement { version, author, offsets } => {
                             if placement.adopt(version, author, &offsets) {
                                 rearranged = true;
@@ -1571,6 +1580,7 @@ mod tests {
             save: mpsc::unbounded_channel().0,
             reports: Arc::new(watch::Sender::new(Reports::new())),
             locked: watch::channel(false).1,
+            trust: mpsc::unbounded_channel().0,
         }
     }
 
