@@ -75,9 +75,8 @@ where
                     running.push(async move {
                         let mut shared = Shared(observer);
                         let result = answer(stream, config, hub, pairing, &mut prompt, &mut shared, busy).await;
-                        match result {
-                            Ok(peer) => shared.disconnected(&peer),
-                            Err(error) => shared.connection_failed(&address.to_string(), &error),
+                        if let Err(error) = result {
+                            shared.connection_failed(&address.to_string(), &error);
                         }
                         None
                     });
@@ -204,8 +203,8 @@ impl<O: ServiceObserver> ServiceObserver for Shared<'_, '_, O> {
     fn arranged(&mut self, layout: &share::Layout) {
         self.lock().arranged(layout);
     }
-    fn disconnected(&mut self, peer: &str) {
-        self.lock().disconnected(peer);
+    fn disconnected(&mut self, peer: &str, key: PublicKey) {
+        self.lock().disconnected(peer, key);
     }
     fn pairing_closed(&mut self) {
         self.lock().pairing_closed();
@@ -234,7 +233,8 @@ pub trait ServiceObserver {
     fn link(&mut self, _peer: &str, _key: PublicKey, _link: crate::control::Link) {}
     /// Where every member's displays now sit.
     fn arranged(&mut self, _layout: &share::Layout) {}
-    fn disconnected(&mut self, _peer: &str) {}
+    /// A link that `connected` reported ended.
+    fn disconnected(&mut self, _peer: &str, _key: PublicKey) {}
     fn pairing_closed(&mut self) {}
     fn connection_failed(&mut self, _address: &str, _error: &anyhow::Error) {}
 }
@@ -358,9 +358,8 @@ where
                 running.push(async move {
                     let mut shared = Shared(observer);
                     let was_open = pairing.lock().unwrap_or_else(|e| e.into_inner()).is_open();
-                    match answer(stream, config, hub, pairing, &mut prompt, &mut shared, busy).await {
-                        Ok(peer) => shared.disconnected(&peer),
-                        Err(error) => shared.connection_failed(&address.to_string(), &error),
+                    if let Err(error) = answer(stream, config, hub, pairing, &mut prompt, &mut shared, busy).await {
+                        shared.connection_failed(&address.to_string(), &error);
                     }
                     if was_open && !pairing.lock().unwrap_or_else(|e| e.into_inner()).is_open() {
                         shared.pairing_closed();
@@ -546,6 +545,7 @@ where
                 .agree_side(&channel.remote_key(), config.side, trust::now())?;
         }
         *expected = Some(channel.remote_key());
+        let channel_key = channel.remote_key();
         let started = tokio::time::Instant::now();
         let newly_paired = trust_status == Trust::NewlyPaired;
         let session = run_session(
@@ -559,7 +559,7 @@ where
         )
         .await;
         lasted = Some(started.elapsed());
-        observer.disconnected(&peer);
+        observer.disconnected(&peer, channel_key);
         session
     }
     .await;
@@ -609,6 +609,7 @@ where
     )
     .await;
     busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+    observer.disconnected(&peer, key);
     result?;
     Ok(peer)
 }
@@ -804,18 +805,37 @@ fn act_on_trust(hub: &Hub, from: PublicKey, message: crate::protocol::Message) -
 /// Sends every member each revocation made here while the group runs, as
 /// when someone forgets a system.
 async fn send_revocations(hub: Hub) {
-    let mut known = hub.peers.revocations().len();
+    let mut sent = Unsent::new(hub.peers.revocations());
     let mut every = tokio::time::interval(Duration::from_secs(2));
     loop {
         every.tick().await;
-        let revocations = hub.peers.revocations();
-        if revocations.len() < known {
-            known = revocations.len();
-        }
-        for revocation in revocations.into_iter().skip(known) {
-            known += 1;
+        for revocation in sent.new_ones(hub.peers.revocations()) {
             hub.send(crate::protocol::Message::Revoke { revocation });
         }
+    }
+}
+
+type Revocation = crate::introduce::Signed<crate::introduce::Revocation>;
+
+/// Revocations already sent, by what they say: the stored list is capped, so
+/// its length stops growing once full.
+struct Unsent(std::collections::HashSet<(PublicKey, PublicKey, trust::Timestamp)>);
+
+impl Unsent {
+    fn new(known: Vec<Revocation>) -> Self {
+        Self(known.iter().map(Self::identity).collect())
+    }
+
+    fn identity(revocation: &Revocation) -> (PublicKey, PublicKey, trust::Timestamp) {
+        (revocation.body.by, revocation.body.revoked, revocation.body.at)
+    }
+
+    /// The revocations in `known` not sent before.
+    fn new_ones(&mut self, known: Vec<Revocation>) -> Vec<Revocation> {
+        known
+            .into_iter()
+            .filter(|revocation| self.0.insert(Self::identity(revocation)))
+            .collect()
     }
 }
 
@@ -1513,6 +1533,30 @@ mod tests {
                 introduction.verify(&config.signer.public(), trust::now()).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn every_new_revocation_is_sent_once_even_when_the_list_is_full() {
+        let signer = crate::introduce::Signer::generate();
+        let by = Identity::generate().unwrap().public_key();
+        let revocation = |at| {
+            let crate::protocol::Message::Revoke { mut revocation } =
+                revoke(&signer, by, Identity::generate().unwrap().public_key())
+            else {
+                unreachable!()
+            };
+            revocation.body.at = at;
+            revocation
+        };
+        let full: Vec<_> = (0..256).map(revocation).collect();
+        let mut unsent = Unsent::new(full.clone());
+        assert!(unsent.new_ones(full.clone()).is_empty());
+        // the oldest falls off as a new one arrives; the count stays 256
+        let newer = revocation(999);
+        let mut now = full[1..].to_vec();
+        now.push(newer.clone());
+        assert_eq!(unsent.new_ones(now.clone()), [newer]);
+        assert!(unsent.new_ones(now).is_empty());
     }
 
     #[tokio::test]

@@ -17,6 +17,28 @@ pub const SNAP: f64 = 8.0;
 /// system's, so small gaps and corners still connect.
 pub const REACH: f64 = 40.0;
 
+/// The most displays a system's list may hold; macOS lists at most 16.
+pub const MAX_DISPLAYS: usize = 16;
+/// The largest display edge or coordinate accepted, in points.
+const MAX_EXTENT: f64 = 1_000_000.0;
+
+/// `displays` as a member reported them, if they could be real: at most
+/// `MAX_DISPLAYS`, each with a finite position and a positive, finite size.
+pub fn plausible(displays: Vec<Rect>) -> Option<Vec<Rect>> {
+    let sane = |value: f64| value.is_finite() && value.abs() <= MAX_EXTENT;
+    (!displays.is_empty()
+        && displays.len() <= MAX_DISPLAYS
+        && displays.iter().all(|display| {
+            sane(display.x)
+                && sane(display.y)
+                && sane(display.width)
+                && sane(display.height)
+                && display.width > 0.0
+                && display.height > 0.0
+        }))
+    .then_some(displays)
+}
+
 /// Where a system's displays sit in the group's space.
 pub type Offset = (f64, f64);
 
@@ -695,6 +717,25 @@ mod tests {
         // this system is never moved, and the same spot changes nothing
         assert!(!here.put(0, (500.0, 0.0), 4));
         assert!(!here.put(1, offset, 5));
+    }
+
+    #[test]
+    fn only_displays_that_could_be_real_are_accepted() {
+        assert_eq!(plausible(vec![LAPTOP, EXTERNAL]), Some(vec![LAPTOP, EXTERNAL]));
+        assert_eq!(plausible(vec![]), None);
+        assert_eq!(plausible(vec![LAPTOP; MAX_DISPLAYS + 1]), None);
+        for bad in [
+            Rect { width: 0.0, ..LAPTOP },
+            Rect { height: -1.0, ..LAPTOP },
+            Rect { x: f64::NAN, ..LAPTOP },
+            Rect {
+                width: f64::INFINITY,
+                ..LAPTOP
+            },
+            Rect { y: 1e12, ..LAPTOP },
+        ] {
+            assert_eq!(plausible(vec![LAPTOP, bad]), None, "{bad:?}");
+        }
     }
 
     #[test]

@@ -344,7 +344,7 @@ impl ServiceObserver for TerminalObserver {
         );
     }
 
-    fn disconnected(&mut self, peer: &str) {
+    fn disconnected(&mut self, peer: &str, _key: PublicKey) {
         println!("{peer} disconnected.");
     }
 

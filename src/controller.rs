@@ -605,7 +605,7 @@ struct ControllerObserver {
     home: PathBuf,
     waiting: Option<(u16, bool)>,
     /// Each running link's round trips, kept for `daisy stats`.
-    stats: std::collections::BTreeMap<String, crate::latency::LinkStats>,
+    stats: std::collections::BTreeMap<PublicKey, crate::latency::LinkStats>,
     /// The members with a running link, in the order they joined, and how
     /// many links each has: a second connection briefly overlaps the first.
     linked: Vec<(String, PublicKey, usize)>,
@@ -666,10 +666,10 @@ impl ServiceObserver for ControllerObserver {
         let now = trust::now();
         let fresh = self
             .stats
-            .get(peer)
+            .get(&key)
             .is_some_and(|kept| kept.stats == link.stats || kept.updated == now);
         self.stats.insert(
-            peer.to_owned(),
+            key,
             crate::latency::LinkStats {
                 peer: peer.to_owned(),
                 updated: now,
@@ -694,14 +694,14 @@ impl ServiceObserver for ControllerObserver {
         let _ = self.events.send(Event::Arranged(layout.clone()));
     }
 
-    fn disconnected(&mut self, peer: &str) {
-        if self.stats.remove(peer).is_some() {
-            self.save_stats();
-        }
-        if let Some(index) = self.linked.iter().position(|(name, _, _)| name == peer) {
+    fn disconnected(&mut self, _peer: &str, key: PublicKey) {
+        if let Some(index) = self.linked.iter().position(|(_, linked, _)| *linked == key) {
             self.linked[index].2 -= 1;
             if self.linked[index].2 == 0 {
                 self.linked.remove(index);
+                if self.stats.remove(&key).is_some() {
+                    self.save_stats();
+                }
             }
         }
         if !self.linked.is_empty() {
@@ -909,11 +909,19 @@ mod tests {
         observer.connected("Desk", desk, Side::Left);
         // a second connection from the studio overlaps the first, which then ends
         observer.connected("Studio", studio, Side::Right);
-        observer.disconnected("Studio");
+        observer.disconnected("Studio", studio);
         let last = std::iter::from_fn(|| received.try_recv().ok()).last();
         assert!(matches!(&last, Some(Event::Status(Status::Connected { peers })) if peers.len() == 2));
-        observer.disconnected("Studio");
-        observer.disconnected("Desk");
+        observer.disconnected("Studio", studio);
+        // two systems can share a name; each is still its own member
+        let twin = Identity::generate().unwrap().public_key();
+        observer.connected("Desk", twin, Side::Left);
+        observer.disconnected("Desk", twin);
+        let last = std::iter::from_fn(|| received.try_recv().ok()).last();
+        assert!(
+            matches!(&last, Some(Event::Status(Status::Connected { peers })) if peers == &[("Desk".to_owned(), desk)])
+        );
+        observer.disconnected("Desk", desk);
         let last = std::iter::from_fn(|| received.try_recv().ok()).last();
         assert!(matches!(last, Some(Event::Status(Status::Waiting { .. }))));
     }
@@ -1071,7 +1079,7 @@ mod tests {
             Event::Status(Status::Waiting { pairing: false, .. })
         ));
 
-        observer.disconnected("Desk");
+        observer.disconnected("Desk", key);
         assert!(matches!(
             received.recv().unwrap(),
             Event::Status(Status::Waiting { pairing: false, .. })

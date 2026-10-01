@@ -425,6 +425,8 @@ where
                             }
                         }
                         Message::Displays { displays } => {
+                            let displays = crate::layout::plausible(displays)
+                                .context("the peer sent displays that cannot be real")?;
                             if placement.show(peer, displays) {
                                 rearranged = true;
                             }

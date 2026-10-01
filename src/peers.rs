@@ -154,11 +154,13 @@ impl PeerStore {
                 return false;
             };
             let policy = crate::introduce::stricter(introducer.policy, introduction.policy);
+            // trust runs from when the introducer began it, so arriving late
+            // never stretches it past the introducer's own
             peers.push(Peer {
                 name,
                 key: introduction.newcomer,
                 policy,
-                paired_at: now,
+                paired_at: introduction.trusted_since.min(now),
                 last_seen: now,
                 side: crate::input::Side::Right,
                 side_chosen: 0,
@@ -222,7 +224,7 @@ impl PeerStore {
         if superseded {
             return Ok(None);
         }
-        let revoked = revocation.body.revoked;
+        let (revoked, at) = (revocation.body.revoked, revocation.body.at);
         known.push(revocation);
         if known.len() > MAX_REVOCATIONS {
             known.drain(..known.len() - MAX_REVOCATIONS);
@@ -237,7 +239,10 @@ impl PeerStore {
         fs::write(&temporary, toml::to_string(&file)?).with_context(|| format!("creating {}", temporary.display()))?;
         fs::rename(&temporary, &self.revocations).with_context(|| format!("saving {}", self.revocations.display()))?;
         let before: Vec<PublicKey> = self.read()?.iter().map(|peer| peer.key).collect();
-        let after = self.change_locked(now, |peers| peers.retain(|peer| peer.key != revoked))?;
+        // trust given after the revocation, by pairing again, stands
+        let after = self.change_locked(now, |peers| {
+            peers.retain(|peer| peer.key != revoked || peer.paired_at > at)
+        })?;
         Ok(Some(
             before
                 .into_iter()
@@ -733,6 +738,36 @@ mod tests {
         // but a fresh pairing after the revocation counts
         assert!(store.introduce(&introduction(1, 2, NOW + 30), NOW + 30).unwrap());
         assert_eq!(store.revocations().len(), 1);
+    }
+
+    #[test]
+    fn introduced_trust_runs_from_when_the_introducer_began_it() {
+        let (store, _dir) = store();
+        store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
+        let mut late = introduction(1, 2, NOW);
+        late.policy = Policy::Days(7);
+        // heard six days later, while catching up
+        let heard = NOW + 6 * DAY;
+        assert!(store.introduce(&late, heard).unwrap());
+        assert!(store.trusted(&key(2), NOW + 7 * DAY - 1).unwrap().is_some());
+        assert!(store.trusted(&key(2), NOW + 7 * DAY).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_old_revocation_never_undoes_a_later_pairing() {
+        let (store, _dir) = store();
+        store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
+        // forgotten at NOW + 10, paired again at NOW + 20 and introduced so
+        store.introduce(&introduction(1, 2, NOW + 20), NOW + 30).unwrap();
+        assert_eq!(
+            store.revoke(revocation(1, 2, NOW + 10), NOW + 30).unwrap(),
+            Some(vec![])
+        );
+        assert!(store.trusted(&key(2), NOW + 30).unwrap().is_some());
+        // paired directly after the revocation, too
+        store.pin(key(3), "desk", Policy::Forever, NOW + 40).unwrap();
+        store.revoke(revocation(1, 3, NOW + 35), NOW + 40).unwrap();
+        assert!(store.trusted(&key(3), NOW + 40).unwrap().is_some());
     }
 
     #[test]
