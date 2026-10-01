@@ -135,7 +135,8 @@ unsafe extern "C" {
     pub fn CGWarpMouseCursorPosition(point: CGPoint) -> i32;
     pub fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
 
-    pub fn CGGetActiveDisplayList(max: u32, displays: *mut CGDirectDisplayID, count: *mut u32) -> i32;
+    pub fn CGGetOnlineDisplayList(max: u32, displays: *mut CGDirectDisplayID, count: *mut u32) -> i32;
+    pub fn CGDisplayMirrorsDisplay(display: CGDirectDisplayID) -> CGDirectDisplayID;
     pub fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
     pub fn CGMainDisplayID() -> CGDirectDisplayID;
     pub fn CGDisplayHideCursor(display: CGDirectDisplayID) -> i32;

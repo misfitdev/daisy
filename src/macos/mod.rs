@@ -37,19 +37,23 @@ pub(crate) fn set_cursor_in_background() {
     }
 }
 
-/// Every active display, in macOS global coordinates.
+/// Every display, in macOS global coordinates, including one that is
+/// asleep, which the active list leaves out. A mirror is left out: it
+/// shows the same place as the display it mirrors.
 pub fn displays() -> Result<Vec<Rect>> {
     const MAX_DISPLAYS: usize = 16;
     let mut displays = [0; MAX_DISPLAYS];
     let mut count = 0;
     // SAFETY: the buffer holds MAX_DISPLAYS entries, and count reports how many were written
-    let error = unsafe { ffi::CGGetActiveDisplayList(MAX_DISPLAYS as u32, displays.as_mut_ptr(), &mut count) };
+    let error = unsafe { ffi::CGGetOnlineDisplayList(MAX_DISPLAYS as u32, displays.as_mut_ptr(), &mut count) };
     if error != 0 || count == 0 {
         bail!("could not list displays (CoreGraphics error {error})");
     }
     Ok(displays[..count as usize]
         .iter()
-        // SAFETY: each id came from CGGetActiveDisplayList
+        // SAFETY: each id came from CGGetOnlineDisplayList
+        .filter(|&&display| unsafe { ffi::CGDisplayMirrorsDisplay(display) } == 0)
+        // SAFETY: as above
         .map(|&display| unsafe { ffi::CGDisplayBounds(display) })
         .map(|rect| Rect {
             x: rect.origin.x,
