@@ -7,6 +7,10 @@ description = "Share one keyboard, mouse and trackpad swipes between macOS syste
 license = "MIT OR Apache-2.0"
 publish = false
 
+[[test]]
+name = "menu"
+harness = false
+
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }

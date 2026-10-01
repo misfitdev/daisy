@@ -45,29 +45,30 @@ Delete the local `.p12` and `.p8` after the secrets are stored.
    ```
 
 3. Tag and push, for example `git tag v0.1.0 && git push origin v0.1.0`. The tag must match `Cargo.toml` or the workflow stops.
-4. The workflow runs `just check`, builds `Daisy.app`, signs it with Developer ID, notarizes and staples it, and creates the zip. It records a GitHub artifact attestation, generates SLSA Build Level 3 provenance through the OpenSSF generator, and publishes a GitHub release with notes since the previous tag.
+4. The workflow runs `just check`, builds `Daisy.app`, signs it with Developer ID, notarizes and staples it, and creates the zip and a DMG that is signed, notarized and stapled the same way. It records a GitHub artifact attestation, generates SLSA Build Level 3 provenance through the OpenSSF generator, and publishes a GitHub release with notes since the previous tag.
 
 Releases are published as prereleases while Daisy is in beta.
 
 ## Verifying a release
 
-Either command proves that the zip was built by this repository's release workflow:
+Either command proves that a release file was built by this repository's release workflow:
 
 ```bash
-gh attestation verify Daisy-0.1.0-macos-arm64.zip --repo misfitdev/daisy
+gh attestation verify Daisy-0.1.0-macos-arm64.dmg --repo misfitdev/daisy
 
-slsa-verifier verify-artifact Daisy-0.1.0-macos-arm64.zip \
-  --provenance-path Daisy-0.1.0-macos-arm64.zip.intoto.jsonl \
+slsa-verifier verify-artifact Daisy-0.1.0-macos-arm64.dmg \
+  --provenance-path Daisy-0.1.0-macos-arm64.dmg.intoto.jsonl \
   --source-uri github.com/misfitdev/daisy --source-tag v0.1.0
 ```
 
-To verify Apple's notarization after unzipping:
+To verify Apple's notarization of the DMG, and of the app inside it or the unzipped app:
 
 ```bash
+spctl --assess --type open --context context:primary-signature -vv Daisy-0.1.0-macos-arm64.dmg
 spctl --assess --type execute -vv Daisy.app
 ```
 
-It should report `source=Notarized Developer ID`.
+Both should report `source=Notarized Developer ID`.
 
 ## Release notes
 

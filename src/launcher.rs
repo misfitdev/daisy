@@ -92,7 +92,7 @@ fn terminal() -> Option<PathBuf> {
     }
 }
 
-fn process_exists(pid: c_int) -> bool {
+pub(crate) fn process_exists(pid: c_int) -> bool {
     // SAFETY: signal 0 checks for the process without sending anything
     let result = unsafe { kill(pid, 0) };
     // EPERM also means it exists; only ESRCH means it is gone

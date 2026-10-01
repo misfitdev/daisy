@@ -42,12 +42,12 @@ Pairing mode accepts at most five unknown-key attempts in a ten-minute window an
 
 Trust is not forever by default. Each system keeps its own policy for every peer it trusts:
 
-- **Idle**, the default: trust ends after 96 hours without an authenticated session. A running session renews it.
-- **A deadline**: N days from pairing. Connecting does not extend it, and a session still running at the deadline ends.
+- **Idle**, the default: trust ends after a chosen number of hours or days without an authenticated session, 96 hours unless changed. A running session renews it.
+- **A deadline**: N days, set only from the command line. Connecting does not extend it, and a session still running at the deadline ends.
 - **Once**: trust ends with the session. Only after an accidental drop—silence or network error, not deliberate close—may the same key reconnect without a code, for at most 60 seconds.
 - **Forever**: trust lasts until explicitly forgotten. It must be chosen and is always displayed as such.
 
-Each system enforces its own policy on its own clock. A session starts only while both peers trust each other, so neither can extend the other's trust by claiming that it still trusts.
+Each system chooses the policy when pairing completes. Changing a policy restarts it from that moment, as if the peer had just paired. Each system enforces its own policy on its own clock. A session starts only while both peers trust each other, so neither can extend the other's trust by claiming that it still trusts.
 
 Expired trust is removed from the peer file. The menu-bar app can forget a peer and aborts its active session task immediately; the peer-file watcher remains the backstop for changes made by another process and reacts within one second. The optional CLI provides `daisy forget` and `daisy rotate-key` for bulk revocation and identity rotation.
 
@@ -83,4 +83,6 @@ Paired public keys and trust policies live in `peers.toml` beside it. Every upda
 
 ## Release integrity
 
-Releases are built only by the release workflow from a tagged commit, signed with Developer ID and notarized by Apple. Each zip carries SLSA Build Level 3 provenance and a GitHub artifact attestation. [releasing.md](releasing.md) explains how to verify both provenance and notarization.
+Releases are built only by the release workflow from a tagged commit, signed with Developer ID and notarized by Apple. The DMG and the app inside it are both notarized and stapled. Each DMG and zip carries SLSA Build Level 3 provenance and a GitHub artifact attestation. [releasing.md](releasing.md) explains how to verify both provenance and notarization.
+
+When Daisy moves itself to Applications, Gatekeeper has already approved the running copy. Daisy copies that bundle with `ditto`, preserving its signature, and removes the quarantine attribute from the copy only, so the copy opens without App Translocation. Any copy it replaces goes to the Trash.

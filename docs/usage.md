@@ -9,30 +9,37 @@ Daisy shares one system's keyboard, mouse and supported trackpad gestures with a
 - TCP reachability between the systems. Daisy listens on port 24850 by default.
 - macOS 27 on the system whose trackpad swipes should cross. Keyboard and mouse sharing works on macOS 26.
 
-Install the release in `/Applications` and open `Daisy.app`. Daisy lives in the menu bar. It opens the setup window automatically the first time; afterward, choose **Open Daisy…** from the menu-bar flower.
+Open the release DMG and drag Daisy to Applications. Opened from anywhere else after downloading, Daisy offers to move itself to Applications, replacing an older copy there and keeping its settings and paired peers, then reopens from there.
+
+Daisy lives in the menu bar. While Accessibility or Input Monitoring is missing, it opens a walkthrough that asks for each in turn, opens the matching System Settings pane and moves on once it is switched on. macOS can apply Input Monitoring only after Daisy reopens; the walkthrough offers **Reopen Daisy** when that is needed, then continues to pairing. Afterward, choose **Open Daisy…** from the menu-bar flower.
+
+Command-W or Escape closes a Daisy window or sheet. Command-Q also closes Daisy's windows and leaves sharing running; turn on **⌘Q quits Daisy** in the Daisy window to make it quit instead. **Quit Daisy** in the menu-bar flower always quits.
 
 ## Pair two systems
 
-On both systems:
-1. Choose the screen edge where the peer sits.
-2. Choose a trust policy, or leave **Until 4 days inactive**.
-3. Click **Pair a New Peer**.
+Click **Pair a New Peer…** on both systems. Nearby systems find each other automatically over Bonjour. The connection opener is chosen deterministically; you do not choose a network or input role.
 
-Nearby systems find each other automatically. The connection opener is chosen deterministically; you do not choose a network or input role. One system shows a six-digit code. Enter it on the other. The code is used directly as SPAKE2 input; do not compare codes by eye.
+One system shows a six-digit code. Enter it on the other. The code is used directly as SPAKE2 input; do not compare codes by eye. Pairing closes after the first success, and an unknown peer is limited to five unknown-key attempts in ten minutes.
 
-Pairing closes after the first successful unknown peer and is limited to five unknown-key attempts in ten minutes. For a network without Bonjour, enter the peer's local name or IP address on one system and leave the address empty on the other. The **Nearby** menu can also select a particular peer.
+Once paired, each system asks how long to trust the other. Its screen then appears beside this one at the top of the window.
+
+For a network without Bonjour, click **Advanced…** and enter the peer's local name or IP address on one system, leaving the address empty on the other. The **Nearby** menu there can also pick a particular peer.
 
 ## Start and stop sharing
 
-Click **Start Sharing** on both systems, or choose **Start** from the menu-bar flower. Nearby paired peers advertise and find each other automatically, repeating the encrypted handshake and checking trust after a disconnect. The lower public key opens the connection; the other listens. Both can supply input regardless of which opens the connection.
+Click **Start Sharing** on both systems, or choose **Start Sharing** from the menu-bar flower. Nearby paired peers advertise and find each other automatically, repeating the encrypted handshake and checking trust after a disconnect. The lower public key opens the connection; the other listens. Both can supply input regardless of which opens the connection.
 
-An optional address connects directly and is useful when Bonjour cannot reach the peer. When a paired peer is selected from **Nearby**, Daisy checks its pinned key and discovers its current address on reconnect. Direct connections back off after an established session drops; the automatic nearby workflow continues looking for a paired peer.
+An address under **Advanced…** connects directly, which is useful when Bonjour cannot reach the peer. When a paired peer is picked from **Nearby**, Daisy checks its pinned key and discovers its current address on reconnect. Direct connections back off after an established session drops; the automatic nearby workflow continues looking for the paired peer.
 
-Choose **Stop** to end sharing. Trust revocation also ends the session.
+Choose **Stop Sharing** to end sharing. Trust revocation also ends the session.
+
+## Arrange the screens
+
+The top of the window shows this system's screen and, while connected, the peer's beside it, as Displays shows monitors. Drag the peer's screen to another side, or select it and use the arrow keys. The change applies on both systems at once and is kept for the next connection; when both systems change it, the later choice wins.
 
 ## Move control
 
-Push the pointer through the configured shared edge to use the peer. Push it back through the corresponding edge to return. Using either system's own keyboard or trackpad immediately takes control there and releases remote held input; momentum scrolling after a trackpad flick does not. A 150 ms settle window limits repeated claims during simultaneous use; local input always stays local during that window. The screen arrangement stays the same when control changes.
+Push the pointer through the configured shared edge to use the peer. Push it back through the corresponding edge to return. Using either system's own keyboard or trackpad immediately takes control there and releases remote held input; momentum scrolling after a trackpad flick does not, and coasts only on the system where the flick began. A 150 ms settle window limits repeated claims during simultaneous use; local input always stays local during that window. The screen arrangement stays the same when control changes.
 
 Control never crosses while a mouse button is held. Control-Option-Command-Escape immediately returns control to the system you are at. Disconnect, three seconds of silence, trust revocation or local queue overload also end remote control and release held input.
 
@@ -53,34 +60,31 @@ When control moves, the clipboard goes with it: the system giving up control sen
 - Nothing is sent while control stays on one system, and a copy that has already crossed is not sent again.
 - A large image is sent behind input, so the pointer never waits for it.
 
-Turn it off with **Share Clipboard** in the menu-bar flower. A system with it off neither sends its clipboard nor accepts one. From the command line, add `--no-clipboard` to `listen` or `connect`.
+Turn it off with **Share clipboard when control moves** in the Daisy window. A system with it off neither sends its clipboard nor accepts one. From the command line, add `--no-clipboard` to `listen` or `connect`.
 
 ## Discovery
 
-Each system advertises itself on the local network with Bonjour. The advertisement uses a random name and carries neither the system's name nor its key: only a paired peer can recognise it, and a new advertisement cannot be linked to the last. To stop advertising, turn off **Discoverable on This Network** in the menu-bar flower, or add `--no-discovery` to `listen`. Connecting by name or address keeps working either way, including across networks Bonjour does not reach.
+Each system advertises itself on the local network with Bonjour. The advertisement uses a random name and carries neither the system's name nor its key: only a paired peer can recognise it, and a new advertisement cannot be linked to the last. To stop advertising, turn off **Discoverable on this network** under **Advanced…**, or add `--no-discovery` to `listen`. Connecting by name or address keeps working either way, including across networks Bonjour does not reach.
 
 ## Permissions
 
-The setup window reports Accessibility and Input Monitoring separately. Choose the corresponding **Grant…** button when either is missing, then finish the change in **System Settings → Privacy & Security**.
-
-Grant access to `Daisy.app`, not only to Terminal. Permission prompts and grants belong to the app's signed identity.
+The **Permissions** group lists Accessibility and Input Monitoring. **Set Up…** beside a missing one opens the walkthrough, which finishes the change in **System Settings → Privacy & Security**. Grant access to `Daisy.app`, not only to Terminal. Permission prompts and grants belong to the app's signed identity. **Reset…** under **Advanced…** clears Daisy's entries when System Settings shows them on but they do not apply.
 
 ## Trust and paired peers
 
-Open **Paired Peers** from the menu-bar flower to inspect a fingerprint, change a trust policy or forget a peer.
+Each system chooses how long to trust a peer when they pair. The **Peers** group lists each paired peer with its fingerprint; click its trust to change it, or **Forget…**. Changing trust starts it over from that moment.
 
-| Policy | Behavior |
+| Choice | Behavior |
 |---|---|
-| Until 4 days inactive | Expires after 96 hours without a connection; a live connection renews it |
-| 30 days | Expires 30 days after pairing; sessions do not extend it |
+| Until unused for 4 days (the default; any number of hours or days) | Expires after that long without a connection; a live connection renews it |
 | This session | Expires when the session ends; an accidental drop gets a 60-second reconnect grace period |
 | Until I forget | Does not expire on its own |
 
-Both systems enforce their own policy, so the stricter policy wins. When trust expires, that peer is forgotten and the pair must use a new code. **Forget** ends an active session immediately.
+Both systems enforce their own choice, so the stricter one wins. When trust expires, that peer is forgotten and the pair must use a new code. **Forget** ends an active session immediately.
 
 ## Launch at login
 
-Choose **Open at Login** in the menu. macOS may require approval in **System Settings → General → Login Items**; Daisy reports that recovery step if registration needs approval.
+Turn on **Open at login** in the Daisy window. macOS may require approval in **System Settings → General → Login Items**; Daisy reports that recovery step if registration needs approval.
 
 ## Optional command line
 
@@ -102,7 +106,7 @@ daisy connect peer.local:24851 --pair --side right
 
 # Manage trust and identity.
 daisy peers
-daisy trust <name-or-fingerprint> 30d
+daisy trust <name-or-fingerprint> idle:12h   # or idle (4 days), idle:<days>d, <days>d, once, forever
 daisy forget <name-or-fingerprint>...
 daisy forget --all
 daisy rotate-key

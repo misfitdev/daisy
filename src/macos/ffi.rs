@@ -66,6 +66,7 @@ pub const kCGEventSourceUserData: u32 = 42;
 pub const DAISY_EVENT_MARKER: i64 = 0x0044_4149_5359;
 pub const kCGScrollWheelEventPointDeltaAxis1: u32 = 96;
 pub const kCGScrollWheelEventPointDeltaAxis2: u32 = 97;
+pub const kCGScrollWheelEventScrollPhase: u32 = 99;
 pub const kCGScrollWheelEventMomentumPhase: u32 = 123;
 
 // CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions
@@ -73,6 +74,7 @@ pub const kCGHIDEventTap: u32 = 0;
 pub const kCGSessionEventTap: u32 = 1;
 pub const kCGHeadInsertEventTap: u32 = 0;
 pub const kCGEventTapOptionDefault: u32 = 0;
+pub const kCGEventTapOptionListenOnly: u32 = 1;
 
 // CGEventSourceStateID
 pub const kCGEventSourceStateHIDSystemState: i32 = 1;

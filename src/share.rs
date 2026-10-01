@@ -28,12 +28,38 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(3);
 pub trait Pointer {
     fn leave(&mut self, along: Along);
     fn yield_control(&mut self) {}
+    /// The peer now sits at `side`.
+    fn arrange(&mut self, _side: Side) {}
 }
 
 pub struct SharedLayout {
     pub screen: Rect,
     pub side: Side,
     pub control: std::sync::Arc<crate::control::SharedControl>,
+    pub arranging: Option<Arranging>,
+}
+
+/// Rearranging the two screens while the session runs.
+pub struct Arranging {
+    /// The relation both systems agreed on, and when it was chosen.
+    pub agreed: (Side, crate::trust::Timestamp),
+    pub initiator: bool,
+    /// Sides chosen on this system during the session.
+    pub choices: tokio::sync::watch::Receiver<Option<Side>>,
+    /// Each newly agreed relation, to store and show.
+    pub agreed_tx: mpsc::UnboundedSender<(Side, crate::trust::Timestamp)>,
+}
+
+impl Arranging {
+    async fn choice(arranging: &mut Option<Arranging>) -> Option<Side> {
+        let Some(arranging) = arranging else {
+            return std::future::pending().await;
+        };
+        if arranging.choices.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+        *arranging.choices.borrow_and_update()
+    }
 }
 
 /// Both sides capture physical input and either may take control. Generation
@@ -55,6 +81,7 @@ where
     let mut incoming = spawn_receiver(receiver);
     let mut outgoing = spawn_sender(sender);
     let mut target = Target::new(layout.screen, layout.side.opposite());
+    let mut arranging = layout.arranging;
     let release = ReleaseOnDrop {
         target: &mut target,
         injector,
@@ -110,6 +137,17 @@ where
                         }
                     }
                     Message::Clipboard { part } => receive_clipboard(part, &outgoing, sharing)?,
+                    Message::Layout { side, chosen } => {
+                        if let Some(arranging) = arranging.as_mut() {
+                            let agreed = crate::control::agreed_side(arranging.initiator, arranging.agreed, (side, chosen));
+                            if agreed != arranging.agreed {
+                                arranging.agreed = agreed;
+                                release.target.arrange(agreed.0);
+                                pointer.arrange(agreed.0);
+                                let _ = arranging.agreed_tx.send(agreed);
+                            }
+                        }
+                    }
                     Message::ControlClaim { generation } => {
                         let mut state = layout.control.state.lock().unwrap_or_else(|e| e.into_inner());
                         let changed = state.claim(generation);
@@ -158,6 +196,17 @@ where
                         if crossing { outgoing.send_clipboard(sharing.crossing()); }
                     }
                     other => bail!("unexpected message in shared session: {other:?}"),
+                }
+            }
+            choice = Arranging::choice(&mut arranging) => {
+                if let (Some(side), Some(arranging)) = (choice, arranging.as_mut())
+                    && side != arranging.agreed.0
+                {
+                    arranging.agreed = (side, crate::trust::now());
+                    outgoing.send(Message::Layout { side, chosen: arranging.agreed.1 })?;
+                    release.target.arrange(side);
+                    pointer.arrange(side);
+                    let _ = arranging.agreed_tx.send(arranging.agreed);
                 }
             }
             error = &mut until => return Err(error),
@@ -542,6 +591,7 @@ mod tests {
                 screen: SCREEN,
                 side: Side::Left,
                 control: control.clone(),
+                arranging: None,
             },
             input,
             &mut pointer,
@@ -580,6 +630,7 @@ mod tests {
                 screen: SCREEN,
                 side: Side::Left,
                 control: control.clone(),
+                arranging: None,
             },
             input,
             &mut pointer,
@@ -630,6 +681,7 @@ mod tests {
                 screen: SCREEN,
                 side: Side::Left,
                 control: control.clone(),
+                arranging: None,
             },
             input,
             &mut pointer,
@@ -737,6 +789,7 @@ mod tests {
                 screen: SCREEN,
                 side: Side::Left,
                 control: control.clone(),
+                arranging: None,
             },
             input,
             &mut pointer,
@@ -768,11 +821,120 @@ mod tests {
         )));
     }
 
+    #[derive(Default)]
+    struct Arranged(Vec<Side>);
+
+    impl Pointer for Arranged {
+        fn leave(&mut self, _along: Along) {}
+        fn arrange(&mut self, side: Side) {
+            self.0.push(side);
+        }
+    }
+
+    /// Runs a session that agreed the peer sits on the left, chosen at time
+    /// 100, against `script`, which plays the peer.
+    async fn arranging<F: Future>(
+        initiator: bool,
+        script: impl FnOnce(Channel<DuplexStream>, tokio::sync::watch::Sender<Option<Side>>) -> F,
+    ) -> (F::Output, Vec<(Side, crate::trust::Timestamp)>, Vec<Side>) {
+        let (local, peer) = channels().await;
+        let control = Arc::new(SharedControl::new(initiator));
+        let (_capture, input) = mpsc::channel(16);
+        let (choose, choices) = tokio::sync::watch::channel(None);
+        let (agreed_tx, mut agreed_rx) = mpsc::unbounded_channel();
+        let mut injector = Recorded::default();
+        let mut pointer = Arranged::default();
+        let mut board = no_clipboard();
+        let layout = SharedLayout {
+            arranging: Some(Arranging {
+                agreed: (Side::Left, 100),
+                initiator,
+                choices,
+                agreed_tx,
+            }),
+            ..layout(&control)
+        };
+        let session = together(local, layout, input, &mut pointer, &mut injector, &mut board, pending());
+        let played = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                played = script(peer, choose) => played,
+                result = session => panic!("session ended first: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        let mut agreed = Vec::new();
+        while let Ok(next) = agreed_rx.try_recv() {
+            agreed.push(next);
+        }
+        (played, agreed, pointer.0)
+    }
+
+    /// Waits until the session has handled everything sent before.
+    async fn settle(peer: &mut Channel<DuplexStream>, nonce: u64) {
+        peer.send(&Message::Ping { nonce }).await.unwrap();
+        while peer.recv().await.unwrap() != (Message::Pong { nonce }) {}
+    }
+
+    #[tokio::test]
+    async fn a_later_arrangement_from_the_peer_moves_this_screen() {
+        let ((), agreed, arranged) = arranging(true, |mut peer, _choose| async move {
+            // the peer now places this system on its left, so the peer sits on the right
+            peer.send(&Message::Layout {
+                side: Side::Left,
+                chosen: 200,
+            })
+            .await
+            .unwrap();
+            settle(&mut peer, 1).await;
+            // an older choice does not undo it
+            peer.send(&Message::Layout {
+                side: Side::Below,
+                chosen: 150,
+            })
+            .await
+            .unwrap();
+            settle(&mut peer, 2).await;
+        })
+        .await;
+        assert_eq!(agreed, [(Side::Right, 200)]);
+        assert_eq!(arranged, [Side::Right]);
+    }
+
+    #[tokio::test]
+    async fn a_side_chosen_here_is_sent_to_the_peer() {
+        let (sent, agreed, arranged) = arranging(false, |mut peer, choose| async move {
+            choose.send_replace(Some(Side::Above));
+            loop {
+                if let Message::Layout { side, chosen } = peer.recv().await.unwrap() {
+                    break (side, chosen);
+                }
+            }
+        })
+        .await;
+        assert_eq!(sent.0, Side::Above);
+        assert!(sent.1 > 100);
+        assert_eq!(agreed, [sent]);
+        assert_eq!(arranged, [Side::Above]);
+    }
+
+    #[tokio::test]
+    async fn choosing_the_current_side_changes_nothing() {
+        let ((), agreed, arranged) = arranging(false, |mut peer, choose| async move {
+            choose.send_replace(Some(Side::Left));
+            settle(&mut peer, 1).await;
+        })
+        .await;
+        assert!(agreed.is_empty());
+        assert!(arranged.is_empty());
+    }
+
     fn layout(control: &Arc<SharedControl>) -> SharedLayout {
         SharedLayout {
             screen: SCREEN,
             side: Side::Left,
             control: control.clone(),
+            arranging: None,
         }
     }
 

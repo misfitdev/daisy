@@ -9,7 +9,7 @@ Daisy needs no account and no cloud service. Connections run directly over your 
 Daisy is in beta. It supports:
 
 - Pointer movement, clicks, drags and typing across a shared screen edge
-- Scrolling, and swipes for Spaces, Mission Control and app windows
+- Scrolling, with trackpad momentum, and swipes for Spaces, Mission Control and app windows
 - Clipboard sharing for text, rich text and images
 - Automatic reconnection after sleep or a network change
 - Connection status that names the peer and shows its round-trip latency
@@ -23,18 +23,18 @@ Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes thro
 
 ## Getting Started
 
-1. Download the latest release from [Releases](https://github.com/misfitdev/daisy/releases), unzip it and move **Daisy.app** to Applications. Install it on both systems.
-2. Open Daisy from the menu bar and grant Accessibility and Input Monitoring when prompted. macOS requires both before Daisy can read and send input.
+1. Download the DMG from the latest release on [Releases](https://github.com/misfitdev/daisy/releases), open it and drag **Daisy** to Applications. Install it on both systems.
+2. Open Daisy. It walks through allowing Accessibility and Input Monitoring, which macOS requires before Daisy can read and send input.
 3. Click **Pair a New Peer** on both systems. Nearby systems find each other automatically. Enter the six-digit code shown on one into the other.
-   - Choose the screen edge where the peer sits. Daisy agrees on one arrangement for the pair.
-   - For networks without Bonjour, enter the peer's address on one system and leave it empty on the other.
+   - Once connected, drag the peer's screen to the side where it sits, as in Displays. Daisy agrees on one arrangement for the pair.
+   - For networks without Bonjour, click **Advanced…** and enter the peer's address on one system, leaving it empty on the other.
 4. Click **Start Sharing** on both, then move the pointer through the chosen edge. The menu bar flower shows a yellow center while connected.
 
 After pairing, they recognize each other; a new code is needed only when trust ends.
 
 ## Trust
 
-A pairing stays trusted until four days pass without a connection; regular use keeps it active. Each side can choose a different duration under **Paired Peers**: 30 days, the current session only, or until removed. When the two sides differ, the shorter duration applies. After trust expires, pair again with a new code.
+Each system asks how long to trust a peer when they pair: until it goes unused for a number of hours or days (four days by default; regular use keeps it active), for this session only, or until you forget it. Change it any time in the **Peers** group; the new choice starts from that moment. When the two sides differ, the shorter one applies. After trust expires, pair again with a new code.
 
 ## Security
 
@@ -45,7 +45,7 @@ The [security model](docs/security-model.md) describes the design in detail. Rep
 Releases are built by GitHub Actions from tagged commits, signed with a Developer ID certificate and notarized by Apple. To confirm a download came from this repository:
 
 ```bash
-gh attestation verify Daisy-0.1.2-macos-arm64.zip --repo misfitdev/daisy
+gh attestation verify Daisy-0.1.2-macos-arm64.dmg --repo misfitdev/daisy
 ```
 
 ## Documentation

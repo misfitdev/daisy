@@ -77,11 +77,13 @@ jobs:
       - name: Hash the release files
         id: hashes
         working-directory: target/dist
-        run: echo "hashes=$(shasum -a 256 -- *.zip | base64 | tr -d '\n')" >> "$GITHUB_OUTPUT"
+        run: echo "hashes=$(shasum -a 256 -- *.zip *.dmg | base64 | tr -d '\n')" >> "$GITHUB_OUTPUT"
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: target/dist/*.zip
+          subject-path: |
+            target/dist/*.zip
+            target/dist/*.dmg
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

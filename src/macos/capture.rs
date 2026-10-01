@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use super::ffi::*;
 use super::swipe;
 use crate::control::SharedControl;
-use crate::input::{Along, Driver, Rect, Route, Side};
+use crate::input::{Along, Driver, Rect, Route, ScrollPhase, Side};
 use crate::protocol::Message;
 use crate::swipe::SwipeStep;
 
@@ -247,6 +247,9 @@ impl crate::share::Pointer for Capture {
         lock(&self.driver).reclaim();
         lock(&self.cursor).thaw(None);
     }
+    fn arrange(&mut self, side: Side) {
+        lock(&self.driver).arrange(side);
+    }
 }
 
 impl Drop for Capture {
@@ -316,6 +319,32 @@ fn run_tap(
     }
 }
 
+/// Whether macOS lets this process read input now. Input Monitoring can
+/// report granted before it applies, until Daisy reopens.
+pub fn reads_input() -> bool {
+    extern "C" fn ignore(_proxy: *mut c_void, _type: u32, event: CGEventRef, _info: *mut c_void) -> CGEventRef {
+        event
+    }
+    // A listen-only tap never holds up input, even for the moment it exists.
+    // SAFETY: the tap is never added to a run loop, and is released here
+    unsafe {
+        let tap = CGEventTapCreate(
+            kCGHIDEventTap,
+            kCGHeadInsertEventTap,
+            kCGEventTapOptionListenOnly,
+            1 << kCGEventKeyDown,
+            ignore,
+            std::ptr::null_mut(),
+        );
+        if tap.is_null() {
+            return false;
+        }
+        CFMachPortInvalidate(tap);
+        CFRelease(tap.cast_const());
+    }
+    true
+}
+
 extern "C" fn on_event(_proxy: *mut c_void, event_type: u32, event: CGEventRef, user_info: *mut c_void) -> CGEventRef {
     // a panic must not unwind into CoreGraphics; on any failure, let the event through
     let keep = catch_unwind(AssertUnwindSafe(|| {
@@ -330,6 +359,30 @@ extern "C" fn on_event(_proxy: *mut c_void, event_type: u32, event: CGEventRef, 
 
 /// Returns whether this system should still receive the event.
 fn handle(context: &Context, event_type: u32, event: CGEventRef) -> bool {
+    let here = decide(context, event_type, event);
+    if here
+        && event_type == kCGEventScrollWheel
+        // SAFETY: event is valid for the duration of the callback
+        && unsafe { CGEventGetIntegerValueField(event, kCGEventSourceUserData) } != DAISY_EVENT_MARKER
+        && let Some(phase) = scroll_phase(event)
+        && let Some(mut driver) = try_lock(&context.driver)
+    {
+        driver.scroll_stayed_here(phase);
+    }
+    here
+}
+
+fn scroll_phase(event: CGEventRef) -> Option<ScrollPhase> {
+    // SAFETY: event is valid for the duration of the callback
+    unsafe {
+        ScrollPhase::from_fields(
+            CGEventGetIntegerValueField(event, kCGScrollWheelEventScrollPhase),
+            CGEventGetIntegerValueField(event, kCGScrollWheelEventMomentumPhase),
+        )
+    }
+}
+
+fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
     if event_type == kCGEventTapDisabledByTimeout || event_type == kCGEventTapDisabledByUserInput {
         // macOS turns off taps it thinks are too slow; turn it back on
         // SAFETY: the tap outlives every callback it delivers
@@ -364,14 +417,14 @@ fn handle(context: &Context, event_type: u32, event: CGEventRef) -> bool {
     if !input {
         return true;
     }
-    // Momentum scrolling continues a flick after the fingers lift. It
-    // follows whoever has control and never claims it.
+    // Momentum scrolling continues a flick after the fingers lift. It never
+    // claims control, and stays on the system the flick began on.
     // SAFETY: event is valid for the duration of the callback
     if event_type == kCGEventScrollWheel
         && unsafe { CGEventGetIntegerValueField(event, kCGScrollWheelEventMomentumPhase) } != 0
     {
         if !try_lock(&control.state).is_some_and(|state| state.owns()) {
-            return true;
+            return try_lock(&context.driver).is_none_or(|driver| driver.scroll_is_local());
         }
     } else {
         control.note_physical();
@@ -451,6 +504,7 @@ fn handle(context: &Context, event_type: u32, event: CGEventRef) -> bool {
             kCGEventScrollWheel => driver.scroll(
                 double(kCGScrollWheelEventPointDeltaAxis2),
                 double(kCGScrollWheelEventPointDeltaAxis1),
+                scroll_phase(event),
             ),
             _ => Route::Local,
         }

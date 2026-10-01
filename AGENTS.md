@@ -10,7 +10,7 @@ events for swipes. Read this before changing anything.
 just              # list recipes
 just check        # clippy -D warnings, rustfmt --check, cargo test
 just app <args>   # build, sign and run Daisy.app
-just package      # create the release zip; notarize when credentials are set
+just package      # create the release zip and DMG; notarize when credentials are set
 ```
 
 `just check` is the gate. It must exit 0 before anything is committed, and
@@ -43,7 +43,7 @@ version of each system.
   `docs/protocol.md` explains it; code wins if they disagree.
 - Pure decision modules contain no macOS calls and are unit tested directly:
   `input`, `swipe`, `shake`, `pairing`, `trust`, `session`, `control`,
-  `latency` and `share`.
+  `latency`, `share`, `install` and `setup`.
 - `src/macos/` carries out decisions and nothing more. Undocumented
   WindowServer fields and event types live only in `src/macos/swipe.rs`;
   Mission Control shortcut IDs live only in `src/macos/shortcut.rs`.

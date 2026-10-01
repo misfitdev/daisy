@@ -71,6 +71,9 @@ pub struct AppSettings {
     /// Advertise this system with Bonjour while it waits for a connection.
     #[serde(default = "default_discoverable")]
     pub discoverable: bool,
+    /// Command-Q quits Daisy, rather than closing its windows.
+    #[serde(default)]
+    pub command_q_quits: bool,
 }
 
 impl Default for AppSettings {
@@ -79,6 +82,7 @@ impl Default for AppSettings {
             last_session: SessionSettings::default(),
             share_clipboard: default_share_clipboard(),
             discoverable: default_discoverable(),
+            command_q_quits: false,
         }
     }
 }
@@ -112,6 +116,10 @@ pub enum Command {
     SetClipboard(bool),
     /// Turn Bonjour advertising on or off, including while waiting.
     SetDiscoverable(bool),
+    /// Choose whether Command-Q quits Daisy or closes its windows.
+    SetCommandQQuits(bool),
+    /// Move the connected peer's screen to this side.
+    Arrange(Side),
     Shutdown,
 }
 
@@ -162,12 +170,9 @@ pub enum Event {
         peer: String,
         reply: oneshot::Sender<String>,
     },
-    TrustChanged {
-        peer: String,
-        policy: Policy,
-    },
     Paired {
         peer: String,
+        key: PublicKey,
         policy: Policy,
     },
     Notice {
@@ -265,6 +270,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let mut stored = settings.clone();
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
     let (share_discoverable, discoverable) = watch::channel(stored.discoverable);
+    let (arrange, arrangement) = watch::channel(None);
     tokio::spawn(browse_nearby(home.clone(), events.clone()));
     if events
         .send(Event::Ready {
@@ -304,6 +310,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 let session_events = events.clone();
                 let session_clipboard = clipboard.clone();
                 let session_discoverable = discoverable.clone();
+                let session_arrangement = arrangement.clone();
                 session = Some(tokio::spawn(async move {
                     let start = Start {
                         settings,
@@ -316,6 +323,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                         start,
                         session_clipboard,
                         session_discoverable,
+                        session_arrangement,
                         session_events,
                     )
                     .await;
@@ -346,8 +354,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 }
             }
             Command::SetTrust { selector, policy } => match set_trust(&home, &selector, policy) {
-                Ok((peer, peers)) => {
-                    let _ = events.send(Event::TrustChanged { peer, policy });
+                Ok((_, peers)) => {
                     let _ = events.send(Event::Peers(peers));
                 }
                 Err(error) => {
@@ -380,6 +387,20 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     let _ = send_problem(
                         &events,
                         "Clipboard setting could not be saved",
+                        "Check that Daisy can write its data folder, then try again.".to_owned(),
+                    );
+                }
+            }
+            Command::Arrange(side) => {
+                arrange.send_replace(Some(side));
+            }
+            Command::SetCommandQQuits(on) => {
+                stored.command_q_quits = on;
+                if let Err(error) = save_settings(&home, &stored) {
+                    tracing::error!(error = ?error, "Command-Q setting could not be saved");
+                    let _ = send_problem(
+                        &events,
+                        "Command-Q setting could not be saved",
                         "Check that Daisy can write its data folder, then try again.".to_owned(),
                     );
                 }
@@ -477,6 +498,7 @@ async fn run_session(
     start: Start,
     clipboard: watch::Receiver<bool>,
     discoverable: watch::Receiver<bool>,
+    arrangement: watch::Receiver<Option<Side>>,
     events: Sender<Event>,
 ) {
     let Start {
@@ -505,6 +527,7 @@ async fn run_session(
             choose_side: &choose_side,
             clipboard: &clipboard,
             discoverable: &discoverable,
+            arrangement: Some(&arrangement),
         };
         match settings.connection {
             Connection::Automatic => service::automatic(config, &mut prompt, &mut observer).await,
@@ -625,9 +648,10 @@ impl ServiceObserver for ControllerObserver {
         }
     }
 
-    fn paired(&mut self, peer: &str, _key: PublicKey, policy: Policy) {
+    fn paired(&mut self, peer: &str, key: PublicKey, policy: Policy) {
         let _ = self.events.send(Event::Paired {
             peer: peer.to_owned(),
+            key,
             policy,
         });
         if let Ok(peers) = list_peers(&self.home) {
@@ -805,7 +829,7 @@ mod tests {
             side_chosen: 0,
             name: "Studio".into(),
             key: studio,
-            policy: Policy::Idle,
+            policy: Policy::IDLE,
             paired_at: 0,
             last_seen: 0,
         };
@@ -823,7 +847,7 @@ mod tests {
         let defaults = load_settings(directory.path()).unwrap();
         assert_eq!(defaults, AppSettings::default());
         assert_eq!(defaults.last_session.side, Side::Right);
-        assert_eq!(defaults.last_session.trust, Policy::Idle);
+        assert_eq!(defaults.last_session.trust, Policy::IDLE);
 
         let settings = AppSettings {
             last_session: SessionSettings {
@@ -836,6 +860,7 @@ mod tests {
             },
             share_clipboard: false,
             discoverable: false,
+            command_q_quits: true,
         };
         save_settings(directory.path(), &settings).unwrap();
         assert_eq!(load_settings(directory.path()).unwrap(), settings);
@@ -927,7 +952,7 @@ mod tests {
             home: directory.path().to_owned(),
             waiting: None,
         };
-        observer.waiting("Studio", key, service::DEFAULT_PORT, Some(Policy::Idle));
+        observer.waiting("Studio", key, service::DEFAULT_PORT, Some(Policy::IDLE));
         assert!(matches!(
             received.recv().unwrap(),
             Event::Status(Status::Waiting { pairing: true, .. })

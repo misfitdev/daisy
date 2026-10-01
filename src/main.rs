@@ -173,6 +173,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     choose_side: &AtomicBool::new(side.is_some()),
                     clipboard: &clipboard,
                     discoverable: &discoverable,
+                    arrangement: None,
                 },
                 &bind,
                 port,
@@ -202,6 +203,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     choose_side: &AtomicBool::new(side.is_some()),
                     clipboard: &clipboard,
                     discoverable: &discoverable,
+                    arrangement: None,
                 },
                 &address,
                 None,
@@ -240,12 +242,6 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     peer.name,
                     policy.describe(),
                     status(peer, now)
-                );
-            }
-            if still.len() < matched {
-                println!(
-                    "{} peer(s) matching {peer:?} had already run out of trust under that policy and were forgotten.",
-                    matched - still.len()
                 );
             }
             Ok(())
@@ -312,7 +308,7 @@ impl ServiceObserver for TerminalObserver {
             Policy::Forever => {
                 println!("It stays trusted until you run `daisy forget`, however long it goes unused.")
             }
-            Policy::Idle | Policy::Days(_) => {}
+            Policy::Idle(_) | Policy::Days(_) => {}
         }
     }
 
@@ -335,7 +331,7 @@ fn status(peer: &Peer, now: Timestamp) -> String {
     match (peer.policy, peer.expires_at()) {
         (_, None) => "never expires".to_owned(),
         (Policy::Once, Some(_)) => "ends after its session".to_owned(),
-        (Policy::Idle, Some(at)) => {
+        (Policy::Idle(_), Some(at)) => {
             format!("ends in {} without a connection", trust::span(at.saturating_sub(now)))
         }
         (_, Some(at)) => format!("ends in {}", trust::span(at.saturating_sub(now))),

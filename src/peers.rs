@@ -139,14 +139,16 @@ impl PeerStore {
         })
     }
 
-    /// Change the policy of every peer matching `selector`. Returns how many
-    /// matched, and those still trusted: one whose new policy has already
-    /// run out is forgotten.
+    /// Change the policy of every peer matching `selector`, counting it from
+    /// `now` as if just paired. Returns how many matched, and those still
+    /// trusted.
     pub fn set_policy(&self, selector: &str, policy: Policy, now: Timestamp) -> Result<(usize, Vec<Peer>)> {
         let matched = self.update(now, |peers| {
             let mut matched = Vec::new();
             for peer in peers.iter_mut().filter(|peer| peer.matches(selector)) {
                 peer.policy = policy;
+                peer.paired_at = now;
+                peer.last_seen = now;
                 matched.push(peer.key);
             }
             matched
@@ -439,18 +441,18 @@ mod tests {
     fn pinning_again_replaces_the_entry() {
         let (store, _dir) = store();
         store.pin(key(1), "old", Policy::Forever, NOW).unwrap();
-        store.pin(key(1), "new", Policy::Idle, NOW + 1).unwrap();
+        store.pin(key(1), "new", Policy::IDLE, NOW + 1).unwrap();
 
         let peers = store.list(NOW + 1).unwrap();
         assert_eq!(names(&peers), ["new"]);
-        assert_eq!(peers[0].policy, Policy::Idle);
+        assert_eq!(peers[0].policy, Policy::IDLE);
     }
 
     #[test]
     fn name_cannot_inject_another_entry() {
         let (store, _dir) = store();
         let injected = format!("evil\"\n[[peer]]\nkey = \"{}\"\nname = \"trusted\"", key(2).to_hex());
-        store.pin(key(1), &injected, Policy::Idle, NOW).unwrap();
+        store.pin(key(1), &injected, Policy::IDLE, NOW).unwrap();
 
         assert_eq!(store.list(NOW).unwrap().len(), 1);
         assert!(store.trusted(&key(2), NOW).unwrap().is_none());
@@ -459,7 +461,7 @@ mod tests {
     #[test]
     fn expired_trust_is_refused_and_dropped_from_the_file() {
         let (store, _dir) = store();
-        store.pin(key(1), "idle", Policy::Idle, NOW).unwrap();
+        store.pin(key(1), "idle", Policy::IDLE, NOW).unwrap();
         store.pin(key(2), "deadline", Policy::Days(2), NOW).unwrap();
         store.pin(key(3), "forever", Policy::Forever, NOW).unwrap();
         let later = NOW + IDLE_LIMIT.as_secs();
@@ -473,7 +475,7 @@ mod tests {
     #[test]
     fn renewing_keeps_idle_trust_but_not_a_deadline() {
         let (store, _dir) = store();
-        store.pin(key(1), "idle", Policy::Idle, NOW).unwrap();
+        store.pin(key(1), "idle", Policy::IDLE, NOW).unwrap();
         store.pin(key(2), "deadline", Policy::Days(5), NOW).unwrap();
         for day in 1..=6 {
             let now = NOW + day * DAY;
@@ -532,7 +534,7 @@ mod tests {
     fn forget_removes_one_many_or_all() {
         let (store, _dir) = store();
         for (byte, name) in [(1, "studio"), (2, "laptop"), (3, "mini"), (4, "spare")] {
-            store.pin(key(byte), name, Policy::Idle, NOW).unwrap();
+            store.pin(key(byte), name, Policy::IDLE, NOW).unwrap();
         }
 
         let one = store.forget(&["studio".to_owned()], NOW).unwrap();
@@ -548,15 +550,23 @@ mod tests {
     }
 
     #[test]
-    fn changing_the_policy_can_end_trust_at_once() {
+    fn a_new_policy_runs_from_when_it_was_set() {
         let (store, _dir) = store();
-        store.pin(key(1), "studio", Policy::Idle, NOW).unwrap();
+        store.pin(key(1), "studio", Policy::IDLE, NOW).unwrap();
         let (matched, still) = store.set_policy("studio", Policy::Forever, NOW + DAY).unwrap();
         assert_eq!((matched, still[0].policy), (1, Policy::Forever));
 
-        let (matched, still) = store.set_policy("studio", Policy::Days(7), NOW + 10 * DAY).unwrap();
-        assert_eq!((matched, still.len()), (1, 0));
-        assert!(store.list(NOW + 10 * DAY).unwrap().is_empty());
+        // unused for ten days, then trusted until unused for five hours
+        let changed = NOW + 10 * DAY;
+        let (_, still) = store.set_policy("studio", Policy::Idle(5), changed).unwrap();
+        assert_eq!(still.len(), 1);
+        assert_eq!(store.list(changed + 5 * 3600 - 1).unwrap().len(), 1);
+        assert!(store.list(changed + 5 * 3600).unwrap().is_empty());
+
+        store.pin(key(2), "laptop", Policy::IDLE, changed - DAY).unwrap();
+        let (_, still) = store.set_policy("laptop", Policy::Days(7), changed).unwrap();
+        assert_eq!(still.len(), 1);
+        assert!(store.list(changed + 7 * DAY).unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]

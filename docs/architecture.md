@@ -25,8 +25,8 @@ Each system has a screen-edge choice for where its peer sits, saved with the pai
 | Sharing | `share` | Bidirectional sharing, generation-stamped control claims, bounded queues, heartbeat and cleanup |
 | Latency | `latency` | Round-trip average from heartbeat pings and pongs, reported with who has control |
 | Clipboard | `clipboard` | What to send when control crosses, echo prevention, chunking and reassembly; `macos::pasteboard` reads and writes the pasteboard |
-| Decisions | `input`, `swipe`, `shake`, `trust` | Routing, edge crossing, held-input release, swipe pacing, pointer-shake recognition and trust duration |
-| macOS | `macos::*` | Event tap, event posting, pointer pinning, swipe synthesis, Mission Control shortcuts and permissions |
+| Decisions | `input`, `swipe`, `shake`, `trust`, `install`, `setup` | Routing, edge crossing, held-input release, swipe pacing, pointer-shake recognition, trust duration, moving to Applications and the permission walkthrough |
+| macOS | `macos::*` | Event tap, event posting, pointer pinning, swipe synthesis, Mission Control shortcuts, permissions and moving the app |
 
 Pure decision modules contain no macOS calls and are unit tested directly. The macOS modules carry those decisions out; they do not decide them. See [macos.md](macos.md).
 
@@ -73,6 +73,6 @@ Nearby paired peers reconnect automatically: after a session ends, both return t
 
 ## Ownership handoff
 
-Physical events on a receiving system pass locally on their first callback and claim control; momentum scrolling after a trackpad flick never claims. A monotonically increasing generation identifies the owner; equal generations favor the Noise initiator. Repeated local claims are limited to once per 150 ms during simultaneous use, while local activity excludes remote injection immediately. Claims release held keys, buttons, modifiers and swipes. Every shared input and crossing carries its generation, so queued input from the previous owner is discarded.
+Physical events on a receiving system pass locally on their first callback and claim control; momentum scrolling after a trackpad flick never claims, and stays on the system the flick began on. A monotonically increasing generation identifies the owner; equal generations favor the Noise initiator. Repeated local claims are limited to once per 150 ms during simultaneous use, while local activity excludes remote injection immediately. Claims release held keys, buttons, modifiers, swipes and scrolls. Every shared input and crossing carries its generation, so queued input from the previous owner is discarded.
 
 Posted input and swipe shortcut events carry a Daisy marker that the event tap excludes from ownership and forwarding. The callback uses only cached state, nonblocking locks and bounded queue operations. Both sides exchange heartbeat messages and unwind capture and held-input state on cancellation or connection loss.
