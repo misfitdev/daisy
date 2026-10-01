@@ -703,6 +703,7 @@ pub const MAX_GROUP: usize = 8;
 /// stops after the last.
 pub struct Hub {
     me: PublicKey,
+    peers: PeerStore,
     clipboard: watch::Receiver<bool>,
     choices: watch::Receiver<Option<Side>>,
     running: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<share::Membership<TcpStream>>>>>,
@@ -723,6 +724,7 @@ impl Hub {
     pub fn new(config: &SessionConfig<'_>) -> Self {
         Self {
             me: config.identity.public_key(),
+            peers: config.peers.clone(),
             clipboard: config.clipboard.clone(),
             choices: session_choices(config.arrangement),
             running: std::sync::Arc::default(),
@@ -767,6 +769,7 @@ impl Hub {
         *running = Some(members);
         tokio::spawn(run_core(
             self.me,
+            self.peers.clone(),
             self.clipboard.clone(),
             self.choices.clone(),
             membership,
@@ -788,6 +791,7 @@ impl Hub {
 /// last one ends starts it again rather than being lost.
 async fn run_core(
     me: PublicKey,
+    peers: PeerStore,
     clipboard: watch::Receiver<bool>,
     choices: watch::Receiver<Option<Side>>,
     mut membership: mpsc::UnboundedReceiver<share::Membership<TcpStream>>,
@@ -797,7 +801,8 @@ async fn run_core(
     let mut waiting = std::collections::VecDeque::new();
     loop {
         waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
-        if let Err(error) = run_core_once(me, &clipboard, &choices, &mut waiting, &mut membership, &link).await {
+        if let Err(error) = run_core_once(me, &peers, &clipboard, &choices, &mut waiting, &mut membership, &link).await
+        {
             tracing::warn!(error = format!("{error:#}"), "input sharing stopped");
             let reason = format!("{error:#}");
             for change in waiting
@@ -820,6 +825,7 @@ async fn run_core(
 
 async fn run_core_once(
     me: PublicKey,
+    peers: &PeerStore,
     clipboard: &watch::Receiver<bool>,
     choices: &watch::Receiver<Option<Side>>,
     waiting: &mut std::collections::VecDeque<share::Membership<TcpStream>>,
@@ -859,10 +865,24 @@ async fn run_core_once(
         }
     });
     let _watcher = AbortOnDrop(watcher);
+    let (save, mut saving) = mpsc::unbounded_channel::<crate::peers::Arrangement>();
+    let store = peers.clone();
+    let _saver = AbortOnDrop(tokio::spawn(async move {
+        while let Some(arrangement) = saving.recv().await {
+            if let Err(error) = store.save_arrangement(&arrangement) {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "the screen arrangement could not be saved"
+                );
+            }
+        }
+    }));
     let group = share::Group {
         displays: watched,
         control,
         choices: choices.clone(),
+        saved: peers.arrangement(),
+        save,
     };
     let run = share::run(
         group,

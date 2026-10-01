@@ -246,6 +246,11 @@ impl<K: Copy + Ord> Placement<K> {
         self.me
     }
 
+    /// Which arrangement this is; changes whenever it does.
+    pub fn version(&self) -> (u64, K) {
+        self.version
+    }
+
     /// Records a member's displays; returns whether they changed.
     pub fn show(&mut self, key: K, displays: Vec<Rect>) -> bool {
         self.displays.insert(key, displays.clone()) != Some(displays)

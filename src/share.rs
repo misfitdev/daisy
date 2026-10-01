@@ -75,6 +75,9 @@ pub struct Group {
     pub control: std::sync::Arc<crate::control::SharedControl>,
     /// Sides chosen on this system, applied to every link.
     pub choices: tokio::sync::watch::Receiver<Option<Side>>,
+    /// The arrangement kept from before, and where to keep each new one.
+    pub saved: Option<crate::peers::Arrangement>,
+    pub save: mpsc::UnboundedSender<crate::peers::Arrangement>,
 }
 
 /// A session with one more peer, joining the group.
@@ -121,6 +124,8 @@ where
         displays: tokio::sync::watch::channel(vec![layout.screen]).1,
         control: layout.control,
         choices: layout.arranging.choices,
+        saved: None,
+        save: mpsc::unbounded_channel().0,
     };
     let mut membership = membership;
     let result = run(
@@ -186,6 +191,10 @@ where
     let mut displays = group.displays;
     let me = control.state.lock().unwrap_or_else(|e| e.into_inner()).me();
     let mut placement = crate::layout::Placement::new(me, displays.borrow_and_update().clone());
+    if let Some((version, author, offsets)) = &group.saved {
+        placement.adopt(*version, *author, offsets);
+    }
+    let mut kept = placement.version();
     let mut target = Target::new(placement.group(), me);
     let release = ReleaseOnDrop {
         target: &mut target,
@@ -208,6 +217,10 @@ where
     let mut waiting = waiting;
     waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
     loop {
+        if placement.version() != kept {
+            kept = placement.version();
+            let _ = group.save.send(placement.message());
+        }
         for (key, result) in ended.drain(..) {
             let Some(link) = links.remove(&key) else { continue };
             link.finish(result);
@@ -1493,6 +1506,8 @@ mod tests {
             displays: watch::channel(vec![SCREEN]).1,
             control: control.clone(),
             choices: watch::channel(None).1,
+            saved: None,
+            save: mpsc::unbounded_channel().0,
         }
     }
 
@@ -1749,6 +1764,64 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_kept_arrangement_places_a_returning_member_and_new_ones_are_kept() {
+        let (control, _members, mut membership, mut far, _ended, keys) = group_of(1, None).await;
+        let me = me_of(&control);
+        let (_capture, input) = mpsc::channel(16);
+        let (mut injector, mut board) = (Recorded::default(), no_clipboard());
+        let mut pointer = Arranged::default();
+        let (save, mut saved) = mpsc::unbounded_channel();
+        let kept = (5, me, vec![(me, (0.0, 0.0)), (keys[0], (0.0, 500.0))]);
+        let group = Group {
+            saved: Some(kept.clone()),
+            save,
+            ..group(&control)
+        };
+        let run = run(
+            group,
+            VecDeque::new(),
+            &mut membership,
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let script = async {
+            let peer = &mut far[0];
+            peer.send(&Message::Displays { displays: vec![SCREEN] }).await.unwrap();
+            settle(peer, 1).await;
+            // the kept arrangement is offered, not replaced by a fresh placement
+            peer.send(&Message::Arrangement {
+                version: 9,
+                author: keys[0],
+                offsets: vec![(me, (0.0, 0.0)), (keys[0], (1000.0, 0.0))],
+            })
+            .await
+            .unwrap();
+            settle(peer, 2).await;
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                () = script => {},
+                result = run => panic!("the group ended: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            pointer.0.first().and_then(|layout| peer_offset(layout, me)),
+            Some((0.0, 500.0)),
+            "placed where it was kept"
+        );
+        let mut versions = Vec::new();
+        while let Ok((version, _, _)) = saved.try_recv() {
+            versions.push(version);
+        }
+        assert_eq!(versions, [9], "only the newer arrangement is kept again");
     }
 
     #[tokio::test]

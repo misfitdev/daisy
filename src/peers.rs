@@ -66,6 +66,26 @@ pub struct Forgotten {
 pub struct PeerStore {
     path: PathBuf,
     lock: PathBuf,
+    arrangement: PathBuf,
+}
+
+/// Where every member of the group was last placed, as the newest
+/// arrangement this system saw: `(version, author, offsets)`.
+pub type Arrangement = (u64, PublicKey, Vec<(PublicKey, (f64, f64))>);
+
+#[derive(Serialize, Deserialize)]
+struct ArrangementFile {
+    version: u64,
+    author: String,
+    #[serde(default, rename = "member")]
+    members: Vec<Placed>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Placed {
+    key: String,
+    x: f64,
+    y: f64,
 }
 
 impl PeerStore {
@@ -74,7 +94,42 @@ impl PeerStore {
         Ok(Self {
             path: home.join("peers.toml"),
             lock: home.join("peers.lock"),
+            arrangement: home.join("arrangement.toml"),
         })
+    }
+
+    /// The arrangement last saved, if any can be read.
+    pub fn arrangement(&self) -> Option<Arrangement> {
+        let text = fs::read_to_string(&self.arrangement).ok()?;
+        let file: ArrangementFile = toml::from_str(&text).ok()?;
+        let author = PublicKey::from_hex(&file.author)?;
+        let offsets = file
+            .members
+            .iter()
+            .filter_map(|placed| Some((PublicKey::from_hex(&placed.key)?, (placed.x, placed.y))))
+            .collect();
+        Some((file.version, author, offsets))
+    }
+
+    /// Keeps `arrangement` for the next time the group meets.
+    pub fn save_arrangement(&self, arrangement: &Arrangement) -> Result<()> {
+        let (version, author, offsets) = arrangement;
+        let file = ArrangementFile {
+            version: *version,
+            author: author.to_hex(),
+            members: offsets
+                .iter()
+                .map(|(key, (x, y))| Placed {
+                    key: key.to_hex(),
+                    x: *x,
+                    y: *y,
+                })
+                .collect(),
+        };
+        let text = toml::to_string(&file)?;
+        let temporary = self.arrangement.with_extension("tmp");
+        fs::write(&temporary, text).with_context(|| format!("creating {}", temporary.display()))?;
+        fs::rename(&temporary, &self.arrangement).with_context(|| format!("saving {}", self.arrangement.display()))
     }
 
     pub fn list(&self, now: Timestamp) -> Result<Vec<Peer>> {
@@ -388,6 +443,15 @@ mod tests {
 
     fn names(peers: &[Peer]) -> Vec<&str> {
         peers.iter().map(|peer| peer.name.as_str()).collect()
+    }
+
+    #[test]
+    fn an_arrangement_is_kept_between_runs() {
+        let (store, _dir) = store();
+        assert_eq!(store.arrangement(), None);
+        let saved = (42, key(1), vec![(key(1), (0.0, 0.0)), (key(2), (-1440.5, 120.0))]);
+        store.save_arrangement(&saved).unwrap();
+        assert_eq!(store.arrangement(), Some(saved));
     }
 
     #[test]
