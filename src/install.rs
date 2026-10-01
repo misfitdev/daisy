@@ -49,8 +49,9 @@ pub fn image_mount_point(hdiutil_info: &[u8], original: &Path) -> Option<PathBuf
 }
 
 /// Puts a copy of `source` at `destination`. The copy is made beside the
-/// destination first, so an existing copy goes to `trash` only once the
-/// new one is complete.
+/// destination and the existing copy is set aside, so `destination` holds a
+/// whole app at every step; the old one goes to `trash` only once the new
+/// one is in place.
 pub fn replace(
     source: &Path,
     destination: &Path,
@@ -66,13 +67,25 @@ pub fn replace(
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
-    if destination.exists()
-        && let Err(error) = trash(destination)
-    {
+    let previous = parent.join(".Daisy.app.previous");
+    let _ = std::fs::remove_dir_all(&previous);
+    let replacing = destination.exists();
+    if replacing && let Err(error) = std::fs::rename(destination, &previous) {
         let _ = std::fs::remove_dir_all(&staging);
-        return Err(error.context("moving the existing copy to the Trash"));
+        return Err(anyhow::Error::new(error).context("setting the existing copy aside"));
     }
-    std::fs::rename(&staging, destination).with_context(|| format!("moving the copy to {}", destination.display()))
+    if let Err(error) = std::fs::rename(&staging, destination) {
+        if replacing {
+            let _ = std::fs::rename(&previous, destination);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(anyhow::Error::new(error).context(format!("moving the copy to {}", destination.display())));
+    }
+    // the new copy is in place, so failing to trash the old one only leaves it hidden
+    if replacing && trash(&previous).is_err() {
+        let _ = std::fs::remove_dir_all(&previous);
+    }
+    Ok(())
 }
 
 /// `/bin/sh` arguments that wait for process `pid` to exit, open `bundle`,
@@ -206,6 +219,22 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(std::fs::read_to_string(destination.join("marker")).unwrap(), "old");
         assert!(!directory.path().join("Apps/.Daisy.app.installing").exists());
+    }
+
+    #[test]
+    fn a_copy_that_cannot_be_put_in_place_restores_the_existing_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let (source, destination) = (
+            directory.path().join("new/Daisy.app"),
+            directory.path().join("Apps/Daisy.app"),
+        );
+        bundle(&source, "new");
+        bundle(&destination, "old");
+        // reports success without producing a copy, so placing it fails
+        let result = replace(&source, &destination, |_, _| Ok(()), |_| panic!("trashed"));
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(destination.join("marker")).unwrap(), "old");
+        assert!(!directory.path().join("Apps/.Daisy.app.previous").exists());
     }
 
     #[test]
