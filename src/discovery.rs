@@ -110,6 +110,8 @@ pub struct Advertiser {
     daemon: ServiceDaemon,
     fullname: String,
     pub election: [u8; NONCE_LEN],
+    /// Whether it says this system is open to pairing.
+    pub pairing: bool,
 }
 
 impl Advertiser {
@@ -129,6 +131,7 @@ impl Advertiser {
             daemon,
             fullname,
             election,
+            pairing,
         })
     }
 }

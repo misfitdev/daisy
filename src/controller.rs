@@ -553,6 +553,7 @@ async fn run_session(
     }
 }
 
+#[derive(Clone)]
 struct ControllerPrompt {
     events: Sender<Event>,
 }

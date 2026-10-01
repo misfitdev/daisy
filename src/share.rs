@@ -119,11 +119,21 @@ where
         control: layout.control,
         choices: layout.arranging.choices,
     };
-    let run = pin!(run(group, membership, input, pointer, injector, sharing, until));
-    tokio::select! {
-        result = run => result,
-        ended = ended => ended.unwrap_or_else(|_| bail!("the session ended without a result")),
-    }
+    let mut membership = membership;
+    let result = run(
+        group,
+        VecDeque::new(),
+        &mut membership,
+        input,
+        pointer,
+        injector,
+        sharing,
+        until,
+    )
+    .await;
+    // the link's own ending says more than the group's
+    let mut ended = ended;
+    ended.try_recv().unwrap_or(result)
 }
 
 /// One peer's session within the group.
@@ -150,11 +160,14 @@ impl Link {
 type Received = (PublicKey, Result<Message, SessionError>);
 
 /// Runs this system's side of a group: links join and leave through
-/// `membership`, while one capture, one owner of control and one replay are
-/// shared by all of them. Returns when `until` fires or capture stops.
+/// `waiting` and then `membership`, while one capture, one owner of control
+/// and one replay are shared by all of them. Returns once the last link has
+/// ended, or when `until` fires or capture stops.
+#[allow(clippy::too_many_arguments)]
 pub async fn run<S>(
     group: Group,
-    mut membership: mpsc::UnboundedReceiver<Membership<S>>,
+    waiting: VecDeque<Membership<S>>,
+    membership: &mut mpsc::UnboundedReceiver<Membership<S>>,
     mut input: mpsc::Receiver<Message>,
     pointer: &mut impl Pointer,
     injector: &mut impl Inject,
@@ -182,7 +195,8 @@ where
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     let mut ended: Vec<(PublicKey, Result<()>)> = Vec::new();
     // links already waiting join before any input is routed
-    let mut waiting: VecDeque<Membership<S>> = std::iter::from_fn(|| membership.try_recv().ok()).collect();
+    let mut waiting = waiting;
+    waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
     loop {
         for (key, result) in ended.drain(..) {
             let Some(link) = links.remove(&key) else { continue };
@@ -240,6 +254,13 @@ where
             }
         }
         if !ended.is_empty() {
+            continue;
+        }
+        if links.is_empty() {
+            waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
+            if waiting.is_empty() {
+                return Ok(());
+            }
             continue;
         }
         tokio::select! {
@@ -1257,13 +1278,14 @@ mod tests {
 
     #[tokio::test]
     async fn every_member_learns_who_has_control_when_it_joins() {
-        let (control, _members, membership, mut far, _ended) = group_of(2, Some(0)).await;
+        let (control, _members, mut membership, mut far, _ended) = group_of(2, Some(0)).await;
         let expected = control.state.lock().unwrap().owner();
         let (_capture, input) = mpsc::channel(16);
         let (mut pointer, mut injector, mut board) = (Returned::default(), Recorded::default(), no_clipboard());
         let run = run(
             group(&control),
-            membership,
+            VecDeque::new(),
+            &mut membership,
             input,
             &mut pointer,
             &mut injector,
@@ -1293,14 +1315,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_claim_reaches_every_member_and_only_the_owner_is_played() {
-        let (control, _members, membership, mut far, _ended) = group_of(2, None).await;
+        let (control, _members, mut membership, mut far, _ended) = group_of(2, None).await;
         let (capture, input) = mpsc::channel(16);
         let actions = Arc::new(Mutex::new(Vec::new()));
         let mut injector = SharedRecorded(actions.clone());
         let (mut pointer, mut board) = (Returned::default(), no_clipboard());
         let run = run(
             group(&control),
-            membership,
+            VecDeque::new(),
+            &mut membership,
             input,
             &mut pointer,
             &mut injector,
@@ -1374,14 +1397,15 @@ mod tests {
 
     #[tokio::test]
     async fn losing_the_member_in_control_takes_control_back_and_keeps_the_rest() {
-        let (control, _members, membership, mut far, mut ended) = group_of(2, None).await;
+        let (control, _members, mut membership, mut far, mut ended) = group_of(2, None).await;
         let (_capture, input) = mpsc::channel(16);
         let actions = Arc::new(Mutex::new(Vec::new()));
         let mut injector = SharedRecorded(actions.clone());
         let (mut pointer, mut board) = (Returned::default(), no_clipboard());
         let run = run(
             group(&control),
-            membership,
+            VecDeque::new(),
+            &mut membership,
             input,
             &mut pointer,
             &mut injector,
