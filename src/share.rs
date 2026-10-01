@@ -309,7 +309,7 @@ where
                     {
                         link.finish(Err(error));
                     } else if let Some(replaced) = links.insert(key, link) {
-                        replaced.finish(Err(anyhow::anyhow!("the peer connected again")));
+                        replaced.finish(Err(Replaced.into()));
                     }
                     publish(&control, &links, &group.reports);
                 }
@@ -792,10 +792,16 @@ impl Drop for Outgoing {
 #[error("the peer stopped responding")]
 pub struct Silent;
 
-/// Whether a session ended because the connection was lost, as opposed to
-/// either system ending it.
+/// The peer opened a second connection, which took this one's place.
+#[derive(Debug, thiserror::Error)]
+#[error("the peer connected again")]
+pub struct Replaced;
+
+/// Whether a session ended because the connection was lost, or replaced by
+/// another, as opposed to either system ending it.
 pub fn connection_lost(error: &anyhow::Error) -> bool {
     error.downcast_ref::<Silent>().is_some()
+        || error.downcast_ref::<Replaced>().is_some()
         || matches!(error.downcast_ref::<SessionError>(), Some(SessionError::Io(_)))
 }
 
@@ -1998,6 +2004,61 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pointer.0, vec![None], "the pointer stays where it was");
+    }
+
+    #[tokio::test]
+    async fn a_second_connection_from_a_member_replaces_the_first_as_lost() {
+        let (me, them) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let connect = || async {
+            let (a, b) = duplex(1 << 17);
+            let (here, there) = tokio::join!(Channel::initiate(a, &me), Channel::respond(b, &them));
+            (here.unwrap(), there.unwrap())
+        };
+        let join = |channel| {
+            let (done, ended) = oneshot::channel();
+            let joining = Membership::Join(Joining {
+                channel,
+                agreed: (Side::Left, 0),
+                initiator: true,
+                agreed_tx: mpsc::unbounded_channel().0,
+                done,
+            });
+            (joining, ended)
+        };
+        let control = Arc::new(SharedControl::new(me.public_key(), me.public_key()));
+        let (members, mut membership) = mpsc::unbounded_channel();
+        let (first, mut far_first) = connect().await;
+        let (joining, first_ended) = join(first);
+        members.send(joining).ok().unwrap();
+        let (_capture, input) = mpsc::channel(16);
+        let (mut injector, mut board, mut pointer) = (Recorded::default(), no_clipboard(), Returned::default());
+        let run = run(
+            group(&control),
+            VecDeque::new(),
+            &mut membership,
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let script = async {
+            settle(&mut far_first, 1).await;
+            let (second, _far_second) = connect().await;
+            let (joining, _second_ended) = join(second);
+            members.send(joining).ok().unwrap();
+            first_ended.await.unwrap()
+        };
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                result = script => result,
+                result = run => panic!("the group ended: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        let error = result.unwrap_err();
+        assert!(connection_lost(&error), "{error:#}");
     }
 
     #[tokio::test]

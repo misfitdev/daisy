@@ -606,11 +606,17 @@ struct ControllerObserver {
     waiting: Option<(u16, bool)>,
     /// Each running link's round trips, kept for `daisy stats`.
     stats: std::collections::BTreeMap<String, crate::latency::LinkStats>,
-    /// The members with a running link, in the order they joined.
-    linked: Vec<(String, PublicKey)>,
+    /// The members with a running link, in the order they joined, and how
+    /// many links each has: a second connection briefly overlaps the first.
+    linked: Vec<(String, PublicKey, usize)>,
 }
 
 impl ControllerObserver {
+    fn send_connected(&self) {
+        let peers = self.linked.iter().map(|(name, key, _)| (name.clone(), *key)).collect();
+        let _ = self.events.send(Event::Status(Status::Connected { peers }));
+    }
+
     fn save_stats(&self) {
         let links: Vec<_> = self.stats.values().cloned().collect();
         if let Err(error) = crate::latency::save(&self.home, &links) {
@@ -677,12 +683,11 @@ impl ServiceObserver for ControllerObserver {
     }
 
     fn connected(&mut self, peer: &str, key: PublicKey, _side: Side) {
-        if !self.linked.iter().any(|(_, linked)| *linked == key) {
-            self.linked.push((peer.to_owned(), key));
+        match self.linked.iter_mut().find(|(_, linked, _)| *linked == key) {
+            Some((_, _, links)) => *links += 1,
+            None => self.linked.push((peer.to_owned(), key, 1)),
         }
-        let _ = self.events.send(Event::Status(Status::Connected {
-            peers: self.linked.clone(),
-        }));
+        self.send_connected();
     }
 
     fn arranged(&mut self, layout: &crate::share::Layout) {
@@ -693,11 +698,14 @@ impl ServiceObserver for ControllerObserver {
         if self.stats.remove(peer).is_some() {
             self.save_stats();
         }
-        self.linked.retain(|(name, _)| name != peer);
+        if let Some(index) = self.linked.iter().position(|(name, _, _)| name == peer) {
+            self.linked[index].2 -= 1;
+            if self.linked[index].2 == 0 {
+                self.linked.remove(index);
+            }
+        }
         if !self.linked.is_empty() {
-            let _ = self.events.send(Event::Status(Status::Connected {
-                peers: self.linked.clone(),
-            }));
+            self.send_connected();
         } else if let Some((port, pairing)) = self.waiting {
             self.send_waiting(port, pairing);
         }
@@ -882,6 +890,33 @@ fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_member_stays_connected_until_its_last_link_ends() {
+        let directory = tempfile::tempdir().unwrap();
+        let (events, received) = mpsc::channel();
+        let mut observer = ControllerObserver {
+            told_version: None,
+            events,
+            home: directory.path().to_owned(),
+            waiting: Some((service::DEFAULT_PORT, false)),
+            stats: std::collections::BTreeMap::new(),
+            linked: Vec::new(),
+        };
+        let studio = Identity::generate().unwrap().public_key();
+        let desk = Identity::generate().unwrap().public_key();
+        observer.connected("Studio", studio, Side::Right);
+        observer.connected("Desk", desk, Side::Left);
+        // a second connection from the studio overlaps the first, which then ends
+        observer.connected("Studio", studio, Side::Right);
+        observer.disconnected("Studio");
+        let last = std::iter::from_fn(|| received.try_recv().ok()).last();
+        assert!(matches!(&last, Some(Event::Status(Status::Connected { peers })) if peers.len() == 2));
+        observer.disconnected("Studio");
+        observer.disconnected("Desk");
+        let last = std::iter::from_fn(|| received.try_recv().ok()).last();
+        assert!(matches!(last, Some(Event::Status(Status::Waiting { .. }))));
+    }
 
     #[test]
     fn nearby_names_only_trusted_peers() {

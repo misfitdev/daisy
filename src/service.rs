@@ -728,7 +728,6 @@ where
                 if let Err(error) = peers.agree_side(&key, side, chosen) {
                     tracing::warn!(error = ?error, "the new screen arrangement could not be saved");
                 }
-                observer.connected(peer, key, side);
             }
         }
     };
