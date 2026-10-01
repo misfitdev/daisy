@@ -168,6 +168,24 @@ pub fn relation(member: &Shown, me: &Shown) -> &'static str {
     }
 }
 
+/// The peer after `current` in the scene, for keyboard selection, wrapping
+/// around; this system is never selected. `back` goes the other way.
+pub fn next_peer(scene: &[Shown], current: Option<PublicKey>, back: bool) -> Option<PublicKey> {
+    let peers: Vec<PublicKey> = scene.iter().filter(|shown| !shown.me).map(|shown| shown.key).collect();
+    let count = peers.len();
+    if count == 0 {
+        return None;
+    }
+    let index = current.and_then(|key| peers.iter().position(|peer| *peer == key));
+    let next = match (index, back) {
+        (None, false) => 0,
+        (None, true) => count - 1,
+        (Some(index), false) => (index + 1) % count,
+        (Some(index), true) => (index + count - 1) % count,
+    };
+    Some(peers[next])
+}
+
 /// The offset that puts `member` flush against `side` of this system.
 pub fn beside(member: &Shown, me: &Shown, side: Side) -> Offset {
     let flush = crate::layout::beside(&me.displays, &member.displays, side);
@@ -182,6 +200,8 @@ pub struct ArrangeIvars {
     drag: Cell<Option<Drag>>,
     /// A member a person just placed, for the action to read.
     placed: Cell<Option<(PublicKey, Offset)>>,
+    /// The peer the arrow keys move.
+    selected: Cell<Option<PublicKey>>,
     target: RefCell<Weak<AnyObject>>,
     action: Cell<Option<Sel>>,
     /// Tooltip owners; AppKit does not retain them.
@@ -275,27 +295,55 @@ define_class!(
             self.ivars().scene.borrow().iter().any(|shown| !shown.me)
         }
 
-        // Arrow keys put the first peer against that side of this system,
-        // for people not using a pointer.
+        // For people not using a pointer: [ and ] choose a peer, and the
+        // arrow keys put it against that side of this system.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            let side = event.charactersIgnoringModifiers().and_then(|keys| match keys.to_string().chars().next() {
+            let key = event.charactersIgnoringModifiers().and_then(|keys| keys.to_string().chars().next());
+            if let Some(back) = match key {
+                Some('[') => Some(true),
+                Some(']') => Some(false),
+                _ => None,
+            } {
+                let scene = self.ivars().scene.borrow();
+                let next = next_peer(&scene, self.selected(&scene), back);
+                drop(scene);
+                self.ivars().selected.set(next);
+                self.announce_selection();
+                self.setKeyboardFocusRingNeedsDisplayInRect(self.bounds());
+                self.setNeedsDisplay(true);
+                return;
+            }
+            let side = match key {
                 Some('\u{F702}') => Some(Side::Left),
                 Some('\u{F703}') => Some(Side::Right),
                 Some('\u{F700}') => Some(Side::Above),
                 Some('\u{F701}') => Some(Side::Below),
                 _ => None,
-            });
+            };
             let placed = side.and_then(|side| {
                 let scene = self.ivars().scene.borrow();
                 let me = scene.iter().find(|shown| shown.me)?;
-                let peer = scene.iter().find(|shown| !shown.me)?;
+                let selected = self.selected(&scene)?;
+                let peer = scene.iter().find(|shown| shown.key == selected)?;
                 Some((peer.key, beside(peer, me, side)))
             });
             match placed {
                 Some((key, offset)) => self.place(key, offset),
                 // SAFETY: NSView implements keyDown:
                 None => unsafe { msg_send![super(self), keyDown: event] },
+            }
+        }
+
+        #[unsafe(method(focusRingMaskBounds))]
+        fn focus_ring_mask_bounds(&self) -> NSRect {
+            self.selected_bounds().map_or(NSRect::ZERO, ns_rect)
+        }
+
+        #[unsafe(method(drawFocusRingMask))]
+        fn draw_focus_ring_mask(&self) {
+            if let Some(bounds) = self.selected_bounds() {
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(ns_rect(bounds), 6.0, 6.0).fill();
             }
         }
     }
@@ -308,6 +356,7 @@ impl ArrangeView {
             scene: RefCell::new(Vec::new()),
             drag: Cell::new(None),
             placed: Cell::new(None),
+            selected: Cell::new(None),
             target: RefCell::new(Weak::from(target)),
             action: Cell::new(Some(action)),
             hints: RefCell::new(Vec::new()),
@@ -339,6 +388,41 @@ impl ArrangeView {
         }
         self.refresh_hints();
         self.setNeedsDisplay(true);
+    }
+
+    /// The peer the arrow keys move: the one chosen with [ and ], or else
+    /// the first.
+    fn selected(&self, scene: &[Shown]) -> Option<PublicKey> {
+        self.ivars()
+            .selected
+            .get()
+            .filter(|key| scene.iter().any(|shown| shown.key == *key && !shown.me))
+            .or_else(|| next_peer(scene, None, false))
+    }
+
+    /// The selected peer's displays, as drawn.
+    fn selected_bounds(&self) -> Option<Rect> {
+        let scene = self.ivars().scene.borrow();
+        let selected = self.selected(&scene)?;
+        let shown = scene.iter().find(|shown| shown.key == selected)?;
+        let fit = self.fit(&scene);
+        crate::layout::bounds(&shown.placed().map(|display| fit.to_view(display)).collect::<Vec<_>>())
+    }
+
+    /// Tells VoiceOver which peer the arrow keys now move.
+    fn announce_selection(&self) {
+        let scene = self.ivars().scene.borrow();
+        let Some(selected) = self.selected(&scene) else {
+            return;
+        };
+        let Some(shown) = scene.iter().find(|shown| shown.key == selected) else {
+            return;
+        };
+        let me = scene.iter().find(|shown| shown.me);
+        let place = me.map_or("", |me| relation(shown, me));
+        let text = format!("{}, {place} this system. Arrow keys move it.", shown.name);
+        // SAFETY: an NSString is a valid accessibility value
+        unsafe { self.setAccessibilityValue(Some(&NSString::from_str(&text))) };
     }
 
     fn place(&self, key: PublicKey, offset: Offset) {
@@ -576,6 +660,24 @@ mod tests {
         // one display alone is not drawn huge
         let alone = scene(key(1), &names(), None, &[LAPTOP], &BTreeMap::new());
         assert_eq!(Fit::of(&alone, (5000.0, 5000.0)).scale, MAX_SCALE);
+    }
+
+    #[test]
+    fn brackets_cycle_through_every_peer_and_never_this_system() {
+        let mut group = pair();
+        group.members.push(crate::layout::Member {
+            key: key(3),
+            displays: vec![LAPTOP],
+            offset: (-1512.0, 0.0),
+        });
+        let shown = scene(key(1), &names(), Some(&group), &[LAPTOP], &BTreeMap::new());
+        assert_eq!(next_peer(&shown, None, false), Some(key(2)));
+        assert_eq!(next_peer(&shown, Some(key(2)), false), Some(key(3)));
+        assert_eq!(next_peer(&shown, Some(key(3)), false), Some(key(2)));
+        assert_eq!(next_peer(&shown, Some(key(2)), true), Some(key(3)));
+        assert_eq!(next_peer(&shown, None, true), Some(key(3)));
+        let alone = scene(key(1), &names(), None, &[LAPTOP], &BTreeMap::new());
+        assert_eq!(next_peer(&alone, None, false), None);
     }
 
     #[test]

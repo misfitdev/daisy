@@ -41,7 +41,7 @@ Choose **Stop Sharing** to end sharing. Trust revocation also ends a member's li
 
 ## Arrange the screens
 
-The top of the window shows every display of every system in the group, as Displays shows monitors. Drag a peer's displays anywhere: they move together, snap when an edge comes within a few points of another, and never overlap another system's displays. With a pointer-free setup, select the arrangement and use the arrow keys to put the first peer against that side. Changes apply across the group at once and are kept for next time; when two systems change it, the later change wins. Plugging in, removing or rearranging a display updates the arrangement, moving any system that would now overlap.
+The top of the window shows every display of every system in the group, as Displays shows monitors. Drag a peer's displays anywhere: they move together, snap when an edge comes within a few points of another, and never overlap another system's displays. Without a pointer, select the arrangement, press [ or ] to choose a peer, and use the arrow keys to put it against that side. Changes apply across the group at once and are kept for next time; when two systems change it, the later change wins. Plugging in, removing or rearranging a display updates the arrangement, moving any system that would now overlap.
 
 ## Move control
 
