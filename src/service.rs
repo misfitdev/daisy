@@ -687,6 +687,14 @@ where
     result
 }
 
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// The most systems a group holds, this one included.
 pub const MAX_GROUP: usize = 8;
 
@@ -834,8 +842,25 @@ async fn run_core_once(
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     };
+    let (shown, watched) = watch::channel(displays);
+    // macOS has no display change signal a tokio task can wait on cheaply;
+    // listing the displays is cheap enough to do every second
+    let watcher = tokio::spawn(async move {
+        let mut every = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            every.tick().await;
+            if let Ok(now) = macos::displays() {
+                shown.send_if_modified(|displays| {
+                    let changed = *displays != now;
+                    *displays = now;
+                    changed
+                });
+            }
+        }
+    });
+    let _watcher = AbortOnDrop(watcher);
     let group = share::Group {
-        displays,
+        displays: watched,
         control,
         choices: choices.clone(),
     };

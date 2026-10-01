@@ -288,6 +288,29 @@ impl<K: Copy + Ord> Placement<K> {
         true
     }
 
+    /// Moves any member that now overlaps another, as after a display was
+    /// added or resized, the shortest way clear, as a new version.
+    pub fn clear_overlaps(&mut self, now: u64) -> bool {
+        let mut moved = false;
+        for key in self.offsets.keys().copied().collect::<Vec<_>>() {
+            if key == self.me {
+                continue;
+            }
+            let group = self.group();
+            let Some(offset) = self.offsets.get(&key).copied() else {
+                continue;
+            };
+            if group.overlaps(key, offset) {
+                self.offsets.insert(key, group.settle(key, offset));
+                moved = true;
+            }
+        }
+        if moved {
+            self.version = (now.max(self.version.0 + 1), self.me);
+        }
+        moved
+    }
+
     /// Adopts another member's arrangement if it is newer; returns whether
     /// anything changed.
     pub fn adopt(&mut self, version: u64, author: K, offsets: &[(K, Offset)]) -> bool {
@@ -610,6 +633,20 @@ mod tests {
         // the next change here outranks what was adopted
         a.place(2, Side::Below, 0);
         assert!(a.message().0 > b.message().0);
+    }
+
+    #[test]
+    fn a_display_added_here_pushes_an_overlapping_member_clear() {
+        let mut here = Placement::new(0u8, vec![LAPTOP]);
+        here.show(1, vec![PEER]);
+        here.place(1, Side::Above, 1);
+        assert!(!here.clear_overlaps(2), "nothing overlaps yet");
+        // an external display appears above the laptop, where the peer sits
+        here.show(0, vec![LAPTOP, EXTERNAL]);
+        assert!(here.clear_overlaps(3));
+        let group = here.group();
+        let offset = group.members.iter().find(|m| m.key == 1).unwrap().offset;
+        assert!(!group.overlaps(1, offset), "{offset:?}");
     }
 
     #[test]

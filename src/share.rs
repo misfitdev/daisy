@@ -70,8 +70,8 @@ impl Arranging {
 /// What one system's group shares across all its links: one event tap, one
 /// owner of control and one replay of whoever drives this system.
 pub struct Group {
-    /// This system's displays, in its own coordinates.
-    pub displays: Vec<Rect>,
+    /// This system's displays, in its own coordinates, as they change.
+    pub displays: tokio::sync::watch::Receiver<Vec<Rect>>,
     pub control: std::sync::Arc<crate::control::SharedControl>,
     /// Sides chosen on this system, applied to every link.
     pub choices: tokio::sync::watch::Receiver<Option<Side>>,
@@ -118,7 +118,7 @@ where
         done,
     }));
     let group = Group {
-        displays: vec![layout.screen],
+        displays: tokio::sync::watch::channel(vec![layout.screen]).1,
         control: layout.control,
         choices: layout.arranging.choices,
     };
@@ -183,8 +183,9 @@ where
     let mut until = pin!(until);
     let control = group.control;
     let mut choices = group.choices;
+    let mut displays = group.displays;
     let me = control.state.lock().unwrap_or_else(|e| e.into_inner()).me();
-    let mut placement = crate::layout::Placement::new(me, group.displays.clone());
+    let mut placement = crate::layout::Placement::new(me, displays.borrow_and_update().clone());
     let mut target = Target::new(placement.group(), me);
     let release = ReleaseOnDrop {
         target: &mut target,
@@ -258,7 +259,7 @@ where
                     let introduce = [
                         current,
                         Message::Displays {
-                            displays: group.displays.clone(),
+                            displays: displays.borrow().clone(),
                         },
                         arrangement(&placement),
                     ];
@@ -500,6 +501,16 @@ where
                         broadcast(&links, arrangement(&placement), &mut ended);
                         arrange(&placement, release.target, pointer);
                     }
+                }
+            }
+            Ok(()) = displays.changed() => {
+                let mine = displays.borrow_and_update().clone();
+                if placement.show(me, mine.clone()) {
+                    broadcast(&links, Message::Displays { displays: mine }, &mut ended);
+                    if placement.clear_overlaps(now_ms()) {
+                        broadcast(&links, arrangement(&placement), &mut ended);
+                    }
+                    arrange(&placement, release.target, pointer);
                 }
             }
             error = &mut until => return Err(error),
@@ -1479,7 +1490,7 @@ mod tests {
 
     fn group(control: &Arc<SharedControl>) -> Group {
         Group {
-            displays: vec![SCREEN],
+            displays: watch::channel(vec![SCREEN]).1,
             control: control.clone(),
             choices: watch::channel(None).1,
         }
@@ -1692,6 +1703,52 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pointer.0, vec![Some((7.0, 8.0))]);
+    }
+
+    #[tokio::test]
+    async fn a_display_change_here_reaches_every_member() {
+        let (control, _members, mut membership, mut far, _ended, _keys) = group_of(1, None).await;
+        let (_capture, input) = mpsc::channel(16);
+        let (mut injector, mut board, mut pointer) = (Recorded::default(), no_clipboard(), Returned::default());
+        let (show, displays) = watch::channel(vec![SCREEN]);
+        let group = Group {
+            displays,
+            ..group(&control)
+        };
+        let run = run(
+            group,
+            VecDeque::new(),
+            &mut membership,
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let wider = Rect {
+            width: 2000.0,
+            ..SCREEN
+        };
+        let script = async {
+            let peer = &mut far[0];
+            settle(peer, 1).await;
+            show.send_replace(vec![SCREEN, wider]);
+            loop {
+                if let Message::Displays { displays } = peer.recv().await.unwrap()
+                    && displays.len() == 2
+                {
+                    break;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                () = script => {},
+                result = run => panic!("the group ended: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
