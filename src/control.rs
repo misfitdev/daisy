@@ -158,6 +158,11 @@ impl Control {
         self.owner
     }
 
+    /// This system.
+    pub fn me(&self) -> PublicKey {
+        self.me
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }

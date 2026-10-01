@@ -17,7 +17,7 @@ use tokio::time::Instant;
 
 use crate::clipboard::{Clipboard, Sharing, WINDOW};
 use crate::identity::PublicKey;
-use crate::input::{Action, Along, Rect, Side, Target};
+use crate::input::{Action, Point, Rect, Side, Target};
 use crate::protocol::{ClipboardPart, Message};
 use crate::session::{Channel, ChannelReceiver, ChannelSender, SessionError};
 
@@ -27,11 +27,15 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(3);
 
 /// Puts the pointer back on this system when control returns to it.
 pub trait Pointer {
-    fn leave(&mut self, along: Along);
+    /// Control came back with the pointer `at` a point on this system, or
+    /// where it left when `None`.
+    fn leave(&mut self, at: Option<Point>);
     fn yield_control(&mut self) {}
-    /// The peer now sits at `side`.
-    fn arrange(&mut self, _side: Side) {}
+    /// The group was rearranged.
+    fn arrange(&mut self, _layout: Layout) {}
 }
+
+type Layout = crate::layout::Group<PublicKey>;
 
 pub struct SharedLayout {
     pub screen: Rect,
@@ -66,8 +70,8 @@ impl Arranging {
 /// What one system's group shares across all its links: one event tap, one
 /// owner of control and one replay of whoever drives this system.
 pub struct Group {
-    pub screen: Rect,
-    pub side: Side,
+    /// This system's displays, in its own coordinates.
+    pub displays: Vec<Rect>,
     pub control: std::sync::Arc<crate::control::SharedControl>,
     /// Sides chosen on this system, applied to every link.
     pub choices: tokio::sync::watch::Receiver<Option<Side>>,
@@ -114,8 +118,7 @@ where
         done,
     }));
     let group = Group {
-        screen: layout.screen,
-        side: layout.side,
+        displays: vec![layout.screen],
         control: layout.control,
         choices: layout.arranging.choices,
     };
@@ -180,7 +183,9 @@ where
     let mut until = pin!(until);
     let control = group.control;
     let mut choices = group.choices;
-    let mut target = Target::new(group.screen, group.side.opposite());
+    let me = control.state.lock().unwrap_or_else(|e| e.into_inner()).me();
+    let mut placement = crate::layout::Placement::new(me, group.displays.clone());
+    let mut target = Target::new(placement.group(), me);
     let release = ReleaseOnDrop {
         target: &mut target,
         injector,
@@ -194,6 +199,10 @@ where
     let mut crossed: Option<PublicKey> = None;
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     let mut ended: Vec<(PublicKey, Result<()>)> = Vec::new();
+    // a crossing the system this one drives handed on, and whether the
+    // arrangement changed, both acted on after the message that caused them
+    let mut handoff: Option<(u64, PublicKey, Point)> = None;
+    let mut rearranged = false;
     // links already waiting join before any input is routed
     let mut waiting = waiting;
     waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
@@ -219,6 +228,9 @@ where
                     let _ = link.outgoing.send(Message::ControlClaim { generation });
                 }
             }
+            if placement.remove(key) {
+                arrange(&placement, release.target, pointer);
+            }
             publish(&control, &links);
         }
         while let Some(change) = waiting.pop_front() {
@@ -243,7 +255,17 @@ where
                         owner: state.owner(),
                     };
                     drop(state);
-                    if let Err(error) = link.outgoing.send(current) {
+                    let introduce = [
+                        current,
+                        Message::Displays {
+                            displays: group.displays.clone(),
+                        },
+                        arrangement(&placement),
+                    ];
+                    if let Err(error) = introduce
+                        .into_iter()
+                        .try_for_each(|message| link.outgoing.send(message))
+                    {
                         link.finish(Err(error));
                     } else if let Some(replaced) = links.insert(key, link) {
                         replaced.finish(Err(anyhow::anyhow!("the peer connected again")));
@@ -307,27 +329,17 @@ where
                             }
                         }
                     }
-                    Message::Enter { along, .. } => {
-                        // until routing follows the group's layout, the pointer
-                        // crosses to the peer on the chosen side, or any peer
-                        let side = choices.borrow().unwrap_or(group.side);
-                        let destination = links
-                            .iter()
-                            .find(|(_, link)| link.agreed.0 == side)
-                            .or_else(|| links.iter().next())
-                            .map(|(key, _)| *key);
-                        match destination.and_then(|key| links.get(&key).map(|link| (key, link))) {
-                            Some((key, link)) => {
-                                crossed = Some(key);
-                                if let Err(error) = link.outgoing.send(message) {
-                                    ended.push((key, Err(error)));
-                                } else {
-                                    link.outgoing.send_clipboard(sharing.crossing());
-                                }
+                    Message::Enter { to, .. } => match links.get(&to) {
+                        Some(link) => {
+                            crossed = Some(to);
+                            if let Err(error) = link.outgoing.send(message) {
+                                ended.push((to, Err(error)));
+                            } else {
+                                link.outgoing.send_clipboard(sharing.crossing());
                             }
-                            None => pointer.leave(along),
                         }
-                    }
+                        None => pointer.leave(None),
+                    },
                     other => {
                         let reclaiming = matches!(other, Message::Reclaim { .. });
                         if let Some(key) = crossed
@@ -361,13 +373,22 @@ where
                             }
                         }
                         Message::Clipboard { part } => receive_clipboard(part, &link.outgoing, sharing)?,
+                        // the system that chose also sends the arrangement it led to
                         Message::Layout { side, chosen } => {
                             let agreed = crate::control::agreed_side(link.initiator, link.agreed, (side, chosen));
                             if agreed != link.agreed {
                                 link.agreed = agreed;
-                                release.target.arrange(agreed.0);
-                                pointer.arrange(agreed.0);
                                 let _ = link.agreed_tx.send(agreed);
+                            }
+                        }
+                        Message::Displays { displays } => {
+                            if placement.show(peer, displays) {
+                                rearranged = true;
+                            }
+                        }
+                        Message::Arrangement { version, author, offsets } => {
+                            if placement.adopt(version, author, &offsets) {
+                                rearranged = true;
                             }
                         }
                         Message::ControlState { generation, owner } => {
@@ -393,14 +414,13 @@ where
                                 link.outgoing.send_clipboard(sharing.crossing());
                             }
                         }
-                        Message::Leave { generation, along } => {
+                        Message::Leave { generation, to, at } => {
                             let state = control.state.lock().unwrap_or_else(|e| e.into_inner());
                             let current = state.owns() && state.generation() == generation;
                             drop(state);
                             if current && crossed == Some(peer) {
                                 crossed = None;
-                                pointer.leave(along);
-                                sharing.expect_snapshot();
+                                handoff = Some((generation, to, at));
                             }
                         }
                         Message::Enter { generation, .. }
@@ -410,21 +430,24 @@ where
                             let receives = state.receives(generation, peer, control.now()) && !control.local_busy();
                             drop(state);
                             if !receives {
-                                if let Message::Enter { along, .. } = message {
-                                    link.outgoing.send(Message::Leave { generation, along })?;
+                                if let Message::Enter { at, .. } = message {
+                                    // straight back where it came from
+                                    let layout = placement.group();
+                                    let back = layout.to_shared(me, at).and_then(|at| layout.to_own(peer, at)).unwrap_or(at);
+                                    link.outgoing.send(Message::Leave { generation, to: peer, at: back })?;
                                 }
                                 return Ok(());
                             }
                             let mut crossing = false;
                             let actions = match message {
-                                Message::Enter { along, .. } => { sharing.expect_snapshot(); release.target.enter(along) },
+                                Message::Enter { at, .. } => { sharing.expect_snapshot(); release.target.enter(at) },
                                 Message::Input { event, .. } => release.target.input(event),
                                 Message::Reclaim { .. } => { crossing = true; release.target.reclaim() },
                                 _ => unreachable!(),
                             };
                             for action in actions {
                                 match action {
-                                    Action::Leave { along } => { link.outgoing.send(Message::Leave { generation, along })?; crossing = true; },
+                                    Action::Leave { to, at } => { link.outgoing.send(Message::Leave { generation, to, at })?; crossing = true; },
                                     other => release.injector.execute(&other),
                                 }
                             }
@@ -435,6 +458,29 @@ where
                     Ok(())
                 })();
                 if let Err(error) = outcome { ended.push((peer, Err(error))); }
+                // the pointer left the system this one drives: home, or on to another
+                if let Some((generation, to, at)) = handoff.take() {
+                    match links.get(&to) {
+                        _ if to == me => {
+                            pointer.leave(Some(at));
+                            sharing.expect_snapshot();
+                        }
+                        Some(next) => {
+                            crossed = Some(to);
+                            if let Err(error) = next.outgoing.send(Message::Enter { generation, to, at }) {
+                                ended.push((to, Err(error)));
+                            } else {
+                                next.outgoing.send_clipboard(sharing.crossing());
+                            }
+                        }
+                        None => pointer.leave(None),
+                    }
+                }
+                if rearranged {
+                    rearranged = false;
+                    settle(&mut placement, &links, &mut ended);
+                    arrange(&placement, release.target, pointer);
+                }
                 publish(&control, &links);
             }
             Ok(()) = choices.changed() => {
@@ -443,7 +489,7 @@ where
                     let mut moved = false;
                     for (key, link) in links.iter_mut() {
                         if side == link.agreed.0 { continue; }
-                        moved = true;
+                        moved = placement.place(*key, side, now_ms()) || moved;
                         link.agreed = (side, crate::trust::now());
                         if let Err(error) = link.outgoing.send(Message::Layout { side, chosen: link.agreed.1 }) {
                             ended.push((*key, Err(error)));
@@ -451,8 +497,8 @@ where
                         let _ = link.agreed_tx.send(link.agreed);
                     }
                     if moved {
-                        release.target.arrange(side);
-                        pointer.arrange(side);
+                        broadcast(&links, arrangement(&placement), &mut ended);
+                        arrange(&placement, release.target, pointer);
                     }
                 }
             }
@@ -477,6 +523,59 @@ where
             }
         }
     }
+}
+
+/// Places any member that has no place yet beside this system, on the side
+/// agreed with it, and tells every member when that changes the arrangement.
+fn settle(
+    placement: &mut crate::layout::Placement<PublicKey>,
+    links: &std::collections::BTreeMap<PublicKey, Link>,
+    ended: &mut Vec<(PublicKey, Result<()>)>,
+) {
+    let mut placed = false;
+    for key in placement.unplaced() {
+        if let Some(link) = links.get(&key) {
+            placed = placement.place(key, link.agreed.0, now_ms()) || placed;
+        }
+    }
+    if placed {
+        broadcast(links, arrangement(placement), ended);
+    }
+}
+
+fn broadcast(
+    links: &std::collections::BTreeMap<PublicKey, Link>,
+    message: Message,
+    ended: &mut Vec<(PublicKey, Result<()>)>,
+) {
+    for (key, link) in links {
+        if let Err(error) = link.outgoing.send(message.clone()) {
+            ended.push((*key, Err(error)));
+        }
+    }
+}
+
+fn arrangement(placement: &crate::layout::Placement<PublicKey>) -> Message {
+    let (version, author, offsets) = placement.message();
+    Message::Arrangement {
+        version,
+        author,
+        offsets,
+    }
+}
+
+/// Gives the capture and the replay the arrangement as it now stands.
+fn arrange(placement: &crate::layout::Placement<PublicKey>, target: &mut Target, pointer: &mut impl Pointer) {
+    let layout = placement.group();
+    target.arrange(layout.clone());
+    pointer.arrange(layout);
+}
+
+/// Milliseconds since the Unix epoch, to order arrangements.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Reports who has control, and the round trip to the peer this system
@@ -764,6 +863,27 @@ mod tests {
         Sharing::new(Board::default(), watch::channel(true).1)
     }
 
+    /// What every session sends besides what a test looks for.
+    fn chatter(message: &Message) -> bool {
+        matches!(
+            message,
+            Message::Ping { .. }
+                | Message::ControlState { .. }
+                | Message::Displays { .. }
+                | Message::Arrangement { .. }
+        )
+    }
+
+    /// A key no system in the test has.
+    fn someone() -> crate::identity::PublicKey {
+        crate::identity::PublicKey::from_bytes(&[7; 32]).unwrap()
+    }
+
+    /// This system, as its control knows it.
+    fn me_of(control: &SharedControl) -> crate::identity::PublicKey {
+        control.state.lock().unwrap().me()
+    }
+
     /// This system's control for a session on `local`; `owns` says whether
     /// it starts with control and wins a tie with the peer.
     fn control(local: &Channel<DuplexStream>, owns: bool) -> Arc<SharedControl> {
@@ -821,11 +941,11 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Returned(Vec<Along>);
+    struct Returned(Vec<Option<Point>>);
 
     impl Pointer for Returned {
-        fn leave(&mut self, along: Along) {
-            self.0.push(along);
+        fn leave(&mut self, at: Option<Point>) {
+            self.0.push(at);
         }
     }
 
@@ -933,13 +1053,14 @@ mod tests {
             control.note_physical();
             peer.send(&Message::Enter {
                 generation: 1,
-                along: 123,
+                to: someone(),
+                at: (999.0, 123.0),
             })
             .await
             .unwrap();
             loop {
                 match peer.recv().await.unwrap() {
-                    Message::Leave { generation, along } => break (generation, along),
+                    Message::Leave { generation, at, .. } => break (generation, at),
                     _ => continue,
                 }
             }
@@ -966,7 +1087,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(returned, (1, 123));
+        assert_eq!(returned, (1, (999.0, 123.0)));
     }
 
     #[tokio::test]
@@ -982,7 +1103,8 @@ mod tests {
             peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
             peer.send(&Message::Enter {
                 generation: 1,
-                along: 0,
+                to: someone(),
+                at: (999.0, 0.0),
             })
             .await
             .unwrap();
@@ -1022,7 +1144,8 @@ mod tests {
             tokio::time::sleep(crate::control::SETTLE + Duration::from_millis(20)).await;
             peer.send(&Message::Enter {
                 generation: 3,
-                along: 0,
+                to: someone(),
+                at: (999.0, 0.0),
             })
             .await
             .unwrap();
@@ -1090,24 +1213,44 @@ mod tests {
         )));
     }
 
+    /// The peer's offset in each arrangement this system was given.
     #[derive(Default)]
-    struct Arranged(Vec<Side>);
+    struct Arranged(Vec<Layout>);
 
     impl Pointer for Arranged {
-        fn leave(&mut self, _along: Along) {}
-        fn arrange(&mut self, side: Side) {
-            self.0.push(side);
+        fn leave(&mut self, _at: Option<Point>) {}
+        fn arrange(&mut self, layout: Layout) {
+            self.0.push(layout);
         }
+    }
+
+    /// Where the member other than `me` sits in `layout`.
+    fn peer_offset(layout: &Layout, me: crate::identity::PublicKey) -> Option<(f64, f64)> {
+        layout
+            .members
+            .iter()
+            .find(|member| member.key != me)
+            .map(|member| member.offset)
+    }
+
+    struct Scene {
+        peer: Channel<DuplexStream>,
+        choose: watch::Sender<Option<Side>>,
+        me: crate::identity::PublicKey,
+        /// The peer's own key.
+        them: crate::identity::PublicKey,
     }
 
     /// Runs a session that agreed the peer sits on the left, chosen at time
     /// 100, against `script`, which plays the peer.
     async fn arranging<F: Future>(
         initiator: bool,
-        script: impl FnOnce(Channel<DuplexStream>, tokio::sync::watch::Sender<Option<Side>>) -> F,
-    ) -> (F::Output, Vec<(Side, crate::trust::Timestamp)>, Vec<Side>) {
+        script: impl FnOnce(Scene) -> F,
+    ) -> (F::Output, Vec<(Side, crate::trust::Timestamp)>, Vec<Option<(f64, f64)>>) {
         let (local, peer) = channels().await;
         let control = control(&local, initiator);
+        let me = me_of(&control);
+        let them = local.remote_key();
         let (_capture, input) = mpsc::channel(16);
         let (choose, choices) = tokio::sync::watch::channel(None);
         let (agreed_tx, mut agreed_rx) = mpsc::unbounded_channel();
@@ -1126,7 +1269,7 @@ mod tests {
         let session = together(local, layout, input, &mut pointer, &mut injector, &mut board, pending());
         let played = tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {
-                played = script(peer, choose) => played,
+                played = script(Scene { peer, choose, me, them }) => played,
                 result = session => panic!("session ended first: {result:?}"),
             }
         })
@@ -1136,7 +1279,8 @@ mod tests {
         while let Ok(next) = agreed_rx.try_recv() {
             agreed.push(next);
         }
-        (played, agreed, pointer.0)
+        let offsets = pointer.0.iter().map(|layout| peer_offset(layout, me)).collect();
+        (played, agreed, offsets)
     }
 
     /// Waits until the session has handled everything sent before.
@@ -1145,75 +1289,150 @@ mod tests {
         while peer.recv().await.unwrap() != (Message::Pong { nonce }) {}
     }
 
+    /// The next arrangement this system sends.
+    async fn next_arrangement(peer: &mut Channel<DuplexStream>) -> Message {
+        loop {
+            let message = peer.recv().await.unwrap();
+            if matches!(message, Message::Arrangement { .. }) {
+                return message;
+            }
+        }
+    }
+
+    const LEFT: (f64, f64) = (-1000.0, 0.0);
+
     #[tokio::test]
-    async fn a_later_arrangement_from_the_peer_moves_this_screen() {
-        let ((), agreed, arranged) = arranging(true, |mut peer, _choose| async move {
-            // the peer now places this system on its left, so the peer sits on the right
-            peer.send(&Message::Layout {
-                side: Side::Left,
-                chosen: 200,
-            })
-            .await
-            .unwrap();
-            settle(&mut peer, 1).await;
-            // an older choice does not undo it
-            peer.send(&Message::Layout {
-                side: Side::Below,
-                chosen: 150,
-            })
-            .await
-            .unwrap();
-            settle(&mut peer, 2).await;
+    async fn a_peer_that_shows_its_displays_is_placed_on_the_agreed_side() {
+        let (sent, _, arranged) = arranging(true, |mut scene: Scene| async move {
+            next_arrangement(&mut scene.peer).await;
+            scene
+                .peer
+                .send(&Message::Displays { displays: vec![SCREEN] })
+                .await
+                .unwrap();
+            next_arrangement(&mut scene.peer).await
         })
         .await;
+        assert_eq!(arranged.last(), Some(&Some(LEFT)));
+        let Message::Arrangement { offsets, .. } = sent else {
+            unreachable!()
+        };
+        assert!(offsets.contains(&(local_key_of(&offsets), LEFT)), "{offsets:?}");
+    }
+
+    /// The key in `offsets` that is not at the origin.
+    fn local_key_of(offsets: &[(crate::identity::PublicKey, (f64, f64))]) -> crate::identity::PublicKey {
+        offsets.iter().find(|(_, offset)| *offset != (0.0, 0.0)).unwrap().0
+    }
+
+    #[tokio::test]
+    async fn a_newer_arrangement_from_the_peer_moves_the_screens() {
+        let ((), agreed, arranged) = arranging(true, |mut scene: Scene| async move {
+            let peer_key = scene.them;
+            scene
+                .peer
+                .send(&Message::Displays { displays: vec![SCREEN] })
+                .await
+                .unwrap();
+            let newer = Message::Arrangement {
+                version: u64::MAX / 2,
+                author: peer_key,
+                offsets: vec![(scene.me, (0.0, 0.0)), (peer_key, (1000.0, 0.0))],
+            };
+            scene.peer.send(&newer).await.unwrap();
+            settle(&mut scene.peer, 1).await;
+            // an older one never undoes it
+            let older = Message::Arrangement {
+                version: 1,
+                author: peer_key,
+                offsets: vec![(scene.me, (0.0, 0.0)), (peer_key, LEFT)],
+            };
+            scene.peer.send(&older).await.unwrap();
+            // a side the peer chose is stored; the peer also sends what it led to
+            scene
+                .peer
+                .send(&Message::Layout {
+                    side: Side::Left,
+                    chosen: 200,
+                })
+                .await
+                .unwrap();
+            settle(&mut scene.peer, 2).await;
+        })
+        .await;
+        assert_eq!(arranged.last(), Some(&Some((1000.0, 0.0))));
         assert_eq!(agreed, [(Side::Right, 200)]);
-        assert_eq!(arranged, [Side::Right]);
     }
 
     #[tokio::test]
     async fn a_side_chosen_here_is_sent_to_the_peer() {
-        let (sent, agreed, arranged) = arranging(false, |mut peer, choose| async move {
-            choose.send_replace(Some(Side::Above));
-            loop {
-                if let Message::Layout { side, chosen } = peer.recv().await.unwrap() {
-                    break (side, chosen);
+        let (sent, agreed, arranged) = arranging(false, |mut scene: Scene| async move {
+            scene
+                .peer
+                .send(&Message::Displays { displays: vec![SCREEN] })
+                .await
+                .unwrap();
+            settle(&mut scene.peer, 1).await;
+            scene.choose.send_replace(Some(Side::Above));
+            let mut layout = None;
+            let mut offsets = None;
+            while layout.is_none() || offsets.is_none() {
+                match scene.peer.recv().await.unwrap() {
+                    Message::Layout { side, chosen } => layout = Some((side, chosen)),
+                    Message::Arrangement { offsets: sent, .. } if sent.iter().any(|(_, at)| *at == (0.0, -500.0)) => {
+                        offsets = Some(sent)
+                    }
+                    _ => {}
                 }
             }
+            layout.unwrap()
         })
         .await;
         assert_eq!(sent.0, Side::Above);
         assert!(sent.1 > 100);
         assert_eq!(agreed, [sent]);
-        assert_eq!(arranged, [Side::Above]);
-    }
-
-    #[tokio::test]
-    async fn a_session_that_cannot_choose_still_follows_the_peer() {
-        let ((), agreed, arranged) = arranging(true, |mut peer, choose| async move {
-            drop(choose);
-            settle(&mut peer, 1).await;
-            peer.send(&Message::Layout {
-                side: Side::Left,
-                chosen: 200,
-            })
-            .await
-            .unwrap();
-            settle(&mut peer, 2).await;
-        })
-        .await;
-        assert_eq!(agreed, [(Side::Right, 200)]);
-        assert_eq!(arranged, [Side::Right]);
+        assert_eq!(arranged.last(), Some(&Some((0.0, -500.0))));
     }
 
     #[tokio::test]
     async fn choosing_the_current_side_changes_nothing() {
-        let ((), agreed, arranged) = arranging(false, |mut peer, choose| async move {
-            choose.send_replace(Some(Side::Left));
-            settle(&mut peer, 1).await;
+        let (before, agreed, arranged) = arranging(false, |mut scene: Scene| async move {
+            scene
+                .peer
+                .send(&Message::Displays { displays: vec![SCREEN] })
+                .await
+                .unwrap();
+            settle(&mut scene.peer, 1).await;
+            scene.choose.send_replace(Some(Side::Left));
+            settle(&mut scene.peer, 2).await;
         })
         .await;
+        let () = before;
         assert!(agreed.is_empty());
-        assert!(arranged.is_empty());
+        assert_eq!(arranged, [Some(LEFT)]);
+    }
+
+    #[tokio::test]
+    async fn a_session_that_cannot_choose_still_follows_the_peer() {
+        let ((), _, arranged) = arranging(true, |mut scene: Scene| async move {
+            drop(scene.choose);
+            let peer_key = scene.them;
+            scene
+                .peer
+                .send(&Message::Displays { displays: vec![SCREEN] })
+                .await
+                .unwrap();
+            settle(&mut scene.peer, 1).await;
+            let newer = Message::Arrangement {
+                version: u64::MAX / 2,
+                author: peer_key,
+                offsets: vec![(scene.me, (0.0, 0.0)), (peer_key, (0.0, 500.0))],
+            };
+            scene.peer.send(&newer).await.unwrap();
+            settle(&mut scene.peer, 2).await;
+        })
+        .await;
+        assert_eq!(arranged.last(), Some(&Some((0.0, 500.0))));
     }
 
     /// A group on this system with one link per channel. Returns this
@@ -1227,6 +1446,7 @@ mod tests {
         mpsc::UnboundedReceiver<Membership<DuplexStream>>,
         Vec<Channel<DuplexStream>>,
         Vec<oneshot::Receiver<Result<()>>>,
+        Vec<crate::identity::PublicKey>,
     ) {
         let me = Identity::generate().unwrap();
         let (members, membership) = mpsc::unbounded_channel();
@@ -1254,13 +1474,12 @@ mod tests {
         }
         let mine = me.public_key();
         let control = Arc::new(SharedControl::new(mine, owner.map_or(mine, |index| keys[index])));
-        (control, members, membership, far, ended)
+        (control, members, membership, far, ended, keys)
     }
 
     fn group(control: &Arc<SharedControl>) -> Group {
         Group {
-            screen: SCREEN,
-            side: Side::Left,
+            displays: vec![SCREEN],
             control: control.clone(),
             choices: watch::channel(None).1,
         }
@@ -1271,6 +1490,7 @@ mod tests {
         loop {
             match peer.recv().await.unwrap() {
                 Message::Ping { nonce } => peer.send(&Message::Pong { nonce }).await.unwrap(),
+                Message::Displays { .. } | Message::Arrangement { .. } => {}
                 other => return other,
             }
         }
@@ -1278,7 +1498,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_member_learns_who_has_control_when_it_joins() {
-        let (control, _members, mut membership, mut far, _ended) = group_of(2, Some(0)).await;
+        let (control, _members, mut membership, mut far, _ended, _keys) = group_of(2, Some(0)).await;
         let expected = control.state.lock().unwrap().owner();
         let (_capture, input) = mpsc::channel(16);
         let (mut pointer, mut injector, mut board) = (Returned::default(), Recorded::default(), no_clipboard());
@@ -1315,7 +1535,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_claim_reaches_every_member_and_only_the_owner_is_played() {
-        let (control, _members, mut membership, mut far, _ended) = group_of(2, None).await;
+        let (control, _members, mut membership, mut far, _ended, _keys) = group_of(2, None).await;
         let (capture, input) = mpsc::channel(16);
         let actions = Arc::new(Mutex::new(Vec::new()));
         let mut injector = SharedRecorded(actions.clone());
@@ -1341,17 +1561,14 @@ mod tests {
             far[1]
                 .send(&Message::Enter {
                     generation: 1,
-                    along: 0,
+                    to: someone(),
+                    at: (999.0, 0.0),
                 })
                 .await
                 .unwrap();
-            assert_eq!(
-                next(&mut far[1]).await,
-                Message::Leave {
-                    generation: 1,
-                    along: 0
-                }
-            );
+            // turned straight back
+            let back = next(&mut far[1]).await;
+            assert!(matches!(back, Message::Leave { generation: 1, .. }), "{back:?}");
             far[0]
                 .send(&Message::Input {
                     generation: 1,
@@ -1396,8 +1613,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_pointer_is_handed_on_from_one_member_to_the_next() {
+        let (control, _members, mut membership, mut far, _ended, keys) = group_of(2, None).await;
+        let me = me_of(&control);
+        let (capture, input) = mpsc::channel(16);
+        let (mut injector, mut board) = (Recorded::default(), no_clipboard());
+        let mut pointer = Returned::default();
+        let run = run(
+            group(&control),
+            VecDeque::new(),
+            &mut membership,
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let script = async {
+            let (first, second) = far.split_at_mut(1);
+            let (first, second) = (&mut first[0], &mut second[0]);
+            for peer in [&mut *first, &mut *second] {
+                assert!(matches!(next(peer).await, Message::ControlState { .. }));
+            }
+            let generation = control.state.lock().unwrap().generation();
+            capture
+                .send(Message::Enter {
+                    generation,
+                    to: keys[0],
+                    at: (10.0, 20.0),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(next(first).await, Message::Enter { at: (10.0, 20.0), .. }));
+            // the first sends the pointer on to the second
+            first
+                .send(&Message::Leave {
+                    generation,
+                    to: keys[1],
+                    at: (5.0, 6.0),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                next(second).await,
+                Message::Enter {
+                    generation,
+                    to: keys[1],
+                    at: (5.0, 6.0)
+                }
+            );
+            // a leave from a member that does not have the pointer is ignored
+            first
+                .send(&Message::Leave {
+                    generation,
+                    to: me,
+                    at: (1.0, 1.0),
+                })
+                .await
+                .unwrap();
+            round_trip(first, 1).await;
+            // the second sends it home
+            second
+                .send(&Message::Leave {
+                    generation,
+                    to: me,
+                    at: (7.0, 8.0),
+                })
+                .await
+                .unwrap();
+            round_trip(second, 2).await;
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                () = script => {},
+                result = run => panic!("the group ended: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(pointer.0, vec![Some((7.0, 8.0))]);
+    }
+
+    #[tokio::test]
     async fn losing_the_member_in_control_takes_control_back_and_keeps_the_rest() {
-        let (control, _members, mut membership, mut far, mut ended) = group_of(2, None).await;
+        let (control, _members, mut membership, mut far, mut ended, _keys) = group_of(2, None).await;
         let (_capture, input) = mpsc::channel(16);
         let actions = Arc::new(Mutex::new(Vec::new()));
         let mut injector = SharedRecorded(actions.clone());
@@ -1486,10 +1785,13 @@ mod tests {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
+        // its displays first, so this system knows where the pointer can leave to
+        peer.send(&Message::Displays { displays: vec![SCREEN] }).await.unwrap();
         peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
         peer.send(&Message::Enter {
             generation: 1,
-            along: 0,
+            to: someone(),
+            at: (999.0, 0.0),
         })
         .await
         .unwrap();
@@ -1513,7 +1815,7 @@ mod tests {
         loop {
             match peer.recv().await.unwrap() {
                 Message::Pong { nonce: n } if n == nonce => return seen,
-                Message::Ping { .. } | Message::ControlState { .. } => {}
+                m if chatter(&m) => {}
                 other => seen.push(other),
             }
         }
@@ -1522,6 +1824,7 @@ mod tests {
     #[tokio::test]
     async fn replays_input_and_hands_control_back() {
         let (local, mut peer) = channels().await;
+        let them = local.remote_key();
         let control = control(&local, false);
         let (capture, input) = mpsc::channel(16);
         let mut injector = Recorded::default();
@@ -1554,7 +1857,8 @@ mod tests {
         assert!(
             seen.contains(&Message::Leave {
                 generation: 1,
-                along: 0
+                to: them,
+                at: (999.0, 0.0)
             }),
             "{seen:?}"
         );
@@ -1610,6 +1914,7 @@ mod tests {
     #[tokio::test]
     async fn sends_input_and_takes_control_back() {
         let (local, mut peer) = channels().await;
+        let them = local.remote_key();
         let control = control(&local, true);
         let (capture, input) = mpsc::channel(16);
         let mut pointer = Returned::default();
@@ -1617,20 +1922,22 @@ mod tests {
         capture
             .try_send(Message::Enter {
                 generation: 0,
-                along: 7,
+                to: them,
+                at: (999.0, 7.0),
             })
             .unwrap();
         let script = async {
             let mut seen = Vec::new();
             while seen.is_empty() {
                 match peer.recv().await.unwrap() {
-                    Message::Ping { .. } | Message::ControlState { .. } => {}
+                    m if chatter(&m) => {}
                     other => seen.push(other),
                 }
             }
             peer.send(&Message::Leave {
                 generation: 0,
-                along: 9,
+                to: me_of(&control),
+                at: (999.0, 9.0),
             })
             .await
             .unwrap();
@@ -1661,10 +1968,11 @@ mod tests {
             seen,
             vec![Message::Enter {
                 generation: 0,
-                along: 7
+                to: them,
+                at: (999.0, 7.0)
             }]
         );
-        assert_eq!(pointer.0, vec![9]);
+        assert_eq!(pointer.0, vec![Some((999.0, 9.0))]);
     }
 
     #[tokio::test]
@@ -1674,14 +1982,15 @@ mod tests {
         let (capture, input) = mpsc::channel(2);
         let enter = Message::Enter {
             generation: 0,
-            along: 7,
+            to: local.remote_key(),
+            at: (999.0, 7.0),
         };
         capture.try_send(enter.clone()).unwrap();
         drop(capture);
         let receive = async {
             loop {
                 match peer.recv().await.unwrap() {
-                    Message::Ping { .. } | Message::ControlState { .. } => {}
+                    m if chatter(&m) => {}
                     other => break other,
                 }
             }
@@ -1941,7 +2250,7 @@ mod tests {
         let mut seen = Vec::new();
         loop {
             match peer.recv().await.unwrap() {
-                Message::Ping { .. } | Message::ControlState { .. } => {}
+                m if chatter(&m) => {}
                 Message::Clipboard {
                     part: part @ ClipboardPart::Chunk { .. },
                 } => {
@@ -1981,7 +2290,8 @@ mod tests {
         let mut board = board_with(text("copied on this system"), true);
         let enter = Message::Enter {
             generation: 0,
-            along: 7,
+            to: local.remote_key(),
+            at: (999.0, 7.0),
         };
         capture.try_send(enter.clone()).unwrap();
         let script = async {
@@ -2019,7 +2329,8 @@ mod tests {
         capture
             .try_send(Message::Enter {
                 generation: 0,
-                along: 3,
+                to: local.remote_key(),
+                at: (999.0, 3.0),
             })
             .unwrap();
         let mut board = no_clipboard();
@@ -2028,7 +2339,8 @@ mod tests {
             while !matches!(peer.recv().await.unwrap(), Message::Enter { .. }) {}
             peer.send(&Message::Leave {
                 generation: 0,
-                along: 3,
+                to: me_of(&control),
+                at: (999.0, 3.0),
             })
             .await
             .unwrap();
@@ -2071,11 +2383,13 @@ mod tests {
         let mut board = board_with(text("copied before the peer took control"), true);
         let here = board.clipboard().clone();
         let script = async {
+            peer.send(&Message::Displays { displays: vec![SCREEN] }).await.unwrap();
             peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
             until_snapshot_done(&mut peer).await;
             peer.send(&Message::Enter {
                 generation: 1,
-                along: 0,
+                to: someone(),
+                at: (999.0, 0.0),
             })
             .await
             .unwrap();
@@ -2115,13 +2429,7 @@ mod tests {
             event: AWAY,
         }])
         .await;
-        assert_eq!(
-            seen[0],
-            Message::Leave {
-                generation: 1,
-                along: 0
-            }
-        );
+        assert!(matches!(seen[0], Message::Leave { generation: 1, .. }), "{:?}", seen[0]);
         assert_eq!(assembled(&seen), Some(text("copied while the peer was in control")));
     }
 
@@ -2134,6 +2442,7 @@ mod tests {
     #[tokio::test]
     async fn switched_off_sends_and_writes_nothing() {
         let (local, mut peer) = channels().await;
+        let them = local.remote_key();
         let control = control(&local, false);
         let (capture, input) = mpsc::channel(16);
         let mut board = board_with(text("stays on this system"), false);
@@ -2180,7 +2489,8 @@ mod tests {
             seen,
             vec![Message::Leave {
                 generation: 1,
-                along: 0
+                to: them,
+                at: (999.0, 0.0)
             }],
             "this system sent its clipboard while sharing was off"
         );
@@ -2200,7 +2510,8 @@ mod tests {
         capture
             .try_send(Message::Enter {
                 generation: 0,
-                along: 7,
+                to: local.remote_key(),
+                at: (999.0, 7.0),
             })
             .unwrap();
         let script = async {
@@ -2282,7 +2593,8 @@ mod tests {
         capture
             .try_send(Message::Enter {
                 generation: 0,
-                along: 7,
+                to: local.remote_key(),
+                at: (999.0, 7.0),
             })
             .unwrap();
         let script = async {

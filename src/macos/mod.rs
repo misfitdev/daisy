@@ -36,11 +36,8 @@ pub(crate) fn set_cursor_in_background() {
     }
 }
 
-/// The area covered by all active displays, in global coordinates.
-///
-/// Crossing works on this bounding box, so an edge only hands over where a
-/// display actually reaches it.
-pub fn screen_bounds() -> Result<Rect> {
+/// Every active display, in macOS global coordinates.
+pub fn displays() -> Result<Vec<Rect>> {
     const MAX_DISPLAYS: usize = 16;
     let mut displays = [0; MAX_DISPLAYS];
     let mut count = 0;
@@ -49,28 +46,17 @@ pub fn screen_bounds() -> Result<Rect> {
     if error != 0 || count == 0 {
         bail!("could not list displays (CoreGraphics error {error})");
     }
-
-    let bounds = displays[..count as usize]
+    Ok(displays[..count as usize]
         .iter()
         // SAFETY: each id came from CGGetActiveDisplayList
         .map(|&display| unsafe { ffi::CGDisplayBounds(display) })
-        .map(|rect| {
-            (
-                rect.origin.x,
-                rect.origin.y,
-                rect.origin.x + rect.size.width,
-                rect.origin.y + rect.size.height,
-            )
+        .map(|rect| Rect {
+            x: rect.origin.x,
+            y: rect.origin.y,
+            width: rect.size.width,
+            height: rect.size.height,
         })
-        .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
-        .expect("count is at least one");
-
-    Ok(Rect {
-        x: bounds.0,
-        y: bounds.1,
-        width: bounds.2 - bounds.0,
-        height: bounds.3 - bounds.1,
-    })
+        .collect())
 }
 
 /// The running macOS major version, or 0 if it cannot be read.
@@ -119,9 +105,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn screen_bounds_cover_a_real_display() {
-        let bounds = screen_bounds().unwrap();
-        assert!(bounds.width >= 640.0 && bounds.height >= 480.0, "{bounds:?}");
+    fn every_real_display_is_listed() {
+        let displays = displays().unwrap();
+        assert!(!displays.is_empty());
+        // the main display sits at the origin
+        assert!(
+            displays.iter().any(|display| display.x == 0.0 && display.y == 0.0),
+            "{displays:?}"
+        );
+        assert!(
+            displays
+                .iter()
+                .all(|display| display.width >= 640.0 && display.height >= 480.0),
+            "{displays:?}"
+        );
     }
 
     #[test]

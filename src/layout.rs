@@ -7,6 +7,8 @@
 //! may sit anywhere, with gaps or touching only at a corner, but their
 //! displays never overlap.
 
+use std::collections::BTreeMap;
+
 use crate::input::{Point, Rect, Side};
 
 /// How close an edge comes before it snaps flush or into line.
@@ -32,8 +34,54 @@ pub struct Group<K> {
 }
 
 impl<K: Copy + PartialEq> Group<K> {
+    /// A group of one system, at the origin.
+    pub fn alone(key: K, displays: Vec<Rect>) -> Self {
+        Self {
+            members: vec![Member {
+                key,
+                displays,
+                offset: (0.0, 0.0),
+            }],
+        }
+    }
+
     fn member(&self, key: K) -> Option<&Member<K>> {
         self.members.iter().find(|member| member.key == key)
+    }
+
+    /// `point` on `key`'s displays, in the group's space.
+    pub fn to_shared(&self, key: K, point: Point) -> Option<Point> {
+        let offset = self.member(key)?.offset;
+        Some((point.0 + offset.0, point.1 + offset.1))
+    }
+
+    /// `point` in the group's space, in `key`'s own coordinates.
+    pub fn to_own(&self, key: K, point: Point) -> Option<Point> {
+        let offset = self.member(key)?.offset;
+        Some((point.0 - offset.0, point.1 - offset.1))
+    }
+
+    /// Whether `point`, in `key`'s own coordinates, is on one of its displays.
+    pub fn on_display(&self, key: K, point: Point) -> bool {
+        self.member(key)
+            .is_some_and(|member| member.displays.iter().any(|display| contains(display, point)))
+    }
+
+    /// The point on `key`'s displays nearest `point`, both in its own
+    /// coordinates.
+    pub fn nearest(&self, key: K, point: Point) -> Point {
+        let Some(member) = self.member(key) else {
+            return point;
+        };
+        member
+            .displays
+            .iter()
+            .map(|display| clamp(display, point))
+            .min_by(|a, b| {
+                let distance = |p: &Point| (p.0 - point.0).powi(2) + (p.1 - point.1).powi(2);
+                distance(a).total_cmp(&distance(b))
+            })
+            .unwrap_or(point)
     }
 
     /// Displays of every system but `key`, in the group's space.
@@ -170,6 +218,113 @@ impl<K: Copy + PartialEq> Group<K> {
         }
         let hit = (at.0 + direction.0 * t, at.1 + direction.1 * t);
         Some((key, clamp(&display, hit)))
+    }
+}
+
+/// One system's view of a group: every present member's displays, and the
+/// offsets every member agrees on. The greatest `(version, author)` wins, so
+/// all members converge on one arrangement whoever changes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placement<K> {
+    me: K,
+    displays: BTreeMap<K, Vec<Rect>>,
+    offsets: BTreeMap<K, Offset>,
+    version: (u64, K),
+}
+
+impl<K: Copy + Ord> Placement<K> {
+    pub fn new(me: K, displays: Vec<Rect>) -> Self {
+        Self {
+            me,
+            displays: BTreeMap::from([(me, displays)]),
+            offsets: BTreeMap::from([(me, (0.0, 0.0))]),
+            version: (0, me),
+        }
+    }
+
+    pub fn me(&self) -> K {
+        self.me
+    }
+
+    /// Records a member's displays; returns whether they changed.
+    pub fn show(&mut self, key: K, displays: Vec<Rect>) -> bool {
+        self.displays.insert(key, displays.clone()) != Some(displays)
+    }
+
+    /// A member left; its offset is kept for when it returns.
+    pub fn remove(&mut self, key: K) -> bool {
+        key != self.me && self.displays.remove(&key).is_some()
+    }
+
+    /// Present members with displays but no agreed offset.
+    pub fn unplaced(&self) -> Vec<K> {
+        self.displays
+            .keys()
+            .filter(|key| !self.offsets.contains_key(key))
+            .copied()
+            .collect()
+    }
+
+    /// Puts `key`'s displays on `side` of this system's, clear of every
+    /// other member, as a new version of the arrangement. `now` orders it
+    /// after anything seen before.
+    pub fn place(&mut self, key: K, side: Side, now: u64) -> bool {
+        let (Some(mine), Some(theirs)) = (self.displays.get(&self.me), self.displays.get(&key)) else {
+            return false;
+        };
+        let origin = self.offsets.get(&self.me).copied().unwrap_or((0.0, 0.0));
+        let beside = beside(mine, theirs, side);
+        let wanted = (origin.0 + beside.0, origin.1 + beside.1);
+        let mut group = self.group();
+        group.members.retain(|member| member.key != key);
+        group.members.push(Member {
+            key,
+            displays: theirs.clone(),
+            offset: wanted,
+        });
+        let settled = group.settle(key, wanted);
+        self.offsets.insert(key, settled);
+        self.version = (now.max(self.version.0 + 1), self.me);
+        true
+    }
+
+    /// Adopts another member's arrangement if it is newer; returns whether
+    /// anything changed.
+    pub fn adopt(&mut self, version: u64, author: K, offsets: &[(K, Offset)]) -> bool {
+        if (version, author) <= self.version {
+            return false;
+        }
+        self.version = (version, author);
+        let offsets: BTreeMap<K, Offset> = offsets.iter().copied().collect();
+        let changed = offsets != self.offsets;
+        self.offsets = offsets;
+        changed
+    }
+
+    /// The arrangement to send, as `(version, author, offsets)`.
+    pub fn message(&self) -> (u64, K, Vec<(K, Offset)>) {
+        (
+            self.version.0,
+            self.version.1,
+            self.offsets.iter().map(|(key, offset)| (*key, *offset)).collect(),
+        )
+    }
+
+    /// The present members that have an offset.
+    pub fn group(&self) -> Group<K> {
+        Group {
+            members: self
+                .displays
+                .iter()
+                .filter_map(|(key, displays)| {
+                    Some(Member {
+                        key: *key,
+                        displays: displays.clone(),
+                        offset: *self.offsets.get(key)?,
+                    })
+                })
+                .collect(),
+        }
     }
 }
 
@@ -416,6 +571,58 @@ mod tests {
         // the thin display is nearer along the path than the peer
         assert_eq!(with(own.clone()).exit(0, (99.0, 5.0), (4.0, -1.0)), None);
         assert!(with(own[..1].to_vec()).exit(0, (99.0, 5.0), (4.0, -1.0)).is_some());
+    }
+
+    #[test]
+    fn a_newcomer_is_placed_on_its_side_and_clear_of_the_rest() {
+        let mut here = Placement::new(0u8, vec![LAPTOP]);
+        here.show(1, vec![PEER]);
+        here.show(2, vec![PEER]);
+        assert_eq!(here.unplaced(), [1, 2]);
+        assert!(here.place(1, Side::Right, 10));
+        assert!(here.place(2, Side::Right, 10));
+        let group = here.group();
+        assert_eq!(group.members.len(), 3);
+        for key in [1, 2] {
+            let offset = group.members.iter().find(|m| m.key == key).unwrap().offset;
+            assert!(!group.overlaps(key, offset), "{key} at {offset:?}");
+        }
+        // each change is a newer version, even within the same instant
+        assert_eq!(here.message().0, 11);
+    }
+
+    #[test]
+    fn every_member_converges_on_the_newest_arrangement() {
+        let mut a = Placement::new(1u8, vec![LAPTOP]);
+        let mut b = Placement::new(2u8, vec![PEER]);
+        a.show(2, vec![PEER]);
+        b.show(1, vec![LAPTOP]);
+        a.place(2, Side::Right, 5);
+        b.place(1, Side::Above, 5);
+        // b's is the same version but a greater author: it wins on both
+        let (version, author, offsets) = b.message();
+        assert!(a.adopt(version, author, &offsets));
+        let (version, author, offsets) = a.message();
+        assert!(!b.adopt(version, author, &offsets));
+        assert_eq!(a.message(), b.message());
+        // an older arrangement never undoes a newer one
+        assert!(!a.adopt(1, 9, &[]));
+        // the next change here outranks what was adopted
+        a.place(2, Side::Below, 0);
+        assert!(a.message().0 > b.message().0);
+    }
+
+    #[test]
+    fn a_member_that_leaves_keeps_its_place() {
+        let mut here = Placement::new(0u8, vec![LAPTOP]);
+        here.show(1, vec![PEER]);
+        here.place(1, Side::Left, 1);
+        assert!(here.remove(1));
+        assert!(!here.remove(0), "this system never leaves its own group");
+        assert_eq!(here.group().members.len(), 1);
+        here.show(1, vec![PEER]);
+        assert!(here.unplaced().is_empty());
+        assert_eq!(here.group().members.len(), 2);
     }
 
     #[test]

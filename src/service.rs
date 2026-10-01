@@ -818,20 +818,14 @@ async fn run_core_once(
     membership: &mut mpsc::UnboundedReceiver<share::Membership<TcpStream>>,
     link: &watch::Sender<crate::control::Link>,
 ) -> Result<()> {
-    let side = waiting
-        .iter()
-        .find_map(|change| match change {
-            share::Membership::Join(joining) => Some(joining.agreed.0),
-            share::Membership::Drop(_) => None,
-        })
-        .unwrap_or(Side::Right);
-    let screen = macos::screen_bounds()?;
+    let displays = macos::displays()?;
     let control = std::sync::Arc::new(crate::control::SharedControl::new(me, me));
     let mut reports = control.watch_link();
     let mut injector = Injector::new();
     let mut sharing = Sharing::new(Pasteboard, clipboard.clone());
     let (messages, input) = mpsc::channel(INPUT_QUEUE_CAPACITY);
-    let (mut capture, overflowed) = Capture::start(screen, side, messages, control.clone())?;
+    let alone = crate::layout::Group::alone(me, displays.clone());
+    let (mut capture, overflowed) = Capture::start(alone, me, messages, control.clone())?;
     let until = async {
         loop {
             if overflowed.load(Ordering::Acquire) {
@@ -841,8 +835,7 @@ async fn run_core_once(
         }
     };
     let group = share::Group {
-        screen,
-        side,
+        displays,
         control,
         choices: choices.clone(),
     };

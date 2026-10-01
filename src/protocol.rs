@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::identity::PublicKey;
-use crate::input::{Along, InputEvent, Side};
+use crate::input::{InputEvent, Point, Rect, Side};
 
 pub const CONFIRMATION_LEN: usize = 32;
 
@@ -48,19 +48,23 @@ pub enum Message {
     ControlClaim {
         generation: u64,
     },
-    /// The pointer crossed onto the receiver's screen at `along`.
+    /// The pointer crossed onto the receiver `to`, at `at` in its own
+    /// coordinates.
     Enter {
         generation: u64,
-        along: Along,
+        to: PublicKey,
+        at: Point,
     },
     Input {
         generation: u64,
         event: InputEvent,
     },
-    /// The pointer went back to the system in control at `along`.
+    /// The pointer left the receiver for the system `to`, which may be the
+    /// one in control, at `at` in that system's own coordinates.
     Leave {
         generation: u64,
-        along: Along,
+        to: PublicKey,
+        at: Point,
     },
     /// The system in control took the pointer back; release everything held.
     Reclaim {
@@ -71,6 +75,18 @@ pub enum Message {
     ControlState {
         generation: u64,
         owner: PublicKey,
+    },
+    /// The sender's displays in its own coordinates, sent when a session
+    /// starts and whenever they change.
+    Displays {
+        displays: Vec<Rect>,
+    },
+    /// Where every system's displays sit in the group, as a whole. The
+    /// greatest `(version, author)` wins everywhere.
+    Arrangement {
+        version: u64,
+        author: PublicKey,
+        offsets: Vec<(PublicKey, (f64, f64))>,
     },
 }
 
@@ -144,7 +160,8 @@ mod tests {
             Message::ControlClaim { generation: 3 },
             Message::Enter {
                 generation: 3,
-                along: 12,
+                to: crate::identity::PublicKey::from_bytes(&[9; 32]).unwrap(),
+                at: (12.5, -3.0),
             },
             Message::Input {
                 generation: 3,
@@ -157,7 +174,21 @@ mod tests {
             },
             Message::Leave {
                 generation: 3,
-                along: u16::MAX,
+                to: crate::identity::PublicKey::from_bytes(&[8; 32]).unwrap(),
+                at: (-1440.0, 900.0),
+            },
+            Message::Displays {
+                displays: vec![Rect {
+                    x: -800.0,
+                    y: -1440.0,
+                    width: 2560.0,
+                    height: 1440.0,
+                }],
+            },
+            Message::Arrangement {
+                version: 7,
+                author: crate::identity::PublicKey::from_bytes(&[1; 32]).unwrap(),
+                offsets: vec![(crate::identity::PublicKey::from_bytes(&[2; 32]).unwrap(), (1512.0, 0.0))],
             },
             Message::Reclaim { generation: 3 },
             Message::Clipboard {
@@ -263,10 +294,12 @@ mod tests {
         };
         assert_eq!(layout.encode().unwrap()[0], 6);
         assert_eq!(Message::ControlClaim { generation: 0 }.encode().unwrap()[0], 7);
+        let key = crate::identity::PublicKey::from_bytes(&[0; 32]).unwrap();
         assert_eq!(
             Message::Enter {
                 generation: 0,
-                along: 0
+                to: key,
+                at: (0.0, 0.0)
             }
             .encode()
             .unwrap()[0],
@@ -280,7 +313,8 @@ mod tests {
         assert_eq!(
             Message::Leave {
                 generation: 0,
-                along: 0
+                to: key,
+                at: (0.0, 0.0)
             }
             .encode()
             .unwrap()[0],
@@ -292,6 +326,13 @@ mod tests {
             owner: crate::identity::PublicKey::from_bytes(&[0; 32]).unwrap(),
         };
         assert_eq!(state.encode().unwrap()[0], 12);
+        assert_eq!(Message::Displays { displays: vec![] }.encode().unwrap()[0], 13);
+        let arrangement = Message::Arrangement {
+            version: 0,
+            author: key,
+            offsets: vec![],
+        };
+        assert_eq!(arrangement.encode().unwrap()[0], 14);
     }
 
     #[test]
