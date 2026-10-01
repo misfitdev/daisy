@@ -11,6 +11,7 @@ pub mod input;
 pub mod install;
 pub mod latency;
 pub mod launcher;
+pub mod layout;
 pub mod macos;
 pub mod pairing;
 pub mod peers;
