@@ -88,6 +88,11 @@ pub enum Message {
         author: PublicKey,
         offsets: Vec<(PublicKey, (f64, f64))>,
     },
+    /// Whether the sender's screen is locked, sent when a session starts and
+    /// whenever it changes. Input sent to a locked system does nothing.
+    Locked {
+        locked: bool,
+    },
 }
 
 /// A clipboard snapshot is its items, each a `Begin`, its `Chunk`s and an
@@ -333,6 +338,7 @@ mod tests {
             offsets: vec![],
         };
         assert_eq!(arrangement.encode().unwrap()[0], 14);
+        assert_eq!(Message::Locked { locked: true }.encode().unwrap()[0], 15);
     }
 
     #[test]

@@ -162,6 +162,10 @@ impl crate::share::Inject for Injector {
     fn execute(&mut self, action: &Action) {
         Injector::execute(self, action);
     }
+
+    fn arrived(&mut self) {
+        super::power::declare_activity();
+    }
 }
 
 impl Default for Injector {

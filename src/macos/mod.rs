@@ -7,6 +7,7 @@ pub mod inject;
 pub mod install;
 pub mod pasteboard;
 mod pointer;
+pub mod power;
 pub mod shortcut;
 pub mod swipe;
 

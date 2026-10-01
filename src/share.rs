@@ -80,6 +80,8 @@ pub struct Group {
     pub save: mpsc::UnboundedSender<crate::peers::Arrangement>,
     /// Each link as a person sees it.
     pub reports: std::sync::Arc<tokio::sync::watch::Sender<Reports>>,
+    /// Whether this system's screen is locked, as it changes.
+    pub locked: tokio::sync::watch::Receiver<bool>,
 }
 
 /// Each peer's link, as a person sees it.
@@ -132,6 +134,7 @@ where
         saved: None,
         save: mpsc::unbounded_channel().0,
         reports: std::sync::Arc::new(tokio::sync::watch::Sender::new(Reports::new())),
+        locked: tokio::sync::watch::channel(false).1,
     };
     let mut membership = membership;
     let result = run(
@@ -157,6 +160,7 @@ struct Link {
     meter: crate::latency::Meter,
     last_heard: Instant,
     nonce: u64,
+    locked: bool,
     agreed: (Side, crate::trust::Timestamp),
     initiator: bool,
     agreed_tx: mpsc::UnboundedSender<(Side, crate::trust::Timestamp)>,
@@ -195,6 +199,7 @@ where
     let control = group.control;
     let mut choices = group.choices;
     let mut displays = group.displays;
+    let mut locked = group.locked;
     let me = control.state.lock().unwrap_or_else(|e| e.into_inner()).me();
     let mut placement = crate::layout::Placement::new(me, displays.borrow_and_update().clone());
     if let Some((version, author, offsets)) = &group.saved {
@@ -264,6 +269,7 @@ where
                         meter: crate::latency::Meter::default(),
                         last_heard: Instant::now(),
                         nonce: 0,
+                        locked: false,
                         agreed: joining.agreed,
                         initiator: joining.initiator,
                         agreed_tx: joining.agreed_tx,
@@ -281,6 +287,9 @@ where
                             displays: displays.borrow().clone(),
                         },
                         arrangement(&placement),
+                        Message::Locked {
+                            locked: *locked.borrow(),
+                        },
                     ];
                     if let Err(error) = introduce
                         .into_iter()
@@ -349,7 +358,8 @@ where
                             }
                         }
                     }
-                    Message::Enter { to, .. } => match links.get(&to) {
+                    // a locked system ignores posted input, so the pointer stays here
+                    Message::Enter { to, .. } => match links.get(&to).filter(|link| !link.locked) {
                         Some(link) => {
                             crossed = Some(to);
                             if let Err(error) = link.outgoing.send(message) {
@@ -406,6 +416,7 @@ where
                                 rearranged = true;
                             }
                         }
+                        Message::Locked { locked } => link.locked = locked,
                         Message::Arrangement { version, author, offsets } => {
                             if placement.adopt(version, author, &offsets) {
                                 rearranged = true;
@@ -460,7 +471,11 @@ where
                             }
                             let mut crossing = false;
                             let actions = match message {
-                                Message::Enter { at, .. } => { sharing.expect_snapshot(); release.target.enter(at) },
+                                Message::Enter { at, .. } => {
+                                    sharing.expect_snapshot();
+                                    release.injector.arrived();
+                                    release.target.enter(at)
+                                },
                                 Message::Input { event, .. } => release.target.input(event),
                                 Message::Reclaim { .. } => { crossing = true; release.target.reclaim() },
                                 _ => unreachable!(),
@@ -480,7 +495,7 @@ where
                 if let Err(error) = outcome { ended.push((peer, Err(error))); }
                 // the pointer left the system this one drives: home, or on to another
                 if let Some((generation, to, at)) = handoff.take() {
-                    match links.get(&to) {
+                    match links.get(&to).filter(|link| !link.locked) {
                         _ if to == me => {
                             pointer.leave(Some(at));
                             sharing.expect_snapshot();
@@ -521,6 +536,10 @@ where
                         arrange(&placement, release.target, pointer);
                     }
                 }
+            }
+            Ok(()) = locked.changed() => {
+                let now = *locked.borrow_and_update();
+                broadcast(&links, Message::Locked { locked: now }, &mut ended);
             }
             Ok(()) = displays.changed() => {
                 let mine = displays.borrow_and_update().clone();
@@ -627,6 +646,7 @@ fn publish(
                     .map(|latency| u64::try_from(latency.as_millis()).unwrap_or(u64::MAX)),
                 in_control: mine,
                 peer_in_control: owner == *key,
+                peer_locked: link.locked,
                 stats: link.meter.stats(),
             };
             (*key, report)
@@ -642,6 +662,8 @@ fn publish(
 /// Carries out the peer's input on this system.
 pub trait Inject {
     fn execute(&mut self, action: &Action);
+    /// Control just arrived here, so the display should wake.
+    fn arrived(&mut self) {}
 }
 
 /// Releases every held key, button, modifier and swipe even if the session
@@ -926,6 +948,7 @@ mod tests {
                 | Message::ControlState { .. }
                 | Message::Displays { .. }
                 | Message::Arrangement { .. }
+                | Message::Locked { .. }
         )
     }
 
@@ -1547,6 +1570,7 @@ mod tests {
             saved: None,
             save: mpsc::unbounded_channel().0,
             reports: Arc::new(watch::Sender::new(Reports::new())),
+            locked: watch::channel(false).1,
         }
     }
 
@@ -1555,7 +1579,7 @@ mod tests {
         loop {
             match peer.recv().await.unwrap() {
                 Message::Ping { nonce } => peer.send(&Message::Pong { nonce }).await.unwrap(),
-                Message::Displays { .. } | Message::Arrangement { .. } => {}
+                Message::Displays { .. } | Message::Arrangement { .. } | Message::Locked { .. } => {}
                 other => return other,
             }
         }
@@ -1861,6 +1885,112 @@ mod tests {
             versions.push(version);
         }
         assert_eq!(versions, [9], "only the newer arrangement is kept again");
+    }
+
+    #[derive(Default)]
+    struct Woken(Arc<Mutex<usize>>);
+
+    impl Inject for Woken {
+        fn execute(&mut self, _action: &Action) {}
+        fn arrived(&mut self) {
+            *self.0.lock().unwrap() += 1;
+        }
+    }
+
+    #[tokio::test]
+    async fn control_arriving_wakes_this_system_and_lock_states_are_shared() {
+        let (control, _members, mut membership, mut far, _ended, keys) = group_of(1, None).await;
+        let (_capture, input) = mpsc::channel(16);
+        let woken = Arc::new(Mutex::new(0));
+        let mut injector = Woken(woken.clone());
+        let (mut board, mut pointer) = (no_clipboard(), Returned::default());
+        let (lock, locked) = watch::channel(false);
+        let group = Group {
+            locked,
+            ..group(&control)
+        };
+        let mut reports = group.reports.subscribe();
+        let run = run(
+            group,
+            VecDeque::new(),
+            &mut membership,
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let script = async {
+            let peer = &mut far[0];
+            peer_enters(peer).await;
+            settle(peer, 1).await;
+            assert_eq!(*woken.lock().unwrap(), 1);
+            // this system locks: the peer hears it
+            lock.send_replace(true);
+            while peer.recv().await.unwrap() != (Message::Locked { locked: true }) {}
+            // the peer locks: this system reports it
+            peer.send(&Message::Locked { locked: true }).await.unwrap();
+            loop {
+                reports.changed().await.unwrap();
+                if reports
+                    .borrow_and_update()
+                    .get(&keys[0])
+                    .is_some_and(|link| link.peer_locked)
+                {
+                    break;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                () = script => {},
+                result = run => panic!("the group ended: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_pointer_never_crosses_onto_a_locked_screen() {
+        let (control, _members, mut membership, mut far, _ended, keys) = group_of(1, None).await;
+        let (capture, input) = mpsc::channel(16);
+        let (mut injector, mut board, mut pointer) = (Recorded::default(), no_clipboard(), Returned::default());
+        let run = run(
+            group(&control),
+            VecDeque::new(),
+            &mut membership,
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let script = async {
+            let peer = &mut far[0];
+            peer.send(&Message::Locked { locked: true }).await.unwrap();
+            settle(peer, 1).await;
+            let generation = control.state.lock().unwrap().generation();
+            capture
+                .send(Message::Enter {
+                    generation,
+                    to: keys[0],
+                    at: (1.0, 1.0),
+                })
+                .await
+                .unwrap();
+            let seen = round_trip(peer, 2).await;
+            assert!(!seen.iter().any(|m| matches!(m, Message::Enter { .. })), "{seen:?}");
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                () = script => {},
+                result = run => panic!("the group ended: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(pointer.0, vec![None], "the pointer stays where it was");
     }
 
     #[tokio::test]

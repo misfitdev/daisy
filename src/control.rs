@@ -18,6 +18,8 @@ pub struct Link {
     pub in_control: bool,
     /// Whether this peer has control.
     pub peer_in_control: bool,
+    /// Whether this peer's screen is locked.
+    pub peer_locked: bool,
     /// Every round trip on the link so far.
     pub stats: crate::latency::Stats,
 }

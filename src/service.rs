@@ -875,6 +875,21 @@ async fn run_core_once(
         }
     });
     let _watcher = AbortOnDrop(watcher);
+    let (lock, locked) = watch::channel(macos::power::screen_locked());
+    let _lock_watcher = AbortOnDrop(tokio::spawn(async move {
+        let mut every = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            every.tick().await;
+            lock.send_if_modified(|locked| {
+                let now = macos::power::screen_locked();
+                std::mem::replace(locked, now) != now
+            });
+        }
+    }));
+    // held while any link runs; displays may still sleep
+    let _awake = macos::power::KeepAwake::new(c"Daisy is sharing input with a group")
+        .inspect_err(|error| tracing::warn!(error = format!("{error:#}"), "could not keep this system awake"))
+        .ok();
     let (save, mut saving) = mpsc::unbounded_channel::<crate::peers::Arrangement>();
     let store = peers.clone();
     let _saver = AbortOnDrop(tokio::spawn(async move {
@@ -894,6 +909,7 @@ async fn run_core_once(
         saved: peers.arrangement(),
         save,
         reports: reports.clone(),
+        locked,
     };
     let run = share::run(
         group,
