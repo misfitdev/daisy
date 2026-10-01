@@ -28,14 +28,23 @@ Messages are encoded with [postcard](https://github.com/jamesmunns/postcard), wh
 | 3 | `Ping { nonce }` | both | Heartbeat, every second |
 | 4 | `Pong { nonce }` | both | Heartbeat reply |
 | 5 | `Clipboard { part }` | both | A piece of the sender's clipboard, sent whenever control crosses, below |
-| 6 | `Layout { side, chosen }` | both | Where the sender places the receiver, and when that side was chosen in Unix seconds; the later choice wins. Sent once when the session starts, and again whenever someone rearranges the screens during it |
-| 7 | `ControlClaim { generation }` | either | The sender takes control; equal generations favor the initiator |
-| 8 | `Enter { generation, along }` | system in control | The pointer crossed onto the receiver's screen |
+| 6 | `Layout { side, chosen }` | both | The side of the sender the receiver was first placed on, and when, in Unix seconds; the later choice wins. Places a member that has no position in the arrangement yet |
+| 7 | `ControlClaim { generation }` | any | The sender takes control at `generation` |
+| 8 | `Enter { generation, to, at }` | system in control | The pointer crossed onto `to`, at `at` in its own coordinates |
 | 9 | `Input { generation, event }` | system in control | One piece of input, below |
-| 10 | `Leave { generation, along }` | receiver | The pointer went back out through the shared edge, or the receiver was busy and turned it back |
+| 10 | `Leave { generation, to, at }` | system being driven | The pointer left for `to` at `at` in `to`'s coordinates: home to the system in control, or on to another member. A busy system sends it straight back |
 | 11 | `Reclaim { generation }` | system in control | Control was taken back with the escape chord; release everything held |
+| 12 | `ControlState { generation, owner }` | both, at start | Who the sender believes has control |
+| 13 | `Displays { displays }` | both | The sender's displays in its own coordinates; sent at start and whenever one is added, removed or moved |
+| 14 | `Arrangement { version, author, offsets }` | any | Where every member's displays sit in the group; the greatest `(version, author)` wins everywhere |
+| 15 | `Locked { locked }` | both | Whether the sender's screen is locked; sent at start and on change |
+| 16 | `SigningKey { key }` | both, at start | The Ed25519 key the sender signs introductions and revocations with |
+| 17 | `Introduce { introduction }` | any | A system the sender trusts, signed by the sender; see the security model |
+| 18 | `Revoke { revocation }` | any | A system a member no longer trusts, signed by that member, passed on |
 
-`generation` is the sender's latest claim. A message from an earlier generation is ignored, so input queued before a handoff never lands after it.
+`generation` is the sender's latest claim. Every member orders claims by `(generation, claimant key)` and keeps the greatest, so all agree on one owner whatever order claims arrive in. A system plays input only from the owner at the current generation, so input queued before a handoff never lands after it.
+
+Points are in a system's own coordinates: macOS global coordinates, origin at the top left of its main display, y growing downward. `Arrangement` places each system's displays by an offset into one shared space; displays of different systems never overlap there.
 
 `ClipboardPart`, carried by `Clipboard`, follows the same append-only rule. A snapshot of the clipboard is its items, each a `Begin`, its `Chunk`s and an `End` sharing an `id`, followed by `Done`:
 
@@ -63,20 +72,23 @@ A snapshot holds a `Text` item, with an `Rtf` item when the copy has rich text, 
 
 `Scroll` carries a scroll without a phase, such as a mouse wheel's. `PhasedScroll` carries a trackpad scroll and the momentum after a flick, so the receiver's apps scroll smoothly, coast and rubber-band. Its `phase` follows the same append-only rule: 0 `MayBegin`, 1 `Began`, 2 `Changed`, 3 `Ended`, 4 `Cancelled`, 5 `MomentumBegan`, 6 `Momentum`, 7 `MomentumEnded`. A scroll and its momentum stay on the system that had control when the fingers went down. The receiver replays a scroll only from its beginning, and ends one still under way when control leaves.
 
-`along` is a position on the shared edge, from 0 at its top or left end to 65,535 at its bottom or right end, so screens of different sizes line up proportionally.
+## A group
+
+Each system holds one session with every other member, up to eight systems. Sessions start independently: Bonjour shows which trusted members are nearby, and for each pair the lower key opens the connection.
 
 ## A session
 
 1. The connecting peer and the listening peer complete the Noise handshake.
 2. Both send `Hello`. If each already trusts the other's key, the session begins. Otherwise, if both are willing, they pair; if either is not, both drop the connection.
-3. Both peers exchange `Layout` within five seconds. The side chosen most recently wins, with the initiator's winning a tie; both store the agreed relation and when it was chosen. A peer rearranged during the session sends `Layout` again with the new time; each side applies the same rule, moves its crossing edge at once and stores the result.
-4. Pushing the pointer past the shared edge sends `Enter`, then `Input`. Pushing it back across the shared edge sends `Leave`.
-5. Whenever control crosses, the peer giving it up sends its clipboard as `Clipboard` parts: the driver after `Enter`, the receiver after `Leave` or `Reclaim`, and a driver that receives a newer `ControlClaim`. A peer with clipboard sharing turned off sends nothing and does not write what arrives. A peer accepts one snapshot per crossing toward it and ignores clipboard parts at any other time. The receiver acknowledges every `Chunk` with `Ack`, even when it discards it, and the sender keeps at most four chunks unacknowledged, so no more than 64 KB of clipboard data sits ahead of input and heartbeats.
-6. Both peers ping every second. Three seconds of silence ends the session and restores local capture and held-input state.
+3. Both peers exchange `Layout` within five seconds, then `SigningKey`. Each pins the other's signing key, sends an introduction of every other system it trusts whose signing key it knows, and every revocation it knows, and joins the session to its group.
+4. Each sends `ControlState`, `Displays`, its `Arrangement` and `Locked`. A member with displays but no position is placed on the side `Layout` agreed, clear of every other member, as a new arrangement.
+5. The system in control routes the pointer by geometry: leaving one of its own displays in a direction that reaches another member's display within 40 points sends `Enter` to that member, then `Input`. The member being driven does the same when the pointer leaves its displays, with `Leave` naming the next system; the system in control then sends `Enter` to it, or takes the pointer home. A locked member is never entered.
+6. Whenever control crosses, the peer giving it up sends its clipboard as `Clipboard` parts: the driver after `Enter`, the receiver after `Leave` or `Reclaim`, and a driver that receives a newer `ControlClaim`. A peer with clipboard sharing turned off sends nothing and does not write what arrives. A peer accepts one snapshot per crossing toward it and ignores clipboard parts at any other time. The receiver acknowledges every `Chunk` with `Ack`, even when it discards it, and the sender keeps at most four chunks unacknowledged, so no more than 64 KB of clipboard data sits ahead of input and heartbeats.
+7. Both peers ping every second. Three seconds of silence ends the session and restores local capture and held-input state.
 
 ## Changing the protocol
 
 - Adding a message or event: append a variant. An older peer cannot decode an unknown tag and ends the session, so only send a new message to a peer known to understand it.
 - Anything that changes the meaning of an existing message, or removes or reorders one: raise `PROTOCOL` in `src/session.rs`, so mismatched peers stop at the handshake and say which to update, rather than misbehave.
 
-A physical event on either peer claims ownership with a newer generation. The 150 ms settle window limits repeated claims when both peers are used together; equal generations favor the connection initiator. Remote injection is suppressed during local physical activity. Shared messages with an older generation are ignored. A change of driver preserves the screen relation.
+A physical event on any member claims ownership with a newer generation, sent to every member. The 150 ms settle window limits repeated claims when members are used together; equal generations favor the greater key. Remote injection is suppressed during local physical activity. When the member in control leaves the group, the others take control back locally. A change of driver preserves the arrangement.

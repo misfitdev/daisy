@@ -8,27 +8,26 @@ Daisy needs no account and no cloud service. Connections run directly over your 
 
 Daisy is in beta. It supports:
 
-- Pointer movement, clicks, drags and typing across a shared screen edge
+- Groups of up to eight systems: the pointer moves onto whichever screen it reaches, with typing, clicks and drags following it
+- Every display of every system arranged as in Displays, by dragging
 - Scrolling, with trackpad momentum, and swipes for Spaces, Mission Control and app windows
 - Clipboard sharing for text, rich text and images
 - Automatic reconnection after sleep or a network change
-- Connection status that names the peer and shows its round-trip latency
+- Connection status that names each member and shows its round-trip latency, plus `daisy stats` percentiles
 - Finding paired peers on the local network with Bonjour
-- Pairing with a one-time code, managed from the menu bar
+- Pairing with a one-time code; a system paired with any member joins the whole group
 - Immediate return of control with Control-Option-Command-Escape
-
-Planned: layouts that chain more than two screens.
 
 Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes through requires macOS 27 on the system whose trackpad you use.
 
 ## Getting Started
 
-1. Download the DMG from the latest release on [Releases](https://github.com/misfitdev/daisy/releases), open it and drag **Daisy** to Applications. Install it on both systems.
+1. Download the DMG from the latest release on [Releases](https://github.com/misfitdev/daisy/releases), open it and drag **Daisy** to Applications. Install it on every system.
 2. Open Daisy. It walks through allowing Accessibility and Input Monitoring, which macOS requires before Daisy can read and send input.
-3. Click **Pair a New Peer** on both systems. Nearby systems find each other automatically. Enter the six-digit code shown on one into the other.
-   - Once connected, drag the peer's screen to the side where it sits, as in Displays. Daisy agrees on one arrangement for the pair.
+3. Click **Pair a New Peer** on both systems. Nearby systems find each other automatically. Enter the six-digit code shown on one into the other. To add another system, pair it with any one of them.
+   - Once connected, drag each system's displays to where they sit, as in Displays. Every member keeps the same arrangement.
    - For networks without Bonjour, click **Advanced…** and enter the peer's address on one system, leaving it empty on the other.
-4. Click **Start Sharing** on both, then move the pointer through the chosen edge. The menu bar flower shows a yellow center while connected.
+4. Click **Start Sharing** on each, then move the pointer off a screen toward another system's. The menu bar flower shows a yellow center while connected.
 
 After pairing, they recognize each other; a new code is needed only when trust ends.
 

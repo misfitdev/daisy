@@ -1,11 +1,11 @@
 # Usage
 
-Daisy shares one system's keyboard, mouse and supported trackpad gestures with a peer on the same network. It does not use an account or cloud service.
+Daisy shares one keyboard, mouse and supported trackpad gestures across a group of up to eight systems on the same network. It does not use an account or cloud service.
 
 ## Requirements
 
 - Apple silicon systems running macOS 26 or later.
-- Accessibility and Input Monitoring granted to the signed `Daisy.app` on both systems.
+- Accessibility and Input Monitoring granted to the signed `Daisy.app` on every system.
 - TCP reachability between the systems. Daisy listens on port 24850 by default.
 - macOS 27 on the system whose trackpad swipes should cross. Keyboard and mouse sharing works on macOS 26.
 
@@ -21,34 +21,42 @@ Click **Pair a New Peer…** on both systems. Nearby systems find each other aut
 
 One system shows a six-digit code. Enter it on the other. The code is used directly as SPAKE2 input; do not compare codes by eye. Pairing closes after the first success, and an unknown peer is limited to five unknown-key attempts in ten minutes.
 
-Once paired, each system asks how long to trust the other. Its screen then appears beside this one at the top of the window.
+Once paired, each system asks how long to trust the other. Its displays then appear beside this system's at the top of the window.
 
 For a network without Bonjour, click **Advanced…** and enter the peer's local name or IP address on one system, leaving the address empty on the other. The **Nearby** menu there can also pick a particular peer.
 
+## Grow a group
+
+To add a system, pair it with any one system already in the group. That member introduces it to the rest with a signed introduction, so every member trusts it and links to it without another code; see the [security model](security-model.md#groups). A group holds up to eight systems; a ninth is refused. Each member trusts an introduced system for no longer than it trusts the member that introduced it.
+
+Every member links directly with every other. A system that sleeps or leaves the network drops out; the rest keep working, and it rejoins on its own once it is awake, unlocked and still trusted. While a group runs, each member holds off idle sleep, though its display may still sleep; control arriving on a system wakes its display.
+
 ## Start and stop sharing
 
-Click **Start Sharing** on both systems, or choose **Start Sharing** from the menu-bar flower. Nearby paired peers advertise and find each other automatically, repeating the encrypted handshake and checking trust after a disconnect. The lower public key opens the connection; the other listens. Both can supply input regardless of which opens the connection.
+Click **Start Sharing** on each system, or choose **Start Sharing** from the menu-bar flower. Trusted members nearby advertise and find each other automatically, repeating the encrypted handshake and checking trust after a disconnect. For each pair, the lower public key opens the connection and the other listens. Any member can supply input regardless of which opened a connection.
 
-An address under **Advanced…** connects directly, which is useful when Bonjour cannot reach the peer. When a paired peer is picked from **Nearby**, Daisy checks its pinned key and discovers its current address on reconnect. Direct connections back off after an established session drops; the automatic nearby workflow continues looking for the paired peer.
+An address under **Advanced…** connects directly, which is useful when Bonjour cannot reach a peer. When a paired peer is picked from **Nearby**, Daisy checks its pinned key and discovers its current address on reconnect. Direct connections back off after an established session drops; the automatic nearby workflow continues looking for every trusted member.
 
-Choose **Stop Sharing** to end sharing. Trust revocation also ends the session.
+Choose **Stop Sharing** to end sharing. Trust revocation also ends a member's link.
 
 ## Arrange the screens
 
-The top of the window shows this system's screen and, while connected, the peer's beside it, as Displays shows monitors. Drag the peer's screen to another side, or select it and use the arrow keys. The change applies on both systems at once and is kept for the next connection; when both systems change it, the later choice wins.
+The top of the window shows every display of every system in the group, as Displays shows monitors. Drag a peer's displays anywhere: they move together, snap when an edge comes within a few points of another, and never overlap another system's displays. With a pointer-free setup, select the arrangement and use the arrow keys to put the first peer against that side. Changes apply across the group at once and are kept for next time; when two systems change it, the later change wins. Plugging in, removing or rearranging a display updates the arrangement, moving any system that would now overlap.
 
 ## Move control
 
-Push the pointer through the configured shared edge to use the peer. Push it back through the corresponding edge to return. Using either system's own keyboard or trackpad immediately takes control there and releases remote held input; momentum scrolling after a trackpad flick does not, and coasts only on the system where the flick began. A 150 ms settle window limits repeated claims during simultaneous use; local input always stays local during that window. The screen arrangement stays the same when control changes.
+Push the pointer off any of this system's displays toward another system's display to use that system. Small gaps and corners still connect, as long as the next display is within 40 points along the way. The pointer goes from system to system the same way, and back. Moving between one system's own displays never crosses.
 
-Control never crosses while a mouse button is held. Control-Option-Command-Escape immediately returns control to the system you are at. Disconnect, three seconds of silence, trust revocation or local queue overload also end remote control and release held input.
+Using any system's own keyboard or trackpad immediately takes control there and releases remote held input; momentum scrolling after a trackpad flick does not, and coasts only on the system where the flick began. A 150 ms settle window limits repeated claims during simultaneous use; local input always stays local during that window. The arrangement stays the same when control changes.
+
+Control never crosses while a mouse button is held, and never onto a system whose screen is locked; unlock it there first. Control-Option-Command-Escape immediately returns control to the system you are at. Disconnect, three seconds of silence, trust revocation or local queue overload also end remote control and release held input.
 
 The menu-bar flower uses color only for state:
 
 - Yellow center: connected.
-- Gray center: stopped, looking for a peer, or connecting. The menu text gives the exact state.
+- Gray center: stopped, looking for peers, or connecting.
 
-The first line of the menu and the top of the Daisy window name the peer in every state: looking for it, connecting, reconnecting or connected. While connected, the menu adds the average round trip to the peer, for example "Connected to Studio · 4 ms", and the window also says which system has control and how long the session has run. The round trip is measured from the heartbeat each system sends every second, averaged over the last five; a single round trip over 50 ms is written to the log.
+The menu text gives the exact state. While connected, it names the members and adds each round trip, for example "Connected to Studio · 4 ms". In the window, the system in control is coral with the daisy; each peer's row shows whether its link is running, its round trip, whether its screen is locked, and who introduced it. A round trip is measured from the heartbeat each system sends every second; a single round trip over 50 ms is written to the log. `daisy stats` prints each running link's round trips by percentile.
 
 ## Clipboard
 
@@ -80,7 +88,9 @@ Each system chooses how long to trust a peer when they pair. The **Peers** group
 | This session | Expires when the session ends; an accidental drop gets a 60-second reconnect grace period |
 | Until I forget | Does not expire on its own |
 
-Both systems enforce their own choice, so the stricter one wins. When trust expires, that peer is forgotten and the pair must use a new code. **Forget** ends an active session immediately.
+Both systems enforce their own choice, so the stricter one wins. When trust expires, that peer is forgotten and the pair must use a new code. Trust in a system introduced by a member ends when trust in that member ends.
+
+**Forget…** ends that system's link immediately and removes it from the whole group: every member drops it, and every system it introduced, and a member that has not heard yet cannot bring it back. `daisy forget --all` only makes this system leave; it removes no one from the group.
 
 ## Launch at login
 
@@ -106,6 +116,7 @@ daisy connect peer.local:24851 --pair --side right
 
 # Manage trust and identity.
 daisy peers
+daisy stats
 daisy trust <name-or-fingerprint> idle:12h   # or idle (4 days), idle:<days>d, <days>d, once, forever
 daisy forget <name-or-fingerprint>...
 daisy forget --all
@@ -113,7 +124,7 @@ daisy rotate-key
 daisy id
 ```
 
-`--side` sets the screen edge where the peer sits. It defaults to the saved arrangement, or right for a peer paired now; when given, it becomes the new choice.
+`--side` sets the side a peer is placed on when it has no place in the arrangement yet; it defaults to right. The window can place it anywhere afterward.
 
 `--bind` controls the listener address; the default is `0.0.0.0`. Use a specific local address when the listener should not accept connections on every interface. When run from Terminal, the bundled binary relaunches through `Daisy.app` so macOS applies the app's permissions.
 
@@ -128,12 +139,16 @@ The default data directory is:
 It contains:
 
 - `identity`: this system's long-term private identity key.
-- `peers.toml`: paired public keys, names, trust policies, timestamps and screen arrangement.
+- `signing`: the key it signs introductions and revocations with.
+- `peers.toml`: trusted public keys, names, trust policies, timestamps, signing keys and who introduced each.
+- `revocations.toml`: signed revocations to pass on to members.
+- `arrangement.toml`: where every member's displays were last placed.
+- `stats.toml`: each running link's round trips, for `daisy stats`.
 - `settings.toml`: the last menu-bar setup, stored with mode `0600`.
 
 `--name` changes the name shown to the peer. `--home <directory>`, or `DAISY_HOME`, moves identity, peers and settings storage; this is useful when running two test identities on one system. Backing up or copying `identity` copies the system's identity, so protect it accordingly.
 
-`rotate-key` replaces this system's identity and requires every peer to pair again.
+`rotate-key` replaces this system's identity and signing key and requires every peer to pair again.
 
 ## Trackpad behavior
 

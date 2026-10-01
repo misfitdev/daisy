@@ -39,7 +39,7 @@ export const features: Feature[] = [
   {
     title: "Automatic session recovery",
     detail: "Reconnect after sleep, wake and network changes.",
-    status: "planned",
+    status: "available",
   },
   {
     title: "Shared clipboard",
@@ -48,7 +48,7 @@ export const features: Feature[] = [
   },
   {
     title: "Dynamic chaining",
-    detail: "Arrange a whole desk of systems on any edge and move through them as one layout.",
-    status: "planned",
+    detail: "Up to eight systems, every display arranged as in Displays. Pair one with any member to join.",
+    status: "available",
   },
 ];
