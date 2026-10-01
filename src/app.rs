@@ -739,6 +739,7 @@ impl AppDelegate {
                 self.apply_settings(&settings.last_session);
                 self.rebuild_peers_list();
                 self.refresh_permissions();
+                self.render_status();
                 if first_run && self.setup_step() == Step::Done {
                     self.open_window();
                 }
