@@ -9,13 +9,17 @@ use crate::input::Side;
 
 pub const SETTLE: Duration = Duration::from_millis(150);
 
-/// What a person sees of a running session.
+/// What a person sees of one peer's link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Link {
     /// Recent average round trip, in whole milliseconds.
     pub latency_ms: Option<u64>,
-    /// Whether this system has control, rather than the peer.
+    /// Whether this system has control.
     pub in_control: bool,
+    /// Whether this peer has control.
+    pub peer_in_control: bool,
+    /// Every round trip on the link so far.
+    pub stats: crate::latency::Stats,
 }
 
 pub struct SharedControl {
@@ -25,7 +29,6 @@ pub struct SharedControl {
     wakeups: Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
     activity: AtomicU64,
     started: Instant,
-    link: tokio::sync::watch::Sender<Link>,
 }
 
 impl SharedControl {
@@ -39,28 +42,9 @@ impl SharedControl {
             wakeups: Mutex::new(Some(wakeups)),
             activity: AtomicU64::new(0),
             started: Instant::now(),
-            link: tokio::sync::watch::Sender::new(Link {
-                latency_ms: None,
-                in_control: owner == me,
-            }),
         }
     }
 
-    /// Follows the session as a person sees it.
-    pub fn watch_link(&self) -> tokio::sync::watch::Receiver<Link> {
-        self.link.subscribe()
-    }
-
-    /// Records the latest latency and who has control.
-    pub fn publish(&self, latency: Option<Duration>) {
-        let in_control = self.state.lock().unwrap_or_else(|e| e.into_inner()).owns();
-        let link = Link {
-            latency_ms: latency.map(|latency| u64::try_from(latency.as_millis()).unwrap_or(u64::MAX)),
-            in_control,
-        };
-        // sent even when unchanged, so a watcher can refresh how long the session has run
-        self.link.send_replace(link);
-    }
     /// Wakes the session task after local input. Safe from the event tap: it
     /// never waits, and a wake already pending covers this one.
     pub fn wake(&self) {

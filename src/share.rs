@@ -78,7 +78,12 @@ pub struct Group {
     /// The arrangement kept from before, and where to keep each new one.
     pub saved: Option<crate::peers::Arrangement>,
     pub save: mpsc::UnboundedSender<crate::peers::Arrangement>,
+    /// Each link as a person sees it.
+    pub reports: std::sync::Arc<tokio::sync::watch::Sender<Reports>>,
 }
+
+/// Each peer's link, as a person sees it.
+pub type Reports = std::collections::BTreeMap<PublicKey, crate::control::Link>;
 
 /// A session with one more peer, joining the group.
 pub struct Joining<S> {
@@ -126,6 +131,7 @@ where
         choices: layout.arranging.choices,
         saved: None,
         save: mpsc::unbounded_channel().0,
+        reports: std::sync::Arc::new(tokio::sync::watch::Sender::new(Reports::new())),
     };
     let mut membership = membership;
     let result = run(
@@ -245,7 +251,7 @@ where
             if placement.remove(key) {
                 arrange(&placement, release.target, pointer);
             }
-            publish(&control, &links);
+            publish(&control, &links, &group.reports);
         }
         while let Some(change) = waiting.pop_front() {
             match change {
@@ -284,7 +290,7 @@ where
                     } else if let Some(replaced) = links.insert(key, link) {
                         replaced.finish(Err(anyhow::anyhow!("the peer connected again")));
                     }
-                    publish(&control, &links);
+                    publish(&control, &links, &group.reports);
                 }
                 Membership::Drop(key) => ended.push((key, Err(anyhow::anyhow!("the link was dropped")))),
             }
@@ -322,7 +328,7 @@ where
                     }
                     sharing.expect_snapshot();
                 }
-                publish(&control, &links);
+                publish(&control, &links, &group.reports);
             }
             message = input.recv() => {
                 let Some(message) = message else {
@@ -495,7 +501,7 @@ where
                     settle(&mut placement, &links, &mut ended);
                     arrange(&placement, release.target, pointer);
                 }
-                publish(&control, &links);
+                publish(&control, &links, &group.reports);
             }
             Ok(()) = choices.changed() => {
                 let chosen = *choices.borrow_and_update();
@@ -543,7 +549,7 @@ where
                         ended.push((*key, Err(error)));
                     }
                 }
-                publish(&control, &links);
+                publish(&control, &links, &group.reports);
             }
         }
     }
@@ -602,10 +608,35 @@ fn now_ms() -> u64 {
         .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// Reports who has control, and the round trip to the peer this system
-/// last heard from with a measure.
-fn publish(control: &crate::control::SharedControl, links: &std::collections::BTreeMap<PublicKey, Link>) {
-    control.publish(links.values().find_map(|link| link.meter.average()));
+/// Reports each link: its round trips, and who has control.
+fn publish(
+    control: &crate::control::SharedControl,
+    links: &std::collections::BTreeMap<PublicKey, Link>,
+    reports: &tokio::sync::watch::Sender<Reports>,
+) {
+    let state = control.state.lock().unwrap_or_else(|e| e.into_inner());
+    let (owner, mine) = (state.owner(), state.owns());
+    drop(state);
+    let current: Reports = links
+        .iter()
+        .map(|(key, link)| {
+            let report = crate::control::Link {
+                latency_ms: link
+                    .meter
+                    .average()
+                    .map(|latency| u64::try_from(latency.as_millis()).unwrap_or(u64::MAX)),
+                in_control: mine,
+                peer_in_control: owner == *key,
+                stats: link.meter.stats(),
+            };
+            (*key, report)
+        })
+        .collect();
+    reports.send_if_modified(|reported| {
+        let changed = *reported != current;
+        *reported = current;
+        changed
+    });
 }
 
 /// Carries out the peer's input on this system.
@@ -974,55 +1005,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_session_reports_latency_and_who_has_control() {
-        let (local, mut peer) = channels().await;
-        let control = control(&local, true);
-        let mut link = control.watch_link();
+    async fn each_link_reports_its_round_trips_and_who_has_control() {
+        let (control, _members, mut membership, mut far, _ended, keys) = group_of(2, None).await;
         let (_capture, input) = mpsc::channel(16);
-        let mut injector = Recorded::default();
-        let mut pointer = Returned::default();
-        let mut board = no_clipboard();
-        let answer = async {
-            loop {
-                if let Message::Ping { nonce } = peer.recv().await.unwrap() {
-                    peer.send(&Message::Pong { nonce }).await.unwrap();
-                }
-            }
-        };
-        let measured = async {
-            loop {
-                link.changed().await.unwrap();
-                let current = *link.borrow_and_update();
-                if current.latency_ms.is_some() {
-                    break current;
-                }
-            }
-        };
-        let session = together(
-            local,
-            SharedLayout {
-                screen: SCREEN,
-                side: Side::Left,
-                control: control.clone(),
-                arranging: Arranging::fixed((Side::Left, 0), true),
-            },
+        let (mut injector, mut board, mut pointer) = (Recorded::default(), no_clipboard(), Returned::default());
+        let group = group(&control);
+        let mut reports = group.reports.subscribe();
+        let run = run(
+            group,
+            VecDeque::new(),
+            &mut membership,
             input,
             &mut pointer,
             &mut injector,
             &mut board,
             pending(),
         );
+        let (first, second) = far.split_at_mut(1);
+        let answer = async {
+            loop {
+                if let Message::Ping { nonce } = first[0].recv().await.unwrap() {
+                    first[0].send(&Message::Pong { nonce }).await.unwrap();
+                }
+            }
+        };
+        // the second member never answers its pings
+        let silent = async {
+            loop {
+                second[0].recv().await.unwrap();
+            }
+        };
+        let measured = async {
+            loop {
+                reports.changed().await.unwrap();
+                let current = reports.borrow_and_update().clone();
+                if current.get(&keys[0]).is_some_and(|link| link.latency_ms.is_some()) {
+                    break current;
+                }
+            }
+        };
         let reported = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::select! {
                 reported = measured => reported,
                 () = answer => unreachable!(),
-                result = session => panic!("session ended first: {result:?}"),
+                () = silent => unreachable!(),
+                result = run => panic!("the group ended: {result:?}"),
             }
         })
         .await
         .unwrap();
-        assert!(reported.in_control);
-        assert!(reported.latency_ms.is_some_and(|ms| ms < 1000));
+        let answered = reported[&keys[0]];
+        assert!(answered.in_control && !answered.peer_in_control);
+        assert!(answered.latency_ms.is_some_and(|ms| ms < 1000));
+        assert!(answered.stats.count >= 1);
+        assert!(answered.stats.p50_us <= answered.stats.max_us);
+        let unanswered = reported[&keys[1]];
+        assert_eq!((unanswered.latency_ms, unanswered.stats.count), (None, 0));
     }
 
     #[tokio::test]
@@ -1508,6 +1546,7 @@ mod tests {
             choices: watch::channel(None).1,
             saved: None,
             save: mpsc::unbounded_channel().0,
+            reports: Arc::new(watch::Sender::new(Reports::new())),
         }
     }
 

@@ -718,7 +718,7 @@ impl AppDelegate {
     fn handle_event(&self, event: Event) {
         match event {
             Event::Nearby(nearby) => self.show_nearby(nearby),
-            Event::Link(link) => {
+            Event::Link { link, .. } => {
                 self.ivars().link.set(Some(link));
                 self.render_status();
             }
@@ -1241,6 +1241,7 @@ mod tests {
         let link = Link {
             latency_ms: Some(4),
             in_control: false,
+            ..Link::default()
         };
         let copy = status_copy(&connected(), Some((link, Duration::from_secs(65 * 60))));
         assert!(copy.connected);
@@ -1250,6 +1251,7 @@ mod tests {
         let unmeasured = Link {
             latency_ms: None,
             in_control: true,
+            ..Link::default()
         };
         let copy = status_copy(&connected(), Some((unmeasured, Duration::from_secs(30))));
         assert_eq!(copy.menu, "Connected to Studio");

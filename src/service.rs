@@ -645,7 +645,7 @@ where
     let mut visit = peers.visit(key)?;
     let (done, mut ended) = tokio::sync::oneshot::channel();
     let (agreed_tx, mut agreed_rx) = mpsc::unbounded_channel();
-    let mut link = hub.link();
+    let mut reports = hub.reports();
     let _member = hub.join(share::Joining {
         channel,
         agreed: (side, chosen),
@@ -667,9 +667,11 @@ where
                 trust_ended = Some(error);
                 hub.drop_link(key);
             }
-            Ok(()) = link.changed() => {
-                let current = *link.borrow_and_update();
-                observer.link(peer, current);
+            Ok(()) = reports.changed() => {
+                let current = reports.borrow_and_update().get(&key).copied();
+                if let Some(current) = current {
+                    observer.link(peer, current);
+                }
             }
             Some((side, chosen)) = agreed_rx.recv() => {
                 if let Err(error) = peers.agree_side(&key, side, chosen) {
@@ -707,7 +709,7 @@ pub struct Hub {
     clipboard: watch::Receiver<bool>,
     choices: watch::Receiver<Option<Side>>,
     running: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<share::Membership<TcpStream>>>>>,
-    link: std::sync::Arc<watch::Sender<crate::control::Link>>,
+    reports: std::sync::Arc<watch::Sender<share::Reports>>,
     members: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -728,7 +730,7 @@ impl Hub {
             clipboard: config.clipboard.clone(),
             choices: session_choices(config.arrangement),
             running: std::sync::Arc::default(),
-            link: std::sync::Arc::new(watch::Sender::new(crate::control::Link::default())),
+            reports: std::sync::Arc::new(watch::Sender::new(share::Reports::new())),
             members: std::sync::Arc::default(),
         }
     }
@@ -738,9 +740,9 @@ impl Hub {
         self.members.load(Ordering::Acquire)
     }
 
-    /// Who has control and the round trip, as the group reports them.
-    fn link(&self) -> watch::Receiver<crate::control::Link> {
-        self.link.subscribe()
+    /// Each link as the group reports it.
+    fn reports(&self) -> watch::Receiver<share::Reports> {
+        self.reports.subscribe()
     }
 
     /// Whether one more system fits in the group.
@@ -774,7 +776,7 @@ impl Hub {
             self.choices.clone(),
             membership,
             self.running.clone(),
-            self.link.clone(),
+            self.reports.clone(),
         ));
         Ok(member)
     }
@@ -796,12 +798,21 @@ async fn run_core(
     choices: watch::Receiver<Option<Side>>,
     mut membership: mpsc::UnboundedReceiver<share::Membership<TcpStream>>,
     running: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<share::Membership<TcpStream>>>>>,
-    link: std::sync::Arc<watch::Sender<crate::control::Link>>,
+    reports: std::sync::Arc<watch::Sender<share::Reports>>,
 ) {
     let mut waiting = std::collections::VecDeque::new();
     loop {
         waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
-        if let Err(error) = run_core_once(me, &peers, &clipboard, &choices, &mut waiting, &mut membership, &link).await
+        if let Err(error) = run_core_once(
+            me,
+            &peers,
+            &clipboard,
+            &choices,
+            &mut waiting,
+            &mut membership,
+            &reports,
+        )
+        .await
         {
             tracing::warn!(error = format!("{error:#}"), "input sharing stopped");
             let reason = format!("{error:#}");
@@ -830,11 +841,10 @@ async fn run_core_once(
     choices: &watch::Receiver<Option<Side>>,
     waiting: &mut std::collections::VecDeque<share::Membership<TcpStream>>,
     membership: &mut mpsc::UnboundedReceiver<share::Membership<TcpStream>>,
-    link: &watch::Sender<crate::control::Link>,
+    reports: &std::sync::Arc<watch::Sender<share::Reports>>,
 ) -> Result<()> {
     let displays = macos::displays()?;
     let control = std::sync::Arc::new(crate::control::SharedControl::new(me, me));
-    let mut reports = control.watch_link();
     let mut injector = Injector::new();
     let mut sharing = Sharing::new(Pasteboard, clipboard.clone());
     let (messages, input) = mpsc::channel(INPUT_QUEUE_CAPACITY);
@@ -883,6 +893,7 @@ async fn run_core_once(
         choices: choices.clone(),
         saved: peers.arrangement(),
         save,
+        reports: reports.clone(),
     };
     let run = share::run(
         group,
@@ -894,13 +905,7 @@ async fn run_core_once(
         &mut sharing,
         until,
     );
-    tokio::pin!(run);
-    loop {
-        tokio::select! {
-            result = &mut run => return result,
-            Ok(()) = reports.changed() => { link.send_replace(*reports.borrow_and_update()); }
-        }
-    }
+    run.await
 }
 
 /// Sides chosen on this system during a session. Without a way to choose,

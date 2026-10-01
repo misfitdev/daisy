@@ -449,7 +449,14 @@ mod tests {
     use super::*;
 
     fn live(in_control: bool, latency_ms: Option<u64>) -> Live {
-        Some((Link { latency_ms, in_control }, Duration::from_secs(35 * 60)))
+        Some((
+            Link {
+                latency_ms,
+                in_control,
+                ..Link::default()
+            },
+            Duration::from_secs(35 * 60),
+        ))
     }
 
     #[test]

@@ -182,7 +182,11 @@ pub enum Event {
     /// Peers, and systems open to pairing, found on the network.
     Nearby(Vec<Nearby>),
     /// Latency or who has control changed in the running session.
-    Link(crate::control::Link),
+    /// How one peer's link is doing.
+    Link {
+        peer: String,
+        link: crate::control::Link,
+    },
 }
 
 /// A system found on the network, as the interface shows it.
@@ -516,6 +520,7 @@ async fn run_session(
             events: events.clone(),
             home: home.clone(),
             waiting: None,
+            stats: std::collections::BTreeMap::new(),
         };
         let pairing = allow_pairing.then_some(settings.trust);
         let config = service::SessionConfig {
@@ -586,6 +591,17 @@ struct ControllerObserver {
     events: Sender<Event>,
     home: PathBuf,
     waiting: Option<(u16, bool)>,
+    /// Each running link's round trips, kept for `daisy stats`.
+    stats: std::collections::BTreeMap<String, crate::latency::LinkStats>,
+}
+
+impl ControllerObserver {
+    fn save_stats(&self) {
+        let links: Vec<_> = self.stats.values().cloned().collect();
+        if let Err(error) = crate::latency::save(&self.home, &links) {
+            tracing::debug!(error = format!("{error:#}"), "round trips could not be saved");
+        }
+    }
 }
 
 impl ControllerObserver {
@@ -624,8 +640,28 @@ impl ServiceObserver for ControllerObserver {
         }));
     }
 
-    fn link(&mut self, _peer: &str, link: crate::control::Link) {
-        let _ = self.events.send(Event::Link(link));
+    fn link(&mut self, peer: &str, link: crate::control::Link) {
+        let _ = self.events.send(Event::Link {
+            peer: peer.to_owned(),
+            link,
+        });
+        let now = trust::now();
+        let fresh = self
+            .stats
+            .get(peer)
+            .is_some_and(|kept| kept.stats == link.stats || kept.updated == now);
+        self.stats.insert(
+            peer.to_owned(),
+            crate::latency::LinkStats {
+                peer: peer.to_owned(),
+                updated: now,
+                stats: link.stats,
+            },
+        );
+        // at most once a second a link
+        if !fresh {
+            self.save_stats();
+        }
     }
 
     fn connected(&mut self, peer: &str, key: PublicKey, side: Side) {
@@ -636,7 +672,10 @@ impl ServiceObserver for ControllerObserver {
         }));
     }
 
-    fn disconnected(&mut self, _peer: &str) {
+    fn disconnected(&mut self, peer: &str) {
+        if self.stats.remove(peer).is_some() {
+            self.save_stats();
+        }
         if let Some((port, pairing)) = self.waiting {
             self.send_waiting(port, pairing);
         }
@@ -952,6 +991,7 @@ mod tests {
             events,
             home: directory.path().to_owned(),
             waiting: None,
+            stats: std::collections::BTreeMap::new(),
         };
         observer.waiting("Studio", key, service::DEFAULT_PORT, Some(Policy::IDLE));
         assert!(matches!(

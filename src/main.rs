@@ -80,11 +80,14 @@ enum Command {
     },
     /// List peers and how long each stays trusted
     Peers,
+    /// Show the round trips on each running link
+    Stats,
     /// Change how long a peer stays trusted
     Trust {
         /// Name or fingerprint, shown by `peers`
         peer: String,
-        /// idle, <days>d counted from pairing, once, or forever
+        /// idle, idle:<hours>h or idle:<days>d, <days>d counted from pairing,
+        /// once, or forever
         policy: Policy,
     },
     /// Show whether macOS lets the app read and send input
@@ -230,6 +233,10 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
             }
             Ok(())
         }
+        Command::Stats => {
+            print!("{}", stats_table(&daisy::latency::load(home, trust::now())));
+            Ok(())
+        }
         Command::Trust { peer, policy } => {
             let now = trust::now();
             let (matched, still) = peers.set_policy(&peer, policy, now)?;
@@ -327,6 +334,27 @@ impl ServiceObserver for TerminalObserver {
     }
 }
 
+/// The running links' round trips, one line each, in milliseconds.
+fn stats_table(links: &[daisy::latency::LinkStats]) -> String {
+    if links.is_empty() {
+        return "No running links.\n".to_owned();
+    }
+    let ms = |micros: u64| format!("{:.1}", micros as f64 / 1000.0);
+    let mut table = String::from("peer\tround trips\tp50 ms\tp99 ms\tmax ms\n");
+    for link in links {
+        let stats = &link.stats;
+        table.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            link.peer,
+            stats.count,
+            ms(stats.p50_us),
+            ms(stats.p99_us),
+            ms(stats.max_us)
+        ));
+    }
+    table
+}
+
 fn status(peer: &Peer, now: Timestamp) -> String {
     match (peer.policy, peer.expires_at()) {
         (_, None) => "never expires".to_owned(),
@@ -382,6 +410,25 @@ fn computer_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stats_read_in_milliseconds() {
+        assert_eq!(stats_table(&[]), "No running links.\n");
+        let link = daisy::latency::LinkStats {
+            peer: "Studio".to_owned(),
+            updated: 0,
+            stats: daisy::latency::Stats {
+                count: 120,
+                p50_us: 1_250,
+                p99_us: 9_000,
+                max_us: 31_400,
+            },
+        };
+        assert_eq!(
+            stats_table(&[link]),
+            "peer\tround trips\tp50 ms\tp99 ms\tmax ms\nStudio\t120\t1.2\t9.0\t31.4\n"
+        );
+    }
 
     #[test]
     fn no_subcommand_is_the_menu_bar_app() {
