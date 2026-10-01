@@ -484,7 +484,7 @@ mod tests {
         // laptop longer ago than its policy allows
         let long_ago = trust::now() - trust::IDLE_LIMIT.as_secs();
         let laptop_key = laptop.identity.public_key();
-        studio.peers.pin(laptop_key, "laptop", Policy::Idle, long_ago).unwrap();
+        studio.peers.pin(laptop_key, "laptop", Policy::IDLE, long_ago).unwrap();
 
         let (left, right, _, _) = negotiate(&mut laptop, &mut studio, (false, false), None).await;
         assert!(left.unwrap_err().to_string().contains("not paired"));

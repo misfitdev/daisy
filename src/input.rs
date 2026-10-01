@@ -72,6 +72,77 @@ pub enum InputEvent {
     Modifiers { code: u16, flags: u64 },
     /// One step of a multi-finger trackpad swipe.
     Swipe { step: SwipeStep },
+    /// Trackpad scrolling, in points, with the phase apps use for inertia and
+    /// rubber-banding.
+    PhasedScroll { dx: f64, dy: f64, phase: ScrollPhase },
+}
+
+/// Where a trackpad scroll is in its gesture, or in the coast that follows
+/// a flick.
+///
+/// Recorded on hardware on 2026-10-01, macOS 27.2, built-in trackpad: fingers
+/// down give `MayBegin`, then `Began`, `Changed` and `Ended`; about 12 ms later
+/// a flick coasts with `MomentumBegan`, `Momentum` and `MomentumEnded`.
+/// Touching the trackpad mid-coast ends the momentum, then gives `MayBegin`
+/// and `Cancelled` if the fingers do not move. `Began` and `MomentumBegan`
+/// carry deltas; `Ended` and `MomentumEnded` do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScrollPhase {
+    MayBegin,
+    Began,
+    Changed,
+    Ended,
+    Cancelled,
+    MomentumBegan,
+    Momentum,
+    MomentumEnded,
+}
+
+impl ScrollPhase {
+    // CGScrollPhase and CGMomentumScrollPhase, from CGEventTypes.h
+    const FIELDS: [(ScrollPhase, (i64, i64)); 8] = [
+        (ScrollPhase::MayBegin, (128, 0)),
+        (ScrollPhase::Began, (1, 0)),
+        (ScrollPhase::Changed, (2, 0)),
+        (ScrollPhase::Ended, (4, 0)),
+        (ScrollPhase::Cancelled, (8, 0)),
+        (ScrollPhase::MomentumBegan, (0, 1)),
+        (ScrollPhase::Momentum, (0, 2)),
+        (ScrollPhase::MomentumEnded, (0, 3)),
+    ];
+
+    /// From a scroll event's scroll phase and momentum phase fields. `None`
+    /// for a scroll with neither, like a mouse wheel's.
+    pub fn from_fields(scroll: i64, momentum: i64) -> Option<Self> {
+        Self::FIELDS
+            .iter()
+            .find(|(_, fields)| *fields == (scroll, momentum))
+            .map(|(phase, _)| *phase)
+    }
+
+    /// The scroll phase and momentum phase fields for this phase.
+    pub fn fields(self) -> (i64, i64) {
+        Self::FIELDS
+            .iter()
+            .find(|(phase, _)| *phase == self)
+            .map(|(_, fields)| *fields)
+            .expect("every phase has fields")
+    }
+
+    pub fn is_momentum(self) -> bool {
+        matches!(
+            self,
+            ScrollPhase::MomentumBegan | ScrollPhase::Momentum | ScrollPhase::MomentumEnded
+        )
+    }
+
+    fn begins(self) -> bool {
+        matches!(self, ScrollPhase::MayBegin | ScrollPhase::Began)
+    }
+
+    fn is_last(self) -> bool {
+        matches!(self, ScrollPhase::Cancelled | ScrollPhase::MomentumEnded)
+    }
 }
 
 pub type Point = (f64, f64);
@@ -181,6 +252,8 @@ pub struct Driver {
     local_buttons: BTreeSet<u8>,
     // for the swipe under way, whether it began while the peer had control
     swipe_forwarded: Option<bool>,
+    // the same for the trackpad scroll under way, including its momentum
+    scroll_forwarded: Option<bool>,
 }
 
 impl Driver {
@@ -196,11 +269,17 @@ impl Driver {
             orphaned_modifiers: BTreeSet::new(),
             local_buttons: BTreeSet::new(),
             swipe_forwarded: None,
+            scroll_forwarded: None,
         }
     }
 
     pub fn is_remote(&self) -> bool {
         self.remote
+    }
+
+    /// The peer now sits at `side`.
+    pub fn arrange(&mut self, side: Side) {
+        self.side = side;
     }
 
     /// The pointer moved by `delta` and is now at `point`.
@@ -307,11 +386,43 @@ impl Driver {
         }
     }
 
-    pub fn scroll(&mut self, dx: f64, dy: f64) -> Route {
-        if self.remote {
-            Route::Forward(InputEvent::Scroll { dx, dy })
-        } else {
-            Route::Local
+    /// A scroll by `dx`, `dy` points. A trackpad scroll, and the coast after
+    /// a flick, belong to the system that had control when the fingers went
+    /// down, so one under way stays put when control moves.
+    pub fn scroll(&mut self, dx: f64, dy: f64, phase: Option<ScrollPhase>) -> Route {
+        let Some(phase) = phase else {
+            return if self.remote {
+                Route::Forward(InputEvent::Scroll { dx, dy })
+            } else {
+                Route::Local
+            };
+        };
+        if phase.begins() {
+            self.scroll_forwarded = Some(self.remote);
+        }
+        let forwarded = self.scroll_forwarded.unwrap_or(self.remote);
+        if phase.is_last() {
+            self.scroll_forwarded = None;
+        }
+        match (forwarded, self.remote) {
+            (true, true) => Route::Forward(InputEvent::PhasedScroll { dx, dy, phase }),
+            // control came back mid-scroll, and the peer ended it
+            (true, false) => Route::Drop,
+            (false, _) => Route::Local,
+        }
+    }
+
+    /// Whether momentum arriving now continues a scroll on this system.
+    pub fn scroll_is_local(&self) -> bool {
+        !self.scroll_forwarded.unwrap_or(self.remote)
+    }
+
+    /// A scroll went to this system rather than the peer, including when it
+    /// took control back before reaching [`Driver::scroll`]. A gesture it
+    /// begins stays here.
+    pub fn scroll_stayed_here(&mut self, phase: ScrollPhase) {
+        if phase.begins() {
+            self.scroll_forwarded = Some(false);
         }
     }
 
@@ -344,9 +455,11 @@ pub enum Action {
         clicks: u8,
         at: Point,
     },
+    /// `phase` is `None` for a scroll without one, like a mouse wheel's.
     Scroll {
         dx: f64,
         dy: f64,
+        phase: Option<ScrollPhase>,
     },
     Key {
         code: u16,
@@ -379,6 +492,8 @@ pub struct Target {
     flags: u64,
     // the latest step of a swipe under way
     swipe: Option<SwipeStep>,
+    // the latest phase of a trackpad scroll under way
+    scroll: Option<ScrollPhase>,
 }
 
 impl Target {
@@ -393,11 +508,17 @@ impl Target {
             modifiers: BTreeSet::new(),
             flags: 0,
             swipe: None,
+            scroll: None,
         }
     }
 
     pub fn is_active(&self) -> bool {
         self.pointer.is_some()
+    }
+
+    /// The driving system now sits at `side` of this one.
+    pub fn arrange(&mut self, side: Side) {
+        self.exit = side;
     }
 
     pub fn enter(&mut self, along: Along) -> Vec<Action> {
@@ -445,7 +566,21 @@ impl Target {
                     at: pointer,
                 }]
             }
-            InputEvent::Scroll { dx, dy } => vec![Action::Scroll { dx, dy }],
+            InputEvent::Scroll { dx, dy } => vec![Action::Scroll { dx, dy, phase: None }],
+            InputEvent::PhasedScroll { dx, dy, phase } => {
+                match (phase, self.scroll) {
+                    _ if phase.begins() => self.scroll = Some(phase),
+                    // only replay a scroll from its beginning
+                    (_, None) => return Vec::new(),
+                    _ if phase.is_last() => self.scroll = None,
+                    _ => self.scroll = Some(phase),
+                }
+                vec![Action::Scroll {
+                    dx,
+                    dy,
+                    phase: Some(phase),
+                }]
+            }
             InputEvent::Swipe { step } => {
                 match (step.phase, self.swipe) {
                     (SwipePhase::Began, _) => self.swipe = Some(step),
@@ -520,6 +655,20 @@ impl Target {
             actions.push(Action::Modifiers { code, flags: 0 });
         }
         self.flags = 0;
+        // a scroll left hanging keeps apps scrolling or coasting
+        let end = match self.scroll.take() {
+            Some(ScrollPhase::MayBegin) => Some(ScrollPhase::Cancelled),
+            Some(ScrollPhase::Began | ScrollPhase::Changed) => Some(ScrollPhase::Ended),
+            Some(ScrollPhase::MomentumBegan | ScrollPhase::Momentum) => Some(ScrollPhase::MomentumEnded),
+            _ => None,
+        };
+        if let Some(phase) = end {
+            actions.push(Action::Scroll {
+                dx: 0.0,
+                dy: 0.0,
+                phase: Some(phase),
+            });
+        }
         // a swipe left hanging would leave the Dock halfway between Spaces
         if let Some(step) = self.swipe.take() {
             actions.push(Action::Swipe {
@@ -588,8 +737,30 @@ mod tests {
                 step: swipe(SwipePhase::Began, 0.0),
             })
             .unwrap()[0],
+            postcard::to_stdvec(&InputEvent::PhasedScroll {
+                dx: 0.0,
+                dy: 0.0,
+                phase: ScrollPhase::Began,
+            })
+            .unwrap()[0],
         ];
-        assert_eq!(tags, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(tags, [0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn scroll_phase_tags_are_stable() {
+        let tags = [
+            ScrollPhase::MayBegin,
+            ScrollPhase::Began,
+            ScrollPhase::Changed,
+            ScrollPhase::Ended,
+            ScrollPhase::Cancelled,
+            ScrollPhase::MomentumBegan,
+            ScrollPhase::Momentum,
+            ScrollPhase::MomentumEnded,
+        ]
+        .map(|phase| postcard::to_stdvec(&phase).unwrap()[0]);
+        assert_eq!(tags, [0, 1, 2, 3, 4, 5, 6, 7]);
     }
     const A_KEY: u16 = 0;
 
@@ -697,12 +868,12 @@ mod tests {
     #[test]
     fn input_goes_over_only_while_remote() {
         let mut driver = Driver::new(SCREEN, Side::Left);
-        assert_eq!(driver.scroll(0.0, 5.0), Route::Local);
+        assert_eq!(driver.scroll(0.0, 5.0, None), Route::Local);
         assert_eq!(driver.modifiers(COMMAND_KEY, COMMAND_FLAG), Route::Local);
 
         let mut driver = entered_driver();
         assert_eq!(
-            driver.scroll(0.0, 5.0),
+            driver.scroll(0.0, 5.0, None),
             Route::Forward(InputEvent::Scroll { dx: 0.0, dy: 5.0 })
         );
         assert!(matches!(driver.button(1, true, 2), Route::Forward(_)));
@@ -710,7 +881,7 @@ mod tests {
         let back = driver.leave(0);
         assert!(!driver.is_remote());
         assert_eq!(back, SCREEN.entry_point(Side::Left, 0));
-        assert_eq!(driver.scroll(0.0, 5.0), Route::Local);
+        assert_eq!(driver.scroll(0.0, 5.0, None), Route::Local);
     }
 
     #[test]
@@ -726,7 +897,7 @@ mod tests {
         assert_eq!(driver.key(ESCAPE_KEY, true, false, ESCAPE_MODIFIERS), Route::Reclaim);
         assert!(!driver.is_remote());
         // local again, so the pointer must be pushed across to go back
-        assert_eq!(driver.scroll(0.0, 1.0), Route::Local);
+        assert_eq!(driver.scroll(0.0, 1.0, None), Route::Local);
     }
 
     #[test]
@@ -817,6 +988,165 @@ mod tests {
             assert_eq!(target.input(InputEvent::Swipe { step }), vec![Action::Swipe { step }]);
         }
         assert!(target.release_all().is_empty(), "a finished swipe needs no cancelling");
+    }
+
+    fn scrolled(driver: &mut Driver, phase: ScrollPhase) -> Route {
+        driver.scroll(0.0, -12.0, Some(phase))
+    }
+
+    fn scrolling(target: &mut Target, phase: ScrollPhase) -> Vec<Action> {
+        target.input(InputEvent::PhasedScroll {
+            dx: 0.0,
+            dy: -12.0,
+            phase,
+        })
+    }
+
+    #[test]
+    fn scroll_phases_read_the_fields_recorded_on_hardware() {
+        // (scroll phase, momentum phase) fields from a built-in trackpad,
+        // 2026-10-01, macOS 27.2
+        for (fields, phase) in [
+            ((128, 0), ScrollPhase::MayBegin),
+            ((1, 0), ScrollPhase::Began),
+            ((2, 0), ScrollPhase::Changed),
+            ((4, 0), ScrollPhase::Ended),
+            ((8, 0), ScrollPhase::Cancelled),
+            ((0, 1), ScrollPhase::MomentumBegan),
+            ((0, 2), ScrollPhase::Momentum),
+            ((0, 3), ScrollPhase::MomentumEnded),
+        ] {
+            assert_eq!(ScrollPhase::from_fields(fields.0, fields.1), Some(phase));
+            assert_eq!(phase.fields(), fields);
+        }
+        assert_eq!(ScrollPhase::from_fields(0, 0), None);
+    }
+
+    #[test]
+    fn a_flick_goes_over_with_its_phases_and_momentum() {
+        let mut driver = entered_driver();
+        for phase in [
+            ScrollPhase::MayBegin,
+            ScrollPhase::Began,
+            ScrollPhase::Changed,
+            ScrollPhase::Ended,
+            ScrollPhase::MomentumBegan,
+            ScrollPhase::Momentum,
+            ScrollPhase::MomentumEnded,
+        ] {
+            assert_eq!(
+                scrolled(&mut driver, phase),
+                Route::Forward(InputEvent::PhasedScroll {
+                    dx: 0.0,
+                    dy: -12.0,
+                    phase
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_scroll_and_its_momentum_stay_with_the_system_it_began_on() {
+        let mut driver = Driver::new(SCREEN, Side::Left);
+        scrolled(&mut driver, ScrollPhase::Began);
+        scrolled(&mut driver, ScrollPhase::Ended);
+        // a mouse carries the pointer across while the flick coasts
+        assert!(matches!(driver.motion((0.0, 250.0), (-3.0, 0.0)), Route::Enter { .. }));
+        assert!(driver.scroll_is_local());
+        assert_eq!(scrolled(&mut driver, ScrollPhase::Momentum), Route::Local);
+        assert_eq!(scrolled(&mut driver, ScrollPhase::MomentumEnded), Route::Local);
+
+        // one begun over there does not coast here after control comes back
+        assert!(matches!(scrolled(&mut driver, ScrollPhase::Began), Route::Forward(_)));
+        scrolled(&mut driver, ScrollPhase::Ended);
+        driver.reclaim();
+        assert!(!driver.scroll_is_local());
+        assert_eq!(scrolled(&mut driver, ScrollPhase::MomentumBegan), Route::Drop);
+        assert_eq!(scrolled(&mut driver, ScrollPhase::MomentumEnded), Route::Drop);
+        assert!(driver.scroll_is_local());
+        assert_eq!(scrolled(&mut driver, ScrollPhase::Began), Route::Local);
+    }
+
+    #[test]
+    fn a_scroll_that_takes_control_back_stays_here() {
+        let mut driver = entered_driver();
+        assert!(matches!(scrolled(&mut driver, ScrollPhase::Began), Route::Forward(_)));
+        // the peer took control, so the rest of that scroll never arrived;
+        // fingers going down here claim control before the driver sees them
+        driver.reclaim();
+        driver.scroll_stayed_here(ScrollPhase::Began);
+        assert_eq!(scrolled(&mut driver, ScrollPhase::Changed), Route::Local);
+        assert_eq!(scrolled(&mut driver, ScrollPhase::Ended), Route::Local);
+    }
+
+    #[test]
+    fn target_replays_scrolls_from_their_beginning() {
+        let mut target = entered_target();
+        assert!(scrolling(&mut target, ScrollPhase::Changed).is_empty());
+        assert!(scrolling(&mut target, ScrollPhase::Momentum).is_empty());
+        for phase in [
+            ScrollPhase::Began,
+            ScrollPhase::Changed,
+            ScrollPhase::Ended,
+            ScrollPhase::MomentumBegan,
+            ScrollPhase::Momentum,
+            ScrollPhase::MomentumEnded,
+        ] {
+            assert_eq!(
+                scrolling(&mut target, phase),
+                vec![Action::Scroll {
+                    dx: 0.0,
+                    dy: -12.0,
+                    phase: Some(phase)
+                }]
+            );
+        }
+        assert!(target.release_all().is_empty(), "a finished scroll needs no ending");
+        assert!(scrolling(&mut target, ScrollPhase::Momentum).is_empty());
+    }
+
+    #[test]
+    fn a_scroll_under_way_is_ended_when_control_goes() {
+        let end = |phases: &[ScrollPhase]| {
+            let mut target = entered_target();
+            for &phase in phases {
+                scrolling(&mut target, phase);
+            }
+            target.reclaim()
+        };
+        let ended = |phase| {
+            vec![Action::Scroll {
+                dx: 0.0,
+                dy: 0.0,
+                phase: Some(phase),
+            }]
+        };
+        assert_eq!(end(&[ScrollPhase::MayBegin]), ended(ScrollPhase::Cancelled));
+        assert_eq!(
+            end(&[ScrollPhase::Began, ScrollPhase::Changed]),
+            ended(ScrollPhase::Ended)
+        );
+        assert_eq!(
+            end(&[ScrollPhase::Began, ScrollPhase::Ended, ScrollPhase::MomentumBegan]),
+            ended(ScrollPhase::MomentumEnded)
+        );
+        assert!(end(&[ScrollPhase::Began, ScrollPhase::Ended]).is_empty());
+    }
+
+    #[test]
+    fn rearranging_moves_the_edge_that_crosses() {
+        let mut driver = Driver::new(SCREEN, Side::Left);
+        driver.arrange(Side::Right);
+        assert_eq!(driver.motion((0.0, 250.0), (-3.0, 0.0)), Route::Local);
+        assert!(matches!(driver.motion((999.0, 250.0), (3.0, 0.0)), Route::Enter { .. }));
+
+        let mut target = Target::new(SCREEN, Side::Left);
+        target.enter(0);
+        target.arrange(Side::Below);
+        let left = target.input(InputEvent::Motion { dx: -5000.0, dy: 0.0 });
+        assert!(!left.iter().any(|action| matches!(action, Action::Leave { .. })));
+        let down = target.input(InputEvent::Motion { dx: 0.0, dy: 5000.0 });
+        assert!(down.iter().any(|action| matches!(action, Action::Leave { .. })));
     }
 
     #[test]

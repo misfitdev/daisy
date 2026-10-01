@@ -9,16 +9,15 @@ import { href } from "../../config";
   <p>Only systems that are both set to pair can pair. After one success, pairing closes. From then on, the two systems recognize each other without a code.</p>
 
   <h2>How long trust lasts</h2>
-  <p>Each system keeps its own choice for every peer it trusts. Both must still trust each other to connect, so the stricter choice wins.</p>
+  <p>Each system asks how long to trust a peer as soon as they pair, and keeps its own choice. Changing it later starts it over from that moment. Both must still trust each other to connect, so the stricter choice wins.</p>
   <table>
     <thead>
       <tr><th>Choice</th><th>Trusted until</th></tr>
     </thead>
     <tbody>
-      <tr><td>Until 4 Days Inactive (default)</td><td>96 hours pass without a connection. Staying connected renews it.</td></tr>
-      <tr><td>30 Days</td><td>30 days after pairing, however often the two systems connect.</td></tr>
-      <tr><td>This Session</td><td>The session ends. After an accidental drop, not a deliberate disconnect, the two systems may reconnect within 60 seconds.</td></tr>
-      <tr><td>Until I Forget</td><td>You forget it.</td></tr>
+      <tr><td>Until unused for a time you choose (4 days by default)</td><td>That many hours or days pass without a connection. Staying connected renews it.</td></tr>
+      <tr><td>This session</td><td>The session ends. After an accidental drop, not a deliberate disconnect, the two systems may reconnect within 60 seconds.</td></tr>
+      <tr><td>Until I forget</td><td>You forget it.</td></tr>
     </tbody>
   </table>
   <p>When trust ends, the two systems pair again with a new code.</p>

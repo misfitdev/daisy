@@ -1,5 +1,27 @@
 //! Native AppKit menu-bar interface for Daisy.
 
+#[path = "app/map.rs"]
+mod map;
+#[path = "app/menu.rs"]
+mod menu;
+#[path = "app/switch.rs"]
+mod switch;
+#[path = "app/trust.rs"]
+mod trust_form;
+#[path = "app/setup.rs"]
+mod walkthrough;
+#[path = "app/window.rs"]
+mod window;
+
+#[cfg(test)]
+#[path = "app/menu_test.rs"]
+mod menu_test;
+
+#[cfg(test)]
+pub fn test_modal_menu_actions() {
+    menu_test::run();
+}
+
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -10,11 +32,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControlStateValueMixed,
-    NSControlStateValueOff, NSControlStateValueOn, NSFont, NSImage, NSImageView, NSMenu, NSMenuItem, NSPopUpButton,
-    NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSTextField, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask, NSWorkspace,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
+    NSApplicationDelegate, NSButton, NSColor, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSPopUpButton,
+    NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSTextField, NSWindow, NSWindowDelegate, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -24,15 +44,12 @@ use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use crate::control::Link;
 use crate::controller::{self, AppSettings, Command, Connection, Event, Handle, SessionSettings, Status};
-use crate::input::Side;
 use crate::peers::Peer;
 use crate::permissions::{self, Access};
-use crate::trust::Policy;
+use crate::setup::Step;
 
 /// Matches `bundle_id` in the justfile, which writes it into Info.plist.
 const BUNDLE_ID: &str = "dev.misfit.daisy";
-const WINDOW_WIDTH: f64 = 580.0;
-const WINDOW_HEIGHT: f64 = 720.0;
 
 struct AppDelegateIvars {
     controller: Handle,
@@ -42,41 +59,27 @@ struct AppDelegateIvars {
     /// Latency and control in the running session, once reported.
     link: Cell<Option<Link>>,
     connected_at: Cell<Option<Instant>>,
-    window: OnceCell<Retained<NSWindow>>,
+    main: OnceCell<window::MainViews>,
+    advanced: OnceCell<window::AdvancedViews>,
+    /// This system's name, as the arrangement shows it.
+    local_name: RefCell<String>,
     status_item: OnceCell<Retained<NSStatusItem>>,
     menu_status: OnceCell<Retained<NSMenuItem>>,
     menu_start_stop: OnceCell<Retained<NSMenuItem>>,
-    menu_launch_login: OnceCell<Retained<NSMenuItem>>,
-    menu_clipboard: OnceCell<Retained<NSMenuItem>>,
-    peers_menu: OnceCell<Retained<NSMenu>>,
-    status_title: OnceCell<Retained<NSTextField>>,
-    status_detail: OnceCell<Retained<NSTextField>>,
-    connection_group: OnceCell<Retained<NSBox>>,
-    address_label: OnceCell<Retained<NSTextField>>,
-    address_field: OnceCell<Retained<NSTextField>>,
-    nearby_popup: OnceCell<Retained<NSPopUpButton>>,
+    /// The main menu's Quit Daisy and its stand-in that closes windows; one
+    /// of them carries Command-Q.
+    main_quit: OnceCell<Retained<NSMenuItem>>,
+    main_close_q: OnceCell<Retained<NSMenuItem>>,
     nearby: RefCell<Vec<controller::Nearby>>,
     /// The address and key of the peer last picked from Nearby; the key is
     /// used only while the address field still shows that address.
     nearby_choice: RefCell<Option<(String, String)>>,
-    menu_discoverable: OnceCell<Retained<NSMenuItem>>,
-    side_label: OnceCell<Retained<NSTextField>>,
-    side_popup: OnceCell<Retained<NSPopUpButton>>,
-    /// Whether the person changed the screen edge since it last showed the
-    /// saved arrangement.
-    side_edited: Cell<bool>,
-    trust_label: OnceCell<Retained<NSTextField>>,
-    trust_popup: OnceCell<Retained<NSPopUpButton>>,
-    permissions_heading: OnceCell<Retained<NSTextField>>,
-    permissions_group: OnceCell<Retained<NSBox>>,
-    accessibility_status: OnceCell<Retained<NSTextField>>,
-    input_status: OnceCell<Retained<NSTextField>>,
-    accessibility_button: OnceCell<Retained<NSButton>>,
-    input_button: OnceCell<Retained<NSButton>>,
-    start_button: OnceCell<Retained<NSButton>>,
-    pair_button: OnceCell<Retained<NSButton>>,
-    stop_button: OnceCell<Retained<NSButton>>,
     timer: OnceCell<Retained<NSTimer>>,
+    walkthrough: OnceCell<walkthrough::SetupViews>,
+    /// The walkthrough step last shown.
+    setup_step: Cell<Option<Step>>,
+    /// Whether the person was sent to System Settings for that step.
+    setup_asked: Cell<bool>,
     permission_poll_ticks: Cell<u8>,
 }
 
@@ -91,19 +94,37 @@ define_class!(
     unsafe impl NSObjectProtocol for AppDelegate {}
 
     unsafe impl NSWindowDelegate for AppDelegate {
-        // Back to a menu-bar-only app once the window is gone.
+        // Back to a menu-bar-only app once the last window is gone.
         #[unsafe(method(windowWillClose:))]
-        fn window_will_close(&self, _notification: &NSNotification) {
-            NSApplication::sharedApplication(self.mtm()).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        fn window_will_close(&self, notification: &NSNotification) {
+            let closing = notification.object().map(|object| Retained::as_ptr(&object).cast::<NSWindow>());
+            let others_open = self
+                .windows()
+                .iter()
+                .any(|window| window.isVisible() && Some(Retained::as_ptr(window)) != closing);
+            if !others_open {
+                NSApplication::sharedApplication(self.mtm())
+                    .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            }
         }
     }
 
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
+        if self.move_to_applications() {
+            return;
+        }
+        self.build_main_menu();
         self.build_menu();
         self.build_window();
+        let views = walkthrough::SetupViews::new(self.mtm(), self);
+        views.window.setDelegate(Some(ProtocolObject::from_ref(self)));
+        self.ivars().walkthrough.set(views).ok();
         self.refresh_permissions();
+        if self.setup_step() != Step::Done {
+            self.open_setup();
+        }
 
             let timer = unsafe {
                 NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
@@ -123,7 +144,13 @@ define_class!(
         }
     }
 
-    impl AppDelegate {
+        impl AppDelegate {
+            // Menu actions must remain reachable while a pairing or notice alert is open.
+            #[unsafe(method(worksWhenModal))]
+            fn works_when_modal(&self) -> bool {
+                true
+            }
+
         #[unsafe(method(pollController:))]
         fn poll_controller(&self, _timer: &NSTimer) {
             loop {
@@ -138,6 +165,10 @@ define_class!(
                         break;
                     }
                 }
+            }
+            let setup_open = self.ivars().walkthrough.get().is_some_and(|views| views.window.isVisible());
+            if setup_open && self.ivars().permission_poll_ticks.get().is_multiple_of(5) {
+                self.refresh_setup();
             }
             let ticks = self.ivars().permission_poll_ticks.get() + 1;
             if ticks >= 20 {
@@ -225,11 +256,6 @@ define_class!(
             self.refresh_permissions();
         }
 
-        #[unsafe(method(chooseSide:))]
-        fn choose_side(&self, _sender: &NSPopUpButton) {
-            self.ivars().side_edited.set(true);
-        }
-
         #[unsafe(method(pickNearby:))]
         fn pick_nearby(&self, sender: &NSPopUpButton) {
             // item 0 is the pull-down's title
@@ -240,8 +266,8 @@ define_class!(
             else {
                 return;
             };
-            if let Some(field) = self.ivars().address_field.get() {
-                field.setStringValue(&NSString::from_str(&peer.address));
+            if let Some(views) = self.ivars().advanced.get() {
+                views.address.setStringValue(&NSString::from_str(&peer.address));
             }
             *self.ivars().nearby_choice.borrow_mut() = peer.key.map(|key| (peer.address.clone(), key.to_hex()));
         }
@@ -288,7 +314,7 @@ define_class!(
         }
 
         #[unsafe(method(forgetPeer:))]
-        fn forget_peer(&self, sender: &NSMenuItem) {
+        fn forget_peer(&self, sender: &NSButton) {
             let index = sender.tag();
             let Some(peer) = usize::try_from(index)
                 .ok()
@@ -312,34 +338,128 @@ define_class!(
         }
 
         #[unsafe(method(changeTrust:))]
-        fn change_trust(&self, sender: &NSMenuItem) {
-            let tag = sender.tag();
-            if tag < 0 {
-                return;
-            }
-            let index = usize::try_from(tag / 10).ok();
-            let policy = match tag % 10 {
-                0 => Some(Policy::Idle),
-                1 => Some(Policy::Once),
-                2 => Some(Policy::Days(30)),
-                3 => Some(Policy::Forever),
-                _ => None,
-            };
-            let Some((peer, policy)) = index
+        fn change_trust(&self, sender: &NSButton) {
+            let Some(peer) = usize::try_from(sender.tag())
+                .ok()
                 .and_then(|index| self.ivars().peers.borrow().get(index).cloned())
-                .zip(policy)
             else {
                 return;
             };
-            let _ = self.ivars().controller.send(Command::SetTrust {
-                selector: peer.key.to_hex(),
-                policy,
-            });
+            let chosen = trust_form::ask(
+                self.mtm(),
+                self,
+                &format!("Trust {} for how long?", peer.name),
+                "Save",
+                Some("Cancel"),
+                peer.policy,
+            );
+            if let Some(chosen) = chosen.filter(|chosen| *chosen != peer.policy) {
+                let _ = self.ivars().controller.send(Command::SetTrust {
+                    selector: peer.key.to_hex(),
+                    policy: chosen,
+                });
+            }
         }
 
-        #[unsafe(method(refreshPeers:))]
-        fn refresh_peers(&self, _sender: Option<&AnyObject>) {
-            let _ = self.ivars().controller.send(Command::Refresh);
+        // Radio buttons need a shared action to act as one group.
+        #[unsafe(method(trustKind:))]
+        fn trust_kind(&self, _sender: Option<&AnyObject>) {}
+
+        #[unsafe(method(setUpPermissions:))]
+        fn set_up_permissions(&self, _sender: Option<&AnyObject>) {
+            self.open_setup();
+        }
+
+        #[unsafe(method(setupAllow:))]
+        fn setup_allow(&self, _sender: Option<&AnyObject>) {
+            match self.setup_step() {
+                Step::Accessibility => self.request_accessibility(sel!(setupAllow:), None),
+                Step::InputMonitoring => self.request_input_monitoring(sel!(setupAllow:), None),
+                Step::Reopen | Step::Done => return,
+            }
+            self.ivars().setup_asked.set(true);
+            self.refresh_setup();
+        }
+
+        #[unsafe(method(setupAction:))]
+        fn setup_action(&self, _sender: Option<&AnyObject>) {
+            match self.setup_step() {
+                Step::Reopen => match crate::macos::install::relaunch() {
+                    Ok(()) => NSApplication::sharedApplication(self.mtm()).terminate(None),
+                    Err(error) => self.show_alert(
+                        "Daisy could not reopen itself",
+                        &format!("Quit Daisy from the menu bar, then open it again. ({error:#})"),
+                        NSAlertStyle::Warning,
+                    ),
+                },
+                Step::Done => {
+                    if let Some(views) = self.ivars().walkthrough.get() {
+                        views.window.close();
+                    }
+                    self.open_window();
+                }
+                Step::Accessibility | Step::InputMonitoring => {}
+            }
+        }
+
+        #[unsafe(method(arrangePeer:))]
+        fn arrange_peer(&self, sender: &AnyObject) {
+            let Some(views) = self.ivars().main.get() else {
+                return;
+            };
+            if !std::ptr::eq(sender, (&*views.arrange as &AnyObject) as *const AnyObject) {
+                return;
+            }
+            if let Some(side) = views.arrange.side() {
+                self.ivars().settings.borrow_mut().last_session.side = side;
+                let _ = self.ivars().controller.send(Command::Arrange(side));
+            }
+        }
+
+        #[unsafe(method(openAdvanced:))]
+        fn open_advanced(&self, _sender: Option<&AnyObject>) {
+            if let (Some(main), Some(advanced)) = (self.ivars().main.get(), self.ivars().advanced.get()) {
+                main.window.beginSheet_completionHandler(&advanced.window, None);
+            }
+        }
+
+        #[unsafe(method(closeAdvanced:))]
+        fn close_advanced(&self, _sender: Option<&AnyObject>) {
+            if let (Some(main), Some(advanced)) = (self.ivars().main.get(), self.ivars().advanced.get()) {
+                main.window.endSheet(&advanced.window);
+            }
+        }
+
+        // Command-W and Escape: a sheet ends, a window closes.
+        #[unsafe(method(closeKeyWindow:))]
+        fn close_key_window(&self, _sender: Option<&AnyObject>) {
+            let Some(window) = NSApplication::sharedApplication(self.mtm()).keyWindow() else {
+                return;
+            };
+            match window.sheetParent() {
+                Some(parent) => parent.endSheet(&window),
+                None => window.performClose(None),
+            }
+        }
+
+        #[unsafe(method(closeWindows:))]
+        fn close_windows(&self, _sender: Option<&AnyObject>) {
+            for window in self.windows() {
+                if window.isVisible() {
+                    window.performClose(None);
+                }
+            }
+        }
+
+        #[unsafe(method(toggleCommandQ:))]
+        fn toggle_command_q(&self, _sender: Option<&AnyObject>) {
+            let on = {
+                let mut settings = self.ivars().settings.borrow_mut();
+                settings.command_q_quits = !settings.command_q_quits;
+                settings.command_q_quits
+            };
+            let _ = self.ivars().controller.send(Command::SetCommandQQuits(on));
+            self.refresh_command_q();
         }
 
         #[unsafe(method(quitDaisy:))]
@@ -359,37 +479,20 @@ impl AppDelegate {
             status: RefCell::new(Status::Idle),
             link: Cell::new(None),
             connected_at: Cell::new(None),
-            window: OnceCell::new(),
+            main: OnceCell::new(),
+            advanced: OnceCell::new(),
+            local_name: RefCell::new(controller::computer_name()),
             status_item: OnceCell::new(),
             menu_status: OnceCell::new(),
             menu_start_stop: OnceCell::new(),
-            menu_launch_login: OnceCell::new(),
-            menu_clipboard: OnceCell::new(),
-            peers_menu: OnceCell::new(),
-            status_title: OnceCell::new(),
-            status_detail: OnceCell::new(),
-            connection_group: OnceCell::new(),
-            address_label: OnceCell::new(),
-            address_field: OnceCell::new(),
-            nearby_popup: OnceCell::new(),
+            main_quit: OnceCell::new(),
+            main_close_q: OnceCell::new(),
             nearby: RefCell::new(Vec::new()),
             nearby_choice: RefCell::new(None),
-            menu_discoverable: OnceCell::new(),
-            side_label: OnceCell::new(),
-            side_popup: OnceCell::new(),
-            side_edited: Cell::new(false),
-            trust_label: OnceCell::new(),
-            trust_popup: OnceCell::new(),
-            permissions_heading: OnceCell::new(),
-            permissions_group: OnceCell::new(),
-            accessibility_status: OnceCell::new(),
-            input_status: OnceCell::new(),
-            accessibility_button: OnceCell::new(),
-            input_button: OnceCell::new(),
-            start_button: OnceCell::new(),
-            pair_button: OnceCell::new(),
-            stop_button: OnceCell::new(),
             timer: OnceCell::new(),
+            walkthrough: OnceCell::new(),
+            setup_step: Cell::new(None),
+            setup_asked: Cell::new(false),
             permission_poll_ticks: Cell::new(0),
         });
         // SAFETY: NSObject's initializer has no additional requirements.
@@ -400,33 +503,17 @@ impl AppDelegate {
         let mtm = self.mtm();
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSSquareStatusItemLength);
-        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Daisy"));
+        let menu = menu::new("Daisy", mtm);
 
         let status = self.menu_item("Stopped", None, false);
+        let start_stop = self.menu_item("Start Sharing", Some(sel!(startOrStop:)), true);
         let open = self.menu_item("Open Daisy…", Some(sel!(openDaisy:)), true);
-        let start_stop = self.menu_item("Start", Some(sel!(startOrStop:)), true);
-        let pair = self.menu_item("Pair a New Peer…", Some(sel!(openDaisy:)), true);
-        let peers_parent = self.menu_item("Paired Peers", None, true);
-        let peers_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Paired Peers"));
-        peers_parent.setSubmenu(Some(&peers_menu));
-        let clipboard = self.menu_item("Share Clipboard", Some(sel!(toggleShareClipboard:)), true);
-        let launch_login = self.menu_item("Open at Login", Some(sel!(toggleLaunchAtLogin:)), true);
-        let reset = self.menu_item("Reset Permissions…", Some(sel!(resetPermissions:)), true);
-        let discoverable = self.menu_item("Discoverable on This Network", Some(sel!(toggleDiscoverable:)), true);
-        let refresh = self.menu_item("Refresh Peers", Some(sel!(refreshPeers:)), true);
         let quit = self.menu_item("Quit Daisy", Some(sel!(quitDaisy:)), true);
 
         menu.addItem(&status);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        menu.addItem(&open);
         menu.addItem(&start_stop);
-        menu.addItem(&pair);
-        menu.addItem(&peers_parent);
-        menu.addItem(&refresh);
-        menu.addItem(&clipboard);
-        menu.addItem(&discoverable);
-        menu.addItem(&launch_login);
-        menu.addItem(&reset);
+        menu.addItem(&open);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         menu.addItem(&quit);
         status_item.setMenu(Some(&menu));
@@ -438,172 +525,194 @@ impl AppDelegate {
         self.ivars().status_item.set(status_item).ok();
         self.ivars().menu_status.set(status).ok();
         self.ivars().menu_start_stop.set(start_stop).ok();
-        self.ivars().menu_launch_login.set(launch_login).ok();
-        self.ivars().menu_discoverable.set(discoverable).ok();
-        self.ivars().menu_clipboard.set(clipboard).ok();
-        self.ivars().peers_menu.set(peers_menu).ok();
-        self.refresh_launch_at_login();
-        self.refresh_share_clipboard();
-        self.rebuild_peers_menu();
+    }
+
+    /// Offers to move a downloaded Daisy into Applications. Returns whether
+    /// it moved, in which case Daisy is quitting so the copy can open.
+    fn move_to_applications(&self) -> bool {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return false;
+        };
+        let Some(planned) = crate::macos::install::offer(&home) else {
+            return false;
+        };
+        let app = NSApplication::sharedApplication(self.mtm());
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        app.activate();
+        let alert = NSAlert::new(self.mtm());
+        alert.setMessageText(&NSString::from_str("Move Daisy to Applications?"));
+        alert.setInformativeText(&NSString::from_str(if planned.replaces {
+            "This replaces the copy already there. Settings and paired peers stay."
+        } else {
+            "Daisy reopens from there."
+        }));
+        alert.addButtonWithTitle(&NSString::from_str("Move to Applications"));
+        alert.addButtonWithTitle(&NSString::from_str("Not Now"));
+        let moved = alert.runModal() == NSAlertFirstButtonReturn
+            && match crate::macos::install::carry_out(&planned, BUNDLE_ID) {
+                Ok(()) => true,
+                Err(error) => {
+                    self.show_alert(
+                        "Daisy could not move itself",
+                        &format!("Drag Daisy to the Applications folder, then open it from there. ({error:#})"),
+                        NSAlertStyle::Warning,
+                    );
+                    false
+                }
+            };
+        if moved {
+            app.terminate(None);
+        } else {
+            app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        }
+        moved
+    }
+
+    /// The menu bar while a Daisy window is open. AppKit enables these items
+    /// itself, so Close and the edit commands follow the key window.
+    fn build_main_menu(&self) {
+        let mtm = self.mtm();
+        let item = |title: &str, action: Option<objc2::runtime::Sel>, key: &str| {
+            // SAFETY: the action is implemented by Daisy or by AppKit's responder chain
+            unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(title),
+                    action,
+                    &NSString::from_str(key),
+                )
+            }
+        };
+        let submenu = |title: &str, items: &[&NSMenuItem]| {
+            let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+            for entry in items {
+                menu.addItem(entry);
+            }
+            let parent = item(title, None, "");
+            parent.setSubmenu(Some(&menu));
+            parent
+        };
+
+        let quit = item("Quit Daisy", Some(sel!(quitDaisy:)), "");
+        let close_q = item("Close Windows", Some(sel!(closeWindows:)), "");
+        close_q.setHidden(true);
+        close_q.setAllowsKeyEquivalentWhenHidden(true);
+        let close = item("Close", Some(sel!(closeKeyWindow:)), "w");
+        let escape = item("Close", Some(sel!(closeKeyWindow:)), "\u{1b}");
+        escape.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
+        escape.setHidden(true);
+        escape.setAllowsKeyEquivalentWhenHidden(true);
+        for target in [&quit, &close_q, &close, &escape] {
+            // SAFETY: Daisy implements these actions and outlives the menu
+            unsafe { target.setTarget(Some(self)) };
+        }
+        let select_all = item("Select All", Some(sel!(selectAll:)), "a");
+        let redo = item("Redo", Some(sel!(redo:)), "z");
+        redo.setKeyEquivalentModifierMask(NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
+
+        let main = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(""));
+        main.addItem(&submenu("Daisy", &[&quit, &close_q]));
+        main.addItem(&submenu("File", &[&close, &escape]));
+        main.addItem(&submenu(
+            "Edit",
+            &[
+                &item("Undo", Some(sel!(undo:)), "z"),
+                &redo,
+                &NSMenuItem::separatorItem(mtm),
+                &item("Cut", Some(sel!(cut:)), "x"),
+                &item("Copy", Some(sel!(copy:)), "c"),
+                &item("Paste", Some(sel!(paste:)), "v"),
+                &select_all,
+            ],
+        ));
+        NSApplication::sharedApplication(mtm).setMainMenu(Some(&main));
+        self.ivars().main_quit.set(quit).ok();
+        self.ivars().main_close_q.set(close_q).ok();
+        self.refresh_command_q();
+    }
+
+    /// Daisy's own windows, open or not.
+    fn windows(&self) -> Vec<Retained<NSWindow>> {
+        self.ivars()
+            .main
+            .get()
+            .map(|views| &views.window)
+            .into_iter()
+            .chain(self.ivars().walkthrough.get().map(|views| &views.window))
+            .cloned()
+            .collect()
+    }
+
+    fn setup_step(&self) -> Step {
+        let accessibility = permissions::accessibility();
+        let input = permissions::input_monitoring();
+        // probing only matters, and only succeeds, once both are granted
+        let reads_input = permissions::ready(accessibility, input) && crate::macos::capture::reads_input();
+        crate::setup::step(accessibility, input, reads_input)
+    }
+
+    fn open_setup(&self) {
+        let Some(views) = self.ivars().walkthrough.get() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(self.mtm());
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        views.window.makeKeyAndOrderFront(None);
+        // macOS may refuse to activate an app launched in the background;
+        // the window still comes forward
+        views.window.orderFrontRegardless();
+        app.activate();
+        self.refresh_setup();
+    }
+
+    /// Shows the current step, bringing Daisy back to the front when one
+    /// was just switched on in System Settings.
+    fn refresh_setup(&self) {
+        let Some(views) = self.ivars().walkthrough.get() else {
+            return;
+        };
+        let step = self.setup_step();
+        let previous = self.ivars().setup_step.replace(Some(step));
+        if previous.is_some_and(|previous| previous != step) {
+            self.ivars().setup_asked.set(false);
+            self.refresh_permissions();
+            if views.window.isVisible() {
+                views.window.makeKeyAndOrderFront(None);
+                views.window.orderFrontRegardless();
+                NSApplication::sharedApplication(self.mtm()).activate();
+            }
+        }
+        views.show(step, self.ivars().setup_asked.get());
+    }
+
+    fn refresh_command_q(&self) {
+        let quits = self.ivars().settings.borrow().command_q_quits;
+        if let Some(views) = self.ivars().main.get() {
+            views.command_q.set_on(quits);
+        }
+        let (quit, close) = if quits { ("q", "") } else { ("", "q") };
+        if let Some(item) = self.ivars().main_quit.get() {
+            item.setKeyEquivalent(&NSString::from_str(quit));
+        }
+        if let Some(item) = self.ivars().main_close_q.get() {
+            item.setKeyEquivalent(&NSString::from_str(close));
+        }
     }
 
     fn build_window(&self) {
-        let mtm = self.mtm();
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
-                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
-        unsafe { window.setReleasedWhenClosed(false) };
-        window.setDelegate(Some(ProtocolObject::from_ref(self)));
-        window.setTitle(&NSString::from_str("Daisy"));
-        window.center();
-        let content = window.contentView().expect("window has content view");
-
-        let brand_image = NSImageView::imageViewWithImage(
-            &flower_image(true, 54.0).expect("Daisy's bundled mark is valid SVG"),
-            mtm,
-        );
-        brand_image.setAccessibilityLabel(Some(&NSString::from_str("Daisy")));
-        brand_image.setFrame(frame(28.0, 636.0, 56.0, 56.0));
-        content.addSubview(&brand_image);
-
-        let heading = self.label("Daisy", 26.0, true);
-        heading.setFrame(frame(100.0, 660.0, 452.0, 32.0));
-        content.addSubview(&heading);
-
-        let subheading = NSTextField::wrappingLabelWithString(
-            &NSString::from_str("One keyboard and trackpad across your systems."),
-            mtm,
-        );
-        subheading.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        subheading.setFrame(frame(100.0, 634.0, 452.0, 22.0));
-        content.addSubview(&subheading);
-
-        let separator = NSBox::initWithFrame(NSBox::alloc(mtm), frame(28.0, 612.0, 524.0, 1.0));
-        separator.setBoxType(NSBoxType::Separator);
-        content.addSubview(&separator);
-
-        let status_title = self.label("Stopped", 17.0, true);
-        status_title.setFrame(frame(28.0, 574.0, 524.0, 24.0));
-        content.addSubview(&status_title);
-        let status_detail = NSTextField::wrappingLabelWithString(
-            &NSString::from_str("Pair with a peer, then choose where its screen sits."),
-            mtm,
-        );
-        status_detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        status_detail.setFrame(frame(28.0, 504.0, 524.0, 62.0));
-        content.addSubview(&status_detail);
-
-        let connection_heading = self.label("Connection", 15.0, true);
-        connection_heading.setFrame(frame(28.0, 480.0, 524.0, 22.0));
-        content.addSubview(&connection_heading);
-        content.addSubview(&self.accent_rule(frame(28.0, 474.0, 42.0, 3.0)));
-
-        let connection_group = self.group(frame(28.0, 196.0, 524.0, 274.0));
-        content.addSubview(&connection_group);
-
-        self.form_label(&content, "Nearby peers", 433.0);
-        let automatic = self.label("Connect automatically on this network.", 13.0, false);
-        automatic.setFrame(frame(180.0, 433.0, 352.0, 24.0));
-        content.addSubview(&automatic);
-
-        let address_label = self.form_label(&content, "Address (optional)", 389.0);
-        let address = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
-        address.setPlaceholderString(Some(&NSString::from_str("Automatic, or enter an address")));
-        address.setAccessibilityLabel(Some(&NSString::from_str("Peer address")));
-        address.setFrame(frame(180.0, 384.0, 212.0, 28.0));
-        content.addSubview(&address);
-        let nearby =
-            NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), frame(400.0, 382.0, 132.0, 30.0), true);
-        nearby.addItemWithTitle(&NSString::from_str("Nearby"));
-        nearby.setAccessibilityLabel(Some(&NSString::from_str("Nearby peers")));
-        unsafe {
-            nearby.setTarget(Some(self));
-            nearby.setAction(Some(sel!(pickNearby:)));
-        }
-        content.addSubview(&nearby);
-        self.ivars().nearby_popup.set(nearby).ok();
-
-        let side_label = self.form_label(&content, "Screen edge", 261.0);
-        let side = self.popup(
-            &content,
-            261.0,
-            &["Right", "Left", "Above", "Below"],
-            Some(sel!(chooseSide:)),
-        );
-        side.setAccessibilityLabel(Some(&NSString::from_str("Peer screen position")));
-
-        let trust_label = self.form_label(&content, "Trust", 217.0);
-        let trust = self.popup(
-            &content,
-            217.0,
-            &["Until 4 days inactive", "This session", "30 days", "Until I forget"],
-            None,
-        );
-        trust.setAccessibilityLabel(Some(&NSString::from_str("Trust duration")));
-
-        let permissions_heading = self.label("Permissions", 13.0, true);
-        permissions_heading.setFrame(frame(28.0, 162.0, 524.0, 20.0));
-        content.addSubview(&permissions_heading);
-
-        let permissions_group = self.group(frame(28.0, 66.0, 524.0, 86.0));
-        content.addSubview(&permissions_group);
-
-        let accessibility_status = self.label("Accessibility: checking…", 13.0, false);
-        accessibility_status.setFrame(frame(48.0, 118.0, 290.0, 24.0));
-        content.addSubview(&accessibility_status);
-        let accessibility_button = self.button(
-            "Grant Accessibility…",
-            frame(352.0, 113.0, 180.0, 30.0),
-            sel!(requestAccessibility:),
-        );
-        content.addSubview(&accessibility_button);
-
-        let input_status = self.label("Input Monitoring: checking…", 13.0, false);
-        input_status.setFrame(frame(48.0, 82.0, 290.0, 24.0));
-        content.addSubview(&input_status);
-        let input_button = self.button(
-            "Grant Input Monitoring…",
-            frame(352.0, 77.0, 180.0, 30.0),
-            sel!(requestInputMonitoring:),
-        );
-        content.addSubview(&input_button);
-
-        let start = self.button("Start Sharing", frame(282.0, 18.0, 130.0, 36.0), sel!(startSession:));
-        start.setKeyEquivalent(&NSString::from_str("\r"));
-        content.addSubview(&start);
-        let pair = self.button("Pair a New Peer", frame(422.0, 18.0, 130.0, 36.0), sel!(pairSession:));
-        content.addSubview(&pair);
-        let stop = self.button("Stop Sharing", frame(422.0, 18.0, 130.0, 36.0), sel!(stopSession:));
-        stop.setEnabled(false);
-        stop.setHidden(true);
-        content.addSubview(&stop);
-
-        self.ivars().window.set(window).ok();
-        self.ivars().status_title.set(status_title).ok();
-        self.ivars().status_detail.set(status_detail).ok();
-        self.ivars().connection_group.set(connection_group).ok();
-        self.ivars().address_label.set(address_label).ok();
-        self.ivars().address_field.set(address).ok();
-        self.ivars().side_label.set(side_label).ok();
-        self.ivars().side_popup.set(side).ok();
-        self.ivars().trust_label.set(trust_label).ok();
-        self.ivars().trust_popup.set(trust).ok();
-        self.ivars().permissions_heading.set(permissions_heading).ok();
-        self.ivars().permissions_group.set(permissions_group).ok();
-        self.ivars().accessibility_status.set(accessibility_status).ok();
-        self.ivars().input_status.set(input_status).ok();
-        self.ivars().accessibility_button.set(accessibility_button).ok();
-        self.ivars().input_button.set(input_button).ok();
-        self.ivars().start_button.set(start).ok();
-        self.ivars().pair_button.set(pair).ok();
-        self.ivars().stop_button.set(stop).ok();
-        self.update_conditional_controls();
+        let main = window::MainViews::new(self.mtm(), self);
+        main.window.setDelegate(Some(ProtocolObject::from_ref(self)));
+        self.ivars().main.set(main).ok();
+        self.ivars()
+            .advanced
+            .set(window::AdvancedViews::new(self.mtm(), self))
+            .ok();
+        self.refresh_launch_at_login();
+        self.refresh_share_clipboard();
+        self.refresh_discoverable();
+        self.refresh_command_q();
+        self.rebuild_peers_list();
+        self.render_status();
     }
 
     fn handle_event(&self, event: Event) {
@@ -621,18 +730,19 @@ impl AppDelegate {
                 *self.ivars().settings.borrow_mut() = settings.clone();
                 self.refresh_discoverable();
                 self.refresh_share_clipboard();
+                self.refresh_command_q();
                 *self.ivars().peers.borrow_mut() = peers;
                 self.apply_settings(&settings.last_session);
-                self.rebuild_peers_menu();
+                self.rebuild_peers_list();
                 self.refresh_permissions();
-                if first_run {
+                if first_run && self.setup_step() == Step::Done {
                     self.open_window();
                 }
             }
             Event::Status(status) => self.apply_status(status),
             Event::Peers(peers) => {
                 *self.ivars().peers.borrow_mut() = peers;
-                self.rebuild_peers_menu();
+                self.rebuild_peers_list();
                 self.update_action_buttons();
             }
             Event::ShowPairingCode { peer, code } => {
@@ -646,19 +756,22 @@ impl AppDelegate {
                 let answer = self.ask_for_pairing_code(&peer);
                 let _ = reply.send(answer.unwrap_or_default());
             }
-            Event::TrustChanged { peer, policy } => {
-                self.show_alert(
-                    "Trust updated",
-                    &format!("{peer} is now trusted {}.", policy.describe()),
-                    NSAlertStyle::Informational,
+            Event::Paired { peer, key, policy } => {
+                self.open_window();
+                let chosen = trust_form::ask(
+                    self.mtm(),
+                    self,
+                    &format!("Paired with {peer}. Trust it for how long?"),
+                    "Done",
+                    None,
+                    policy,
                 );
-            }
-            Event::Paired { peer, policy } => {
-                self.show_alert(
-                    "Peer paired",
-                    &format!("{peer} is now trusted {}.", policy.describe()),
-                    NSAlertStyle::Informational,
-                );
+                if let Some(chosen) = chosen.filter(|chosen| *chosen != policy) {
+                    let _ = self.ivars().controller.send(Command::SetTrust {
+                        selector: key.to_hex(),
+                        policy: chosen,
+                    });
+                }
             }
             Event::Notice { title, detail } => {
                 self.show_alert(&title, &detail, NSAlertStyle::Informational);
@@ -669,15 +782,6 @@ impl AppDelegate {
     fn apply_status(&self, status: Status) {
         if let Status::Connected { side, .. } = &status {
             self.ivars().settings.borrow_mut().last_session.side = *side;
-            self.ivars().side_edited.set(false);
-            if let Some(popup) = self.ivars().side_popup.get() {
-                popup.selectItemAtIndex(match side {
-                    Side::Right => 0,
-                    Side::Left => 1,
-                    Side::Above => 2,
-                    Side::Below => 3,
-                });
-            }
         }
         let was_connected = matches!(*self.ivars().status.borrow(), Status::Connected { .. });
         if !matches!(status, Status::Connected { .. }) {
@@ -688,7 +792,11 @@ impl AppDelegate {
             self.ivars().link.set(None);
         }
         if let Some(item) = self.ivars().menu_start_stop.get() {
-            item.setTitle(&NSString::from_str(if is_active(&status) { "Stop" } else { "Start" }));
+            item.setTitle(&NSString::from_str(if is_active(&status) {
+                "Stop Sharing"
+            } else {
+                "Start Sharing"
+            }));
         }
         let problem = matches!(status, Status::Problem { .. });
         *self.ivars().status.borrow_mut() = status;
@@ -705,12 +813,24 @@ impl AppDelegate {
             .link
             .get()
             .zip(self.ivars().connected_at.get().map(|at| at.elapsed()));
-        let copy = status_copy(&self.ivars().status.borrow(), live);
-        if let Some(label) = self.ivars().status_title.get() {
-            label.setStringValue(&NSString::from_str(&copy.title));
-        }
-        if let Some(label) = self.ivars().status_detail.get() {
-            label.setStringValue(&NSString::from_str(&copy.detail));
+        let status = self.ivars().status.borrow();
+        let copy = status_copy(&status, live);
+        if let Some(views) = self.ivars().main.get() {
+            let connected = match &*status {
+                Status::Connected { peer, side, .. } => Some((peer.as_str(), *side, live)),
+                _ => None,
+            };
+            let shown = map::arrangement(&self.ivars().local_name.borrow(), connected);
+            let detail = if copy.connected {
+                shown.link.clone()
+            } else {
+                copy.detail.clone()
+            };
+            let hint = (!shown.link_hint.is_empty()).then(|| NSString::from_str(&shown.link_hint));
+            views.detail.setToolTip(hint.as_deref());
+            views.title.setStringValue(&NSString::from_str(&copy.title));
+            views.detail.setStringValue(&NSString::from_str(&detail));
+            views.arrange.show(shown);
         }
         if let Some(item) = self.ivars().menu_status.get() {
             item.setTitle(&NSString::from_str(&copy.menu));
@@ -723,13 +843,8 @@ impl AppDelegate {
     }
 
     fn start(&self, allow_pairing: bool) {
-        if !self.permissions_granted() {
-            self.show_alert(
-                "Grant Daisy permission",
-                "Daisy needs Accessibility and Input Monitoring on both systems. If System Settings already shows Daisy switched on, choose Reset Permissions in Daisy's menu.",
-                NSAlertStyle::Informational,
-            );
-            self.open_window();
+        if self.setup_step() != Step::Done {
+            self.open_setup();
             return;
         }
         let Some(settings) = self.settings_from_controls() else {
@@ -738,15 +853,16 @@ impl AppDelegate {
         let _ = self.ivars().controller.send(Command::Start {
             settings,
             allow_pairing,
-            side_chosen: self.ivars().side_edited.replace(false),
+            side_chosen: false,
         });
     }
 
     fn settings_from_controls(&self) -> Option<SessionSettings> {
         let address = self
             .ivars()
-            .address_field
+            .advanced
             .get()?
+            .address
             .stringValue()
             .to_string()
             .trim()
@@ -763,113 +879,32 @@ impl AppDelegate {
                 .map(|(_, key)| key.clone());
             Connection::Connect { address, peer }
         };
-        let side = match self.ivars().side_popup.get()?.indexOfSelectedItem() {
-            0 => Side::Right,
-            1 => Side::Left,
-            2 => Side::Above,
-            _ => Side::Below,
-        };
-        let trust = match self.ivars().trust_popup.get()?.indexOfSelectedItem() {
-            1 => Policy::Once,
-            2 => Policy::Days(30),
-            3 => Policy::Forever,
-            _ => Policy::Idle,
-        };
+        let last = self.ivars().settings.borrow().last_session.clone();
         Some(SessionSettings {
             connection,
-            side,
-            trust,
+            side: last.side,
+            trust: last.trust,
         })
     }
 
     fn apply_settings(&self, settings: &SessionSettings) {
-        if let Connection::Connect { address, peer } = &settings.connection {
-            *self.ivars().nearby_choice.borrow_mut() = peer.clone().map(|key| (address.clone(), key));
-            if let Some(field) = self.ivars().address_field.get() {
-                field.setStringValue(&NSString::from_str(address));
+        let address = match &settings.connection {
+            Connection::Connect { address, peer } => {
+                *self.ivars().nearby_choice.borrow_mut() = peer.clone().map(|key| (address.clone(), key));
+                address.as_str()
             }
-        } else if let Some(field) = self.ivars().address_field.get() {
-            field.setStringValue(&NSString::from_str(""));
-        }
-        self.ivars().side_edited.set(false);
-        if let Some(popup) = self.ivars().side_popup.get() {
-            let side = settings.side;
-            popup.selectItemAtIndex(match side {
-                Side::Right => 0,
-                Side::Left => 1,
-                Side::Above => 2,
-                Side::Below => 3,
-            });
-        }
-        if let Some(popup) = self.ivars().trust_popup.get() {
-            popup.selectItemAtIndex(match settings.trust {
-                Policy::Idle => 0,
-                Policy::Once => 1,
-                Policy::Days(30) => 2,
-                Policy::Forever => 3,
-                Policy::Days(_) => 0,
-            });
-        }
-        self.update_conditional_controls();
-    }
-
-    fn update_conditional_controls(&self) {
-        if let Some(label) = self.ivars().side_label.get() {
-            label.setFrame(frame(48.0, 345.0, 120.0, 24.0));
-        }
-        if let Some(popup) = self.ivars().side_popup.get() {
-            popup.setFrame(frame(180.0, 340.0, 352.0, 30.0));
-        }
-        if let Some(label) = self.ivars().trust_label.get() {
-            label.setFrame(frame(48.0, 301.0, 120.0, 24.0));
-        }
-        if let Some(popup) = self.ivars().trust_popup.get() {
-            popup.setFrame(frame(180.0, 296.0, 352.0, 30.0));
-        }
-        let y = 301.0;
-        let connection_bottom = y - 21.0;
-        if let Some(group) = self.ivars().connection_group.get() {
-            group.setFrame(frame(28.0, connection_bottom, 524.0, 470.0 - connection_bottom));
-        }
-
-        let permissions_y = connection_bottom - 34.0;
-        let permissions_top = permissions_y - 10.0;
-        if let Some(heading) = self.ivars().permissions_heading.get() {
-            heading.setFrame(frame(28.0, permissions_y, 524.0, 20.0));
-        }
-        if let Some(group) = self.ivars().permissions_group.get() {
-            group.setFrame(frame(28.0, permissions_top - 86.0, 524.0, 86.0));
-        }
-        if let Some(label) = self.ivars().accessibility_status.get() {
-            label.setFrame(frame(48.0, permissions_top - 34.0, 290.0, 24.0));
-        }
-        if let Some(button) = self.ivars().accessibility_button.get() {
-            button.setFrame(frame(352.0, permissions_top - 39.0, 180.0, 30.0));
-        }
-        if let Some(label) = self.ivars().input_status.get() {
-            label.setFrame(frame(48.0, permissions_top - 70.0, 290.0, 24.0));
-        }
-        if let Some(button) = self.ivars().input_button.get() {
-            button.setFrame(frame(352.0, permissions_top - 75.0, 180.0, 30.0));
+            Connection::Automatic => "",
+        };
+        if let Some(views) = self.ivars().advanced.get() {
+            views.address.setStringValue(&NSString::from_str(address));
         }
     }
 
     fn refresh_permissions(&self) {
         let accessibility = permissions::accessibility();
         let input = permissions::input_monitoring();
-        if let Some(label) = self.ivars().accessibility_status.get() {
-            label.setStringValue(&NSString::from_str(&permission_copy("Accessibility", accessibility)));
-        }
-        if let Some(button) = self.ivars().accessibility_button.get() {
-            button.setEnabled(accessibility != Access::Granted);
-            button.setHidden(accessibility == Access::Granted);
-        }
-        if let Some(label) = self.ivars().input_status.get() {
-            label.setStringValue(&NSString::from_str(&permission_copy("Input Monitoring", input)));
-        }
-        if let Some(button) = self.ivars().input_button.get() {
-            button.setEnabled(input != Access::Granted);
-            button.setHidden(input == Access::Granted);
+        if let Some(views) = self.ivars().main.get() {
+            views.show_permissions([accessibility == Access::Granted, input == Access::Granted]);
         }
         self.update_action_buttons();
     }
@@ -882,79 +917,52 @@ impl AppDelegate {
         let active = is_active(&self.ivars().status.borrow());
         let can_start = !active && self.permissions_granted();
         let has_peers = !self.ivars().peers.borrow().is_empty();
-        if let Some(start) = self.ivars().start_button.get() {
-            start.setEnabled(can_start);
-            start.setHidden(active);
-            start.setKeyEquivalent(&NSString::from_str(if has_peers { "\r" } else { "" }));
-            self.style_action_button(start, has_peers);
-        }
-        if let Some(pair) = self.ivars().pair_button.get() {
-            pair.setEnabled(can_start);
-            pair.setHidden(active);
-            pair.setKeyEquivalent(&NSString::from_str(if has_peers { "" } else { "\r" }));
-            self.style_action_button(pair, !has_peers);
-        }
-        if let Some(stop) = self.ivars().stop_button.get() {
-            stop.setEnabled(active);
-            stop.setHidden(!active);
+        if let Some(views) = self.ivars().main.get() {
+            views.start.setEnabled(can_start);
+            views.start.setHidden(active);
+            views
+                .start
+                .setKeyEquivalent(&NSString::from_str(if has_peers { "\r" } else { "" }));
+            self.style_action_button(&views.start, has_peers);
+            views.pair.setEnabled(can_start);
+            views
+                .pair
+                .setKeyEquivalent(&NSString::from_str(if has_peers { "" } else { "\r" }));
+            self.style_action_button(&views.pair, !has_peers);
+            views.stop.setEnabled(active);
+            views.stop.setHidden(!active);
         }
         if let Some(item) = self.ivars().menu_start_stop.get() {
             item.setEnabled(active || can_start);
         }
     }
 
-    fn rebuild_peers_menu(&self) {
-        let Some(menu) = self.ivars().peers_menu.get() else {
+    fn rebuild_peers_list(&self) {
+        let Some(views) = self.ivars().main.get() else {
             return;
         };
-        menu.removeAllItems();
-        let peers = self.ivars().peers.borrow();
-        if peers.is_empty() {
-            menu.addItem(&self.menu_item("No paired peers", None, false));
-            return;
-        }
-        for (index, peer) in peers.iter().enumerate() {
-            let parent = self.menu_item(&peer.name, None, true);
-            let submenu = NSMenu::initWithTitle(NSMenu::alloc(self.mtm()), &NSString::from_str(&peer.name));
-            let fingerprint = self.menu_item(&peer.key.fingerprint(), None, false);
-            submenu.addItem(&fingerprint);
-            submenu.addItem(&NSMenuItem::separatorItem(self.mtm()));
-            for (code, policy, title) in [
-                (0, Policy::Idle, "Trust until 4 days inactive"),
-                (1, Policy::Once, "Trust this session"),
-                (2, Policy::Days(30), "Trust 30 days"),
-                (3, Policy::Forever, "Trust until I forget"),
-            ] {
-                let item = self.menu_item(title, Some(sel!(changeTrust:)), true);
-                item.setTag((index * 10 + code) as isize);
-                item.setState(if peer.policy == policy {
-                    NSControlStateValueOn
-                } else {
-                    NSControlStateValueOff
-                });
-                submenu.addItem(&item);
-            }
-            submenu.addItem(&NSMenuItem::separatorItem(self.mtm()));
-            let forget = self.menu_item(&format!("Forget {}…", peer.name), Some(sel!(forgetPeer:)), true);
-            forget.setTag(index as isize);
-            submenu.addItem(&forget);
-            parent.setSubmenu(Some(&submenu));
-            menu.addItem(&parent);
-        }
+        let rows: Vec<window::PeerRow> = self
+            .ivars()
+            .peers
+            .borrow()
+            .iter()
+            .map(|peer| window::PeerRow {
+                name: peer.name.clone(),
+                fingerprint: peer.key.fingerprint(),
+                trust: peer.policy.label(),
+            })
+            .collect();
+        views.show_peers(&rows, self);
     }
 
     fn refresh_discoverable(&self) {
-        if let Some(item) = self.ivars().menu_discoverable.get() {
-            item.setState(if self.ivars().settings.borrow().discoverable {
-                NSControlStateValueOn
-            } else {
-                NSControlStateValueOff
-            });
+        if let Some(views) = self.ivars().advanced.get() {
+            views.discoverable.set_on(self.ivars().settings.borrow().discoverable);
         }
     }
 
     fn show_nearby(&self, nearby: Vec<controller::Nearby>) {
-        if let Some(popup) = self.ivars().nearby_popup.get() {
+        if let Some(popup) = self.ivars().advanced.get().map(|views| &views.nearby) {
             popup.removeAllItems();
             popup.addItemWithTitle(&NSString::from_str("Nearby"));
             if nearby.is_empty() {
@@ -971,32 +979,30 @@ impl AppDelegate {
     }
 
     fn refresh_share_clipboard(&self) {
-        let Some(item) = self.ivars().menu_clipboard.get() else {
-            return;
-        };
-        item.setState(if self.ivars().settings.borrow().share_clipboard {
-            NSControlStateValueOn
-        } else {
-            NSControlStateValueOff
-        });
+        if let Some(views) = self.ivars().main.get() {
+            views.clipboard.set_on(self.ivars().settings.borrow().share_clipboard);
+        }
     }
 
     fn refresh_launch_at_login(&self) {
-        let Some(item) = self.ivars().menu_launch_login.get() else {
+        let Some(views) = self.ivars().main.get() else {
             return;
         };
-        let service = unsafe { SMAppService::mainAppService() };
-        item.setState(match unsafe { service.status() } {
-            SMAppServiceStatus::Enabled => NSControlStateValueOn,
-            SMAppServiceStatus::RequiresApproval => NSControlStateValueMixed,
-            _ => NSControlStateValueOff,
-        });
+        // SAFETY: a plain status query
+        let status = unsafe { SMAppService::mainAppService().status() };
+        // awaiting approval in System Settings counts as on
+        views.login.set_on(matches!(
+            status,
+            SMAppServiceStatus::Enabled | SMAppServiceStatus::RequiresApproval
+        ));
     }
 
     fn open_window(&self) {
-        let Some(window) = self.ivars().window.get() else {
+        let Some(window) = self.ivars().main.get().map(|views| &views.window) else {
             return;
         };
+        // paired peers may have changed from the command line
+        let _ = self.ivars().controller.send(Command::Refresh);
         // A menu-bar-only app is never brought forward by macOS and is missing
         // from the Dock and app switcher. While the window is open, Daisy
         // runs as a regular app so it comes to the front and can be switched to.
@@ -1066,78 +1072,6 @@ impl AppDelegate {
         item
     }
 
-    fn label(&self, text: &str, size: f64, bold: bool) -> Retained<NSTextField> {
-        let label = NSTextField::labelWithString(&NSString::from_str(text), self.mtm());
-        let font = if bold {
-            NSFont::boldSystemFontOfSize(size)
-        } else {
-            NSFont::systemFontOfSize(size)
-        };
-        label.setFont(Some(&font));
-        label
-    }
-
-    fn form_label(&self, content: &NSView, text: &str, y: f64) -> Retained<NSTextField> {
-        let label = self.label(text, 13.0, false);
-        label.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        label.setFrame(frame(48.0, y, 120.0, 24.0));
-        content.addSubview(&label);
-        label
-    }
-
-    fn group(&self, rect: NSRect) -> Retained<NSBox> {
-        let group = NSBox::initWithFrame(NSBox::alloc(self.mtm()), rect);
-        group.setBoxType(NSBoxType::Custom);
-        group.setTransparent(false);
-        group.setBorderWidth(0.0);
-        group.setCornerRadius(16.0);
-        group.setFillColor(&NSColor::tertiarySystemFillColor());
-        group
-    }
-
-    fn accent_rule(&self, rect: NSRect) -> Retained<NSBox> {
-        let accent = NSBox::initWithFrame(NSBox::alloc(self.mtm()), rect);
-        accent.setBoxType(NSBoxType::Custom);
-        accent.setTransparent(false);
-        accent.setBorderWidth(0.0);
-        accent.setCornerRadius(1.5);
-        accent.setFillColor(&coral_color());
-        accent
-    }
-
-    fn popup(
-        &self,
-        content: &NSView,
-        y: f64,
-        items: &[&str],
-        action: Option<objc2::runtime::Sel>,
-    ) -> Retained<NSPopUpButton> {
-        let popup = NSPopUpButton::initWithFrame_pullsDown(
-            NSPopUpButton::alloc(self.mtm()),
-            frame(180.0, y - 5.0, 352.0, 30.0),
-            false,
-        );
-        for item in items {
-            popup.addItemWithTitle(&NSString::from_str(item));
-        }
-        if let Some(action) = action {
-            unsafe {
-                popup.setTarget(Some(self));
-                popup.setAction(Some(action));
-            }
-        }
-        content.addSubview(&popup);
-        popup
-    }
-
-    fn button(&self, title: &str, rect: NSRect, action: objc2::runtime::Sel) -> Retained<NSButton> {
-        let button = unsafe {
-            NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(self), Some(action), self.mtm())
-        };
-        button.setFrame(rect);
-        button
-    }
-
     fn style_action_button(&self, button: &NSButton, primary: bool) {
         if primary {
             button.setBezelColor(Some(&coral_color()));
@@ -1151,9 +1085,10 @@ impl AppDelegate {
 
 pub fn run(home: PathBuf, name: String) -> Result<()> {
     let mtm = MainThreadMarker::new().context("Daisy's interface must start on the main thread")?;
-    let controller = controller::spawn(home, name)?;
+    let controller = controller::spawn(home, name.clone())?;
     let app = NSApplication::sharedApplication(mtm);
     let delegate = AppDelegate::new(mtm, controller);
+    *delegate.ivars().local_name.borrow_mut() = name;
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     crate::macos::main_run_loop_starting();
@@ -1180,10 +1115,7 @@ fn status_copy(status: &Status, live: Option<(Link, Duration)>) -> StatusCopy {
         connected: false,
     };
     match status {
-        Status::Idle => plain(
-            "Stopped".to_owned(),
-            "Pair with a peer, then choose where its screen sits.".to_owned(),
-        ),
+        Status::Idle => plain("Stopped".to_owned(), "Start sharing, or pair a new peer.".to_owned()),
         Status::Starting => plain("Starting…".to_owned(), "Daisy is preparing the connection.".to_owned()),
         Status::Waiting {
             port,
@@ -1211,28 +1143,15 @@ fn status_copy(status: &Status, live: Option<(Link, Duration)>) -> StatusCopy {
                 wait.as_secs().max(1)
             ),
         ),
-        Status::Connected { peer, side, .. } => {
+        Status::Connected { peer, .. } => {
             let title = format!("Connected to {peer}");
-            let mut facts = Vec::new();
-            let mut menu = title.clone();
-            if let Some((link, connected_for)) = live {
-                facts.push(if link.in_control {
-                    "This system has control.".to_owned()
-                } else {
-                    format!("{peer} has control.")
-                });
-                if let Some(ms) = link.latency_ms {
-                    facts.push(format!("Round trip {ms} ms."));
-                    menu = format!("{title} · {ms} ms");
-                }
-                facts.push(format!("Connected for {}.", span(connected_for)));
-            }
-            facts.push(format!(
-                "Move through the {side} edge to use {peer}. Use each system's own keyboard or trackpad to take control there. Press Control-Option-Command-Escape to return."
-            ));
+            let menu = match live.and_then(|(link, _)| link.latency_ms) {
+                Some(ms) => format!("{title} · {ms} ms"),
+                None => title.clone(),
+            };
             StatusCopy {
                 title,
-                detail: facts.join(" "),
+                detail: String::new(),
                 menu,
                 connected: true,
             }
@@ -1277,14 +1196,6 @@ fn nearby_title(peer: &controller::Nearby) -> String {
     }
 }
 
-fn permission_copy(name: &str, access: Access) -> String {
-    match access {
-        Access::Granted => format!("{name}: Granted"),
-        Access::Denied => format!("{name}: Needs access"),
-        Access::Undetermined => format!("{name}: Not requested"),
-    }
-}
-
 fn coral_color() -> Retained<NSColor> {
     NSColor::colorWithRed_green_blue_alpha(1.0, 107.0 / 255.0, 94.0 / 255.0, 1.0)
 }
@@ -1315,6 +1226,7 @@ fn frame(x: f64, y: f64, width: f64, height: f64) -> NSRect {
 mod tests {
     use super::*;
     use crate::identity::Identity;
+    use crate::input::Side;
 
     fn connected() -> Status {
         Status::Connected {
@@ -1325,37 +1237,22 @@ mod tests {
     }
 
     #[test]
-    fn connected_copy_keeps_recovery_chord_visible() {
-        let copy = status_copy(&connected(), None);
-        assert!(copy.connected);
-        assert!(copy.detail.contains("Control-Option-Command-Escape"));
-    }
-
-    #[test]
-    fn a_running_session_shows_control_latency_and_duration() {
+    fn the_menu_shows_latency_once_measured() {
         let link = Link {
             latency_ms: Some(4),
             in_control: false,
         };
         let copy = status_copy(&connected(), Some((link, Duration::from_secs(65 * 60))));
+        assert!(copy.connected);
         assert_eq!(copy.title, "Connected to Studio");
         assert_eq!(copy.menu, "Connected to Studio · 4 ms");
-        assert!(
-            copy.detail
-                .starts_with("Studio has control. Round trip 4 ms. Connected for 1 h 5 min.")
-        );
-        assert!(copy.detail.contains("Control-Option-Command-Escape"));
 
-        let here = Link {
+        let unmeasured = Link {
             latency_ms: None,
             in_control: true,
         };
-        let copy = status_copy(&connected(), Some((here, Duration::from_secs(30))));
+        let copy = status_copy(&connected(), Some((unmeasured, Duration::from_secs(30))));
         assert_eq!(copy.menu, "Connected to Studio");
-        assert!(
-            copy.detail
-                .starts_with("This system has control. Connected for less than a minute.")
-        );
     }
 
     #[test]

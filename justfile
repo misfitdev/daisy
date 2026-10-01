@@ -28,6 +28,8 @@ check: lint test
 # macOS files permissions under this ID; changing it means granting them again
 bundle_id := "dev.misfit.daisy"
 app := "target/Daisy.app"
+# DAISY_SIGN_IDENTITY, or the first Apple Development identity
+sign_identity := '''${DAISY_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/"Apple Development/ {print $2; exit}')}'''
 
 # Build Daisy.app and sign it: Apple Development by default, or the
 # identity in DAISY_SIGN_IDENTITY ("-" signs ad hoc, as CI does)
@@ -35,7 +37,7 @@ bundle:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --release
-    identity="${DAISY_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/"Apple Development/ {print $2; exit}')}"
+    identity="{{sign_identity}}"
     if [ -z "$identity" ]; then
         echo "no Apple Development signing identity found; see security find-identity -v -p codesigning" >&2
         exit 1
@@ -72,32 +74,57 @@ app *args: bundle
 
 dist := "target/dist"
 
-# Zip the signed app for release; notarized and stapled when NOTARY_KEY_ID,
-# NOTARY_ISSUER_ID and NOTARY_KEY_PATH name an App Store Connect API key
+# Zip the signed app and build a DMG for release; both are notarized and
+# stapled when NOTARY_KEY_ID, NOTARY_ISSUER_ID and NOTARY_KEY_PATH name an App
+# Store Connect API key
 package: bundle
     #!/usr/bin/env bash
     set -euo pipefail
     version="$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)"
     zip="{{dist}}/Daisy-$version-macos-arm64.zip"
+    dmg="{{dist}}/Daisy-$version-macos-arm64.dmg"
+    identity="{{sign_identity}}"
     mkdir -p "{{dist}}"
     rm -f "{{dist}}"/Daisy-*
-    ditto -c -k --keepParent "{{app}}" "$zip"
-    if [ -n "${NOTARY_KEY_ID:-}" ]; then
-        result="$(xcrun notarytool submit "$zip" --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" \
+    notarize() {
+        result="$(xcrun notarytool submit "$1" --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" \
             --issuer "$NOTARY_ISSUER_ID" --wait --output-format json)"
         status="$(plutil -extract status raw - <<< "$result")"
         if [ "$status" != "Accepted" ]; then
-            echo "notarization finished as $status:" >&2
+            echo "notarization of $1 finished as $status:" >&2
             id="$(plutil -extract id raw - <<< "$result")"
             xcrun notarytool log "$id" --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" >&2
             exit 1
         fi
+    }
+    ditto -c -k --keepParent "{{app}}" "$zip"
+    if [ -n "${NOTARY_KEY_ID:-}" ]; then
+        notarize "$zip"
         # zip again so the download carries the ticket and opens offline
         xcrun stapler staple "{{app}}"
         rm -f "$zip"
         ditto -c -k --keepParent "{{app}}" "$zip"
     fi
-    (cd "{{dist}}" && shasum -a 256 "$(basename "$zip")" > "$(basename "$zip").sha256")
+    stage="$(mktemp -d)"
+    trap 'rm -rf "$stage"' EXIT
+    ditto "{{app}}" "$stage/Daisy.app"
+    ln -s /Applications "$stage/Applications"
+    hdiutil create -quiet -volname Daisy -srcfolder "$stage" -format ULFO -ov "$dmg"
+    # ad hoc signatures do not apply to disk images
+    if [ "$identity" != "-" ]; then
+        timestamp=""
+        case "$identity" in "Developer ID"*) timestamp="--timestamp" ;; esac
+        codesign --sign "$identity" ${timestamp:+"$timestamp"} "$dmg"
+    fi
+    if [ -n "${NOTARY_KEY_ID:-}" ]; then
+        notarize "$dmg"
+        xcrun stapler staple "$dmg"
+        xcrun stapler validate "$dmg"
+        spctl -a -t open --context context:primary-signature -v "$dmg"
+    fi
+    for file in "$zip" "$dmg"; do
+        (cd "{{dist}}" && shasum -a 256 "$(basename "$file")" > "$(basename "$file").sha256")
+    done
     ls -l "{{dist}}"
 
 # Release notes for the current version, from conventional commits

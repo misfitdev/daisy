@@ -4,6 +4,7 @@
 pub mod capture;
 mod ffi;
 pub mod inject;
+pub mod install;
 pub mod pasteboard;
 mod pointer;
 pub mod shortcut;

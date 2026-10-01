@@ -1,0 +1,18 @@
+//! AppKit requires the main thread, so this test has its own harness.
+
+#[cfg(target_os = "macos")]
+pub use daisy::{control, controller, identity, input, macos, peers, permissions, service, setup, trust};
+
+#[cfg(target_os = "macos")]
+#[path = "../src/app.rs"]
+// This harness exercises the delegate without starting the application run loop.
+#[allow(dead_code)]
+mod app;
+
+#[cfg(target_os = "macos")]
+fn main() {
+    app::test_modal_menu_actions();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {}

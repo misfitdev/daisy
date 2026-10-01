@@ -151,6 +151,8 @@ pub struct SessionConfig<'a> {
     pub clipboard: &'a watch::Receiver<bool>,
     /// Whether a waiting system advertises itself with Bonjour.
     pub discoverable: &'a watch::Receiver<bool>,
+    /// Sides chosen on this system while a session runs, if it can rearrange.
+    pub arrangement: Option<&'a watch::Receiver<Option<Side>>>,
 }
 
 struct PairingGate {
@@ -427,6 +429,7 @@ where
             &peer,
             take_side_choice(&config),
             config.clipboard,
+            config.arrangement,
             observer,
         )
         .await;
@@ -476,6 +479,7 @@ where
         &peer,
         take_side_choice(config),
         config.clipboard,
+        config.arrangement,
         observer,
     )
     .await?;
@@ -509,6 +513,7 @@ async fn run_session<S, O>(
     peer: &str,
     chosen_side: Option<Side>,
     clipboard: &watch::Receiver<bool>,
+    arrangement: Option<&watch::Receiver<Option<Side>>>,
     observer: &mut O,
 ) -> Result<()>
 where
@@ -547,6 +552,13 @@ where
     let mut injector = Injector::new();
     let (messages, input) = mpsc::channel(INPUT_QUEUE_CAPACITY);
     let (mut capture, overflowed) = Capture::start(screen, side, messages, control.clone())?;
+    let (agreed_tx, mut agreed_rx) = mpsc::unbounded_channel();
+    let arranging = share::Arranging {
+        agreed: (side, chosen),
+        initiator,
+        choices: session_choices(arrangement),
+        agreed_tx,
+    };
     let until = async {
         tokio::select! {
             error = peers.watch(key, peer) => error,
@@ -560,7 +572,12 @@ where
     };
     let session = share::together(
         channel,
-        share::SharedLayout { screen, side, control },
+        share::SharedLayout {
+            screen,
+            side,
+            control,
+            arranging,
+        },
         input,
         &mut capture,
         &mut injector,
@@ -575,6 +592,12 @@ where
                 let current = *link.borrow_and_update();
                 observer.link(peer, current);
             }
+            Some((side, chosen)) = agreed_rx.recv() => {
+                if let Err(error) = peers.agree_side(&key, side, chosen) {
+                    tracing::warn!(error = ?error, "the new screen arrangement could not be saved");
+                }
+                observer.connected(peer, key, side);
+            }
         }
     };
     if let Err(error) = &result
@@ -583,6 +606,16 @@ where
         visit.dropped();
     }
     result
+}
+
+/// Sides chosen on this system during a session. Without a way to choose,
+/// as from the command line, it never changes, and the peer's choices still
+/// apply.
+fn session_choices(arrangement: Option<&watch::Receiver<Option<Side>>>) -> watch::Receiver<Option<Side>> {
+    let mut choices = arrangement.cloned().unwrap_or_else(|| watch::channel(None).1);
+    // only choices made during this session count
+    choices.mark_unchanged();
+    choices
 }
 
 /// Add the default Daisy port when the address has none.
@@ -619,26 +652,26 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn pairing_gate_limits_unknown_peers_and_closes_after_success() {
-        let mut gate = PairingGate::new(Some(Policy::Idle));
+        let mut gate = PairingGate::new(Some(Policy::IDLE));
         assert!(gate.is_open());
         for _ in 0..MAX_PAIRING_ATTEMPTS {
-            assert_eq!(gate.for_peer(false), Some(Policy::Idle));
+            assert_eq!(gate.for_peer(false), Some(Policy::IDLE));
         }
         assert!(!gate.is_open());
         assert_eq!(gate.for_peer(false), None);
-        assert_eq!(gate.for_peer(true), Some(Policy::Idle));
+        assert_eq!(gate.for_peer(true), Some(Policy::IDLE));
 
-        let mut gate = PairingGate::new(Some(Policy::Idle));
+        let mut gate = PairingGate::new(Some(Policy::IDLE));
         gate.paired(Trust::NewlyPaired);
         assert!(!gate.is_open());
         assert_eq!(gate.for_peer(false), None);
 
-        let mut gate = PairingGate::new(Some(Policy::Idle));
+        let mut gate = PairingGate::new(Some(Policy::IDLE));
         tokio::time::advance(PAIRING_WINDOW).await;
         assert!(!gate.is_open());
         assert_eq!(gate.for_peer(false), None);
 
-        let mut gate = PairingGate::new(Some(Policy::Idle));
+        let mut gate = PairingGate::new(Some(Policy::IDLE));
         gate.close();
         assert!(!gate.is_open());
     }
@@ -692,6 +725,7 @@ mod tests {
             choose_side: Box::leak(Box::new(AtomicBool::new(false))),
             clipboard,
             discoverable,
+            arrangement: None,
         }
     }
 
@@ -711,8 +745,8 @@ mod tests {
 
     #[test]
     fn only_the_first_connection_may_pair() {
-        assert_eq!(pairing_for_attempt(Some(Policy::Idle), false), Some(Policy::Idle));
-        assert_eq!(pairing_for_attempt(Some(Policy::Idle), true), None);
+        assert_eq!(pairing_for_attempt(Some(Policy::IDLE), false), Some(Policy::IDLE));
+        assert_eq!(pairing_for_attempt(Some(Policy::IDLE), true), None);
         assert_eq!(pairing_for_attempt(None, false), None);
     }
 
@@ -747,11 +781,11 @@ mod tests {
         let (here, there) = (system(), system());
         let now = trust::now();
         here.peers
-            .pin(there.identity.public_key(), "Studio", Policy::Idle, now)
+            .pin(there.identity.public_key(), "Studio", Policy::IDLE, now)
             .unwrap();
         there
             .peers
-            .pin(here.identity.public_key(), "Laptop", Policy::Idle, now)
+            .pin(here.identity.public_key(), "Laptop", Policy::IDLE, now)
             .unwrap();
         let clipboard = watch::channel(true).1;
         let mut observer = Recorded::default();
@@ -761,7 +795,7 @@ mod tests {
             while sessions < 2 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut channel = Channel::respond(stream, &there.identity).await.unwrap();
-                establish_trust(&mut channel, &there.peers, "Studio", false, Policy::Idle, &mut NoCodes)
+                establish_trust(&mut channel, &there.peers, "Studio", false, Policy::IDLE, &mut NoCodes)
                     .await
                     .unwrap();
                 sessions += 1;
@@ -796,17 +830,17 @@ mod tests {
         let (here, there) = (system(), system());
         let now = trust::now();
         here.peers
-            .pin(there.identity.public_key(), "Studio", Policy::Idle, now)
+            .pin(there.identity.public_key(), "Studio", Policy::IDLE, now)
             .unwrap();
         there
             .peers
-            .pin(here.identity.public_key(), "Laptop", Policy::Idle, now)
+            .pin(here.identity.public_key(), "Laptop", Policy::IDLE, now)
             .unwrap();
         let _advertiser = Advertiser::start(&there.identity.public_key(), port, false).unwrap();
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
             let mut channel = Channel::respond(stream, &there.identity).await.unwrap();
-            establish_trust(&mut channel, &there.peers, "Studio", false, Policy::Idle, &mut NoCodes)
+            establish_trust(&mut channel, &there.peers, "Studio", false, Policy::IDLE, &mut NoCodes)
                 .await
                 .unwrap()
                 .0
@@ -838,7 +872,7 @@ mod tests {
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
             let mut channel = Channel::respond(stream, &there.identity).await.unwrap();
-            let _ = establish_trust(&mut channel, &there.peers, "Studio", false, Policy::Idle, &mut NoCodes).await;
+            let _ = establish_trust(&mut channel, &there.peers, "Studio", false, Policy::IDLE, &mut NoCodes).await;
         };
         let here = system();
         let clipboard = watch::channel(true).1;

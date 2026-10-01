@@ -10,7 +10,7 @@ A TCP connection, to port 24850 by default. Every frame is a big-endian `u16` le
 
 Every connection starts a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake in which both sides send their long-term keys. The prologue is `daisy` and never changes.
 
-Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 2. Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
+Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 3. Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
 
 The handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
 
@@ -28,7 +28,7 @@ Messages are encoded with [postcard](https://github.com/jamesmunns/postcard), wh
 | 3 | `Ping { nonce }` | both | Heartbeat, every second |
 | 4 | `Pong { nonce }` | both | Heartbeat reply |
 | 5 | `Clipboard { part }` | both | A piece of the sender's clipboard, sent whenever control crosses, below |
-| 6 | `Layout { side, chosen }` | both | Where the sender places the receiver, and when that side was chosen in Unix seconds; the later choice wins |
+| 6 | `Layout { side, chosen }` | both | Where the sender places the receiver, and when that side was chosen in Unix seconds; the later choice wins. Sent once when the session starts, and again whenever someone rearranges the screens during it |
 | 7 | `ControlClaim { generation }` | either | The sender takes control; equal generations favor the initiator |
 | 8 | `Enter { generation, along }` | system in control | The pointer crossed onto the receiver's screen |
 | 9 | `Input { generation, event }` | system in control | One piece of input, below |
@@ -59,6 +59,9 @@ A snapshot holds a `Text` item, with an `Rtf` item when the copy has rich text, 
 | 3 | `Key` | macOS virtual key `code`, `down`, `repeat`, modifier `flags` |
 | 4 | `Modifiers` | the modifier key `code` and the new `flags` |
 | 5 | `Swipe` | one step of a trackpad swipe: `axis` (`Horizontal` or `Vertical`), `phase` (`Began`, `Changed`, `Ended` or `Cancelled`), `progress` in Spaces travelled and, when it ends, `velocity`, both signed as the trackpad reports them |
+| 6 | `PhasedScroll` | trackpad scrolling: `dx`, `dy` in points and `phase`, below |
+
+`Scroll` carries a scroll without a phase, such as a mouse wheel's. `PhasedScroll` carries a trackpad scroll and the momentum after a flick, so the receiver's apps scroll smoothly, coast and rubber-band. Its `phase` follows the same append-only rule: 0 `MayBegin`, 1 `Began`, 2 `Changed`, 3 `Ended`, 4 `Cancelled`, 5 `MomentumBegan`, 6 `Momentum`, 7 `MomentumEnded`. A scroll and its momentum stay on the system that had control when the fingers went down. The receiver replays a scroll only from its beginning, and ends one still under way when control leaves.
 
 `along` is a position on the shared edge, from 0 at its top or left end to 65,535 at its bottom or right end, so screens of different sizes line up proportionally.
 
@@ -66,7 +69,7 @@ A snapshot holds a `Text` item, with an `Rtf` item when the copy has rich text, 
 
 1. The connecting peer and the listening peer complete the Noise handshake.
 2. Both send `Hello`. If each already trusts the other's key, the session begins. Otherwise, if both are willing, they pair; if either is not, both drop the connection.
-3. Both peers exchange `Layout` within five seconds. The side chosen most recently wins, with the initiator's winning a tie; both store the agreed relation and when it was chosen.
+3. Both peers exchange `Layout` within five seconds. The side chosen most recently wins, with the initiator's winning a tie; both store the agreed relation and when it was chosen. A peer rearranged during the session sends `Layout` again with the new time; each side applies the same rule, moves its crossing edge at once and stores the result.
 4. Pushing the pointer past the shared edge sends `Enter`, then `Input`. Pushing it back across the shared edge sends `Leave`.
 5. Whenever control crosses, the peer giving it up sends its clipboard as `Clipboard` parts: the driver after `Enter`, the receiver after `Leave` or `Reclaim`, and a driver that receives a newer `ControlClaim`. A peer with clipboard sharing turned off sends nothing and does not write what arrives. A peer accepts one snapshot per crossing toward it and ignores clipboard parts at any other time. The receiver acknowledges every `Chunk` with `Ack`, even when it discards it, and the sender keeps at most four chunks unacknowledged, so no more than 64 KB of clipboard data sits ahead of input and heartbeats.
 6. Both peers ping every second. Three seconds of silence ends the session and restores local capture and held-input state.

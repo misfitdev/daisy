@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use super::ffi::*;
 use super::pointer::Magnifier;
-use crate::input::Action;
+use crate::input::{Action, ScrollPhase};
 use crate::shake::ShakeDetector;
 use crate::swipe::SwipeDetector;
 
@@ -89,20 +89,7 @@ impl Injector {
                 }
                 post(event);
             }
-            Action::Scroll { dx, dy } => {
-                // SAFETY: plain values
-                let event = unsafe {
-                    CGEventCreateScrollWheelEvent2(
-                        self.source,
-                        kCGScrollEventUnitPixel,
-                        2,
-                        dy.round() as i32,
-                        dx.round() as i32,
-                        0,
-                    )
-                };
-                post(event);
-            }
+            Action::Scroll { dx, dy, phase } => post(scroll_event(self.source, dx, dy, phase)),
             Action::Key {
                 code,
                 down,
@@ -192,6 +179,33 @@ impl Drop for Injector {
     }
 }
 
+/// A pixel scroll, which macOS marks continuous, carrying the trackpad phase
+/// apps read for inertia and rubber-banding.
+fn scroll_event(source: CGEventSourceRef, dx: f64, dy: f64, phase: Option<ScrollPhase>) -> CGEventRef {
+    // SAFETY: plain values
+    let event = unsafe {
+        CGEventCreateScrollWheelEvent2(
+            source,
+            kCGScrollEventUnitPixel,
+            2,
+            dy.round() as i32,
+            dx.round() as i32,
+            0,
+        )
+    };
+    if let Some(phase) = phase
+        && !event.is_null()
+    {
+        let (scroll, momentum) = phase.fields();
+        // SAFETY: event was just created
+        unsafe {
+            CGEventSetIntegerValueField(event, kCGScrollWheelEventScrollPhase, scroll);
+            CGEventSetIntegerValueField(event, kCGScrollWheelEventMomentumPhase, momentum);
+        }
+    }
+    event
+}
+
 fn post(event: CGEventRef) {
     if event.is_null() {
         return;
@@ -201,5 +215,58 @@ fn post(event: CGEventRef) {
         CGEventSetIntegerValueField(event, kCGEventSourceUserData, DAISY_EVENT_MARKER);
         CGEventPost(kCGHIDEventTap, event);
         CFRelease(event.cast_const());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2::encode::{Encode, Encoding};
+    use objc2::rc::Retained;
+    use objc2::{ClassType, msg_send};
+    use objc2_app_kit::{NSEvent, NSEventPhase};
+
+    use super::*;
+
+    #[repr(transparent)]
+    struct Event(CGEventRef);
+
+    // SAFETY: a CGEventRef is a pointer to the opaque __CGEvent struct
+    unsafe impl Encode for Event {
+        const ENCODING: Encoding = Encoding::Pointer(&Encoding::Struct("__CGEvent", &[]));
+    }
+
+    fn appkit_event(phase: Option<ScrollPhase>) -> Retained<NSEvent> {
+        let event = scroll_event(std::ptr::null_mut(), 3.0, -12.0, phase);
+        assert!(!event.is_null());
+        // SAFETY: event is live; AppKit retains what it needs
+        let converted: Option<Retained<NSEvent>> =
+            unsafe { msg_send![NSEvent::class(), eventWithCGEvent: Event(event)] };
+        // SAFETY: event was created above and is released once
+        unsafe { CFRelease(event.cast_const()) };
+        converted.expect("AppKit reads a scroll event")
+    }
+
+    #[test]
+    fn appkit_reads_a_replayed_scroll_as_trackpad_scrolling() {
+        for (phase, gesture, momentum) in [
+            (ScrollPhase::MayBegin, NSEventPhase::MayBegin, NSEventPhase::None),
+            (ScrollPhase::Began, NSEventPhase::Began, NSEventPhase::None),
+            (ScrollPhase::Changed, NSEventPhase::Changed, NSEventPhase::None),
+            (ScrollPhase::Ended, NSEventPhase::Ended, NSEventPhase::None),
+            (ScrollPhase::Cancelled, NSEventPhase::Cancelled, NSEventPhase::None),
+            (ScrollPhase::MomentumBegan, NSEventPhase::None, NSEventPhase::Began),
+            (ScrollPhase::Momentum, NSEventPhase::None, NSEventPhase::Changed),
+            (ScrollPhase::MomentumEnded, NSEventPhase::None, NSEventPhase::Ended),
+        ] {
+            let event = appkit_event(Some(phase));
+            assert_eq!(event.phase(), gesture, "{phase:?}");
+            assert_eq!(event.momentumPhase(), momentum, "{phase:?}");
+            assert!(event.hasPreciseScrollingDeltas(), "{phase:?}");
+            assert_eq!((event.scrollingDeltaX(), event.scrollingDeltaY()), (3.0, -12.0));
+        }
+
+        let wheel = appkit_event(None);
+        assert_eq!(wheel.phase(), NSEventPhase::None);
+        assert_eq!(wheel.momentumPhase(), NSEventPhase::None);
     }
 }
