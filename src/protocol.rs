@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::identity::PublicKey;
 use crate::input::{Along, InputEvent, Side};
 
 pub const CONFIRMATION_LEN: usize = 32;
@@ -64,6 +65,12 @@ pub enum Message {
     /// The system in control took the pointer back; release everything held.
     Reclaim {
         generation: u64,
+    },
+    /// Who the sender believes has control, sent when a session starts, so a
+    /// system joining a group learns the current owner and generation.
+    ControlState {
+        generation: u64,
+        owner: PublicKey,
     },
 }
 
@@ -280,6 +287,11 @@ mod tests {
             10
         );
         assert_eq!(Message::Reclaim { generation: 0 }.encode().unwrap()[0], 11);
+        let state = Message::ControlState {
+            generation: 0,
+            owner: crate::identity::PublicKey::from_bytes(&[0; 32]).unwrap(),
+        };
+        assert_eq!(state.encode().unwrap()[0], 12);
     }
 
     #[test]
