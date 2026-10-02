@@ -22,6 +22,8 @@ const SCALE: f64 = 2.0;
 
 pub fn save(path: &Path) -> Result<()> {
     let mtm = MainThreadMarker::new().context("drawing Daisy's window must happen on the main thread")?;
+    // AppKit expects its application object before any window
+    let _app = objc2_app_kit::NSApplication::sharedApplication(mtm);
     let target = NSObject::new();
     let views = MainViews::new(mtm, as_target(&target));
     // SAFETY: AppKit's constant appearance name
@@ -84,11 +86,11 @@ fn write_png(view: &NSView, path: &Path) -> Result<()> {
     // SAFETY: an empty property dictionary is valid for PNG
     let png = unsafe { scaled.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }
         .context("AppKit could not encode the image")?;
-    if !png.to_vec().is_empty() {
-        std::fs::write(path, png.to_vec()).with_context(|| format!("writing {}", path.display()))?;
-        return Ok(());
+    let bytes = png.to_vec();
+    if bytes.is_empty() {
+        bail!("the image came out empty");
     }
-    bail!("the image came out empty")
+    std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
 /// A bitmap of `width` by `height` pixels that draws at `like`'s size in points.

@@ -59,6 +59,8 @@ const CONNECTED_SHOWN: std::time::Duration = std::time::Duration::from_secs(15);
 /// Past these, the exchange has timed out on the network side as well.
 const CHECKING_SHOWN: std::time::Duration = std::time::Duration::from_secs(20);
 const CODE_SHOWN: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long past its countdown Add a System waits to hear that it closed.
+const WAITING_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 struct AppDelegateIvars {
     controller: Handle,
@@ -268,6 +270,7 @@ define_class!(
                     if let Some(reply) = self.ivars().code_reply.borrow_mut().take() {
                         let _ = reply.send(String::new());
                     }
+                    let _ = self.ivars().controller.send(Command::CancelAdding);
                 }
                 _ => {}
             }
@@ -916,7 +919,8 @@ impl AppDelegate {
     /// Opens this group to a new system for a short while, from the menu.
     fn add_a_system(&self) {
         let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
-        if !is_active(&self.ivars().status.borrow()) || always {
+        let nearby = self.ivars().settings.borrow().last_session.connection == Connection::Automatic;
+        if !is_active(&self.ivars().status.borrow()) || always || !nearby {
             return;
         }
         let _ = self.ivars().controller.send(Command::AddSystem);
@@ -935,6 +939,11 @@ impl AppDelegate {
         panel.tick();
         // an exchange that ended some other way leaves nothing to wait for
         let stale = match panel.state() {
+            // no session reports the window closing for a typed address
+            Some(panel::State::Waiting { until }) if std::time::Instant::now() >= until + WAITING_GRACE => {
+                panel.show(panel::State::NoneJoined, false);
+                false
+            }
             Some(panel::State::Checking { .. }) => panel.age() >= CHECKING_SHOWN,
             Some(panel::State::ShowCode { .. } | panel::State::EnterCode { .. }) => panel.age() >= CODE_SHOWN,
             _ => false,
@@ -1109,7 +1118,8 @@ impl AppDelegate {
         }
         if let Some(item) = self.ivars().menu_add.get() {
             let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
-            item.setEnabled(active && !always && !self.ivars().adding.get());
+            let nearby = self.ivars().settings.borrow().last_session.connection == Connection::Automatic;
+            item.setEnabled(active && nearby && !always && !self.ivars().adding.get());
         }
     }
 

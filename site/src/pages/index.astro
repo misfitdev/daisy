@@ -123,7 +123,7 @@ const movesSvg =
       <ul class="facts">
         <li>Connections use a Noise handshake with X25519, ChaCha20-Poly1305 and BLAKE2s.</li>
         <li>Pairing runs SPAKE2 on a one-time six-digit code, so someone in the middle gets one guess per attempt: a one-in-a-million chance.</li>
-        <li>A group accepts a new system only when you choose Add a System, for 30 seconds, and at most five unknown systems may try in ten minutes.</li>
+        <li>A group accepts a new system only for 30 seconds after you choose Add a System, or while Always discoverable is on, and at most five unknown systems may try in ten minutes.</li>
         <li>Releases are signed with Developer ID, notarized by Apple, and built with SLSA Build Level 3 provenance. <a href={href("/download/#verify")}>Verify your download.</a></li>
       </ul>
     </div>

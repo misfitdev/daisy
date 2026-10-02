@@ -14,7 +14,7 @@ fn main() {
             .filter(|output| output.status.success())
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
     };
-    let commit = match git(&["rev-parse", "--short=12", "HEAD"]) {
+    let commit = match git(&["rev-parse", "--short=12", "HEAD"]).filter(|hash| !hash.is_empty()) {
         Some(hash) if git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty()) => {
             format!("{hash}-modified")
         }

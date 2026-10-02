@@ -31,6 +31,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const TRUST_TIMEOUT: Duration = Duration::from_secs(120);
 const PAIRING_WINDOW: Duration = Duration::from_secs(10 * 60);
 const MAX_PAIRING_ATTEMPTS: u8 = 5;
+/// How long after a failed or cancelled pairing this system waits before
+/// opening another.
+const PAIRING_QUIET: Duration = Duration::from_secs(15);
 const INPUT_QUEUE_CAPACITY: usize = 1024;
 
 type Pairing = Option<Policy>;
@@ -86,11 +89,7 @@ where
                 }
                 finished = running.next() => {
                     if let Some(opened) = finished {
-                        if opened.pairing {
-                            let mut gate = gate();
-                            gate.exchanged();
-                            if opened.key.is_some() { gate.completed = true; }
-                        }
+                        if opened.pairing && !opened.paired { gate().exchanged(false); }
                         if let Err(error) = opened.result { Shared(&observer).connection_failed(&opened.address, &error); }
                         if let Some(key) = opened.key { busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&key); }
                     }
@@ -119,6 +118,9 @@ where
                         Shared(&observer).pairing_closed();
                         break;
                     }
+                    // membership changes as systems pair and are forgotten;
+                    // a changed offer is advertised again below
+                    gate().member = !keys.is_empty();
                     // a system whose last peer was forgotten is new again
                     if keys.is_empty() && gate().closed && config.pairing.is_some() {
                         *gate() = PairingGate::listening(config.pairing, Listening::Closed, false);
@@ -139,21 +141,23 @@ where
                         if !discovery::opens_connection(own, election, &heard, offer, seen_for) { continue; }
                         let expected = match heard.seen { discovery::Seen::Paired(key) => Some(key), discovery::Seen::Pairing { .. } => None };
                         if let Some(key) = expected && !busy.lock().unwrap_or_else(|e| e.into_inner()).insert(key) { continue; }
-                        let pairing = gate().for_peer(expected.is_some());
-                        if expected.is_none() && pairing.is_none() { continue; }
+                        let policy = gate().for_peer(expected.is_some());
+                        if expected.is_none() && policy.is_none() { continue; }
                         // wait out the grace again, so two systems that both
                         // connected do not keep colliding
                         first_seen.remove(&heard.election);
-                        let attempt = SessionConfig { pairing, ..config };
+                        let attempt = SessionConfig { pairing: policy, ..config };
                         let address = heard.address.to_string();
                         Shared(&observer).connecting(&address, peer_name(config.peers, expected).as_deref());
                         let (hub, observer) = (&hub, &observer);
                         let mut prompt = prompt.clone();
+                        let gate_lock = &pairing;
+                        let began_pairing = expected.is_none();
                         running.push(async move {
                             let mut expected = expected;
-                            let mut shared = Shared(observer);
-                            let (_, result) = connect_once(attempt, hub, &address, &mut expected, &mut prompt, &mut shared).await;
-                            Some(Opened { address, key: expected, pairing: expected.is_none(), result })
+                            let mut watched = GateWatch { inner: Shared(observer), gate: gate_lock, paired: false };
+                            let (_, result) = connect_once(attempt, hub, &address, &mut expected, &mut prompt, &mut watched).await;
+                            Some(Opened { address, key: expected, pairing: began_pairing, paired: watched.paired, result })
                         });
                     }
                 }
@@ -180,7 +184,55 @@ struct Opened {
     key: Option<PublicKey>,
     /// Whether it began as a pairing.
     pairing: bool,
+    /// Whether that pairing succeeded.
+    paired: bool,
     result: Result<()>,
+}
+
+/// Passes everything on, and ends this system's pairing exchange as soon as
+/// a new system is paired rather than when its link ends.
+struct GateWatch<'a, O> {
+    inner: O,
+    gate: &'a std::sync::Mutex<PairingGate>,
+    paired: bool,
+}
+
+impl<O: ServiceObserver> ServiceObserver for GateWatch<'_, O> {
+    fn waiting(&mut self, name: &str, key: PublicKey, port: u16, pairing: Pairing) {
+        self.inner.waiting(name, key, port, pairing);
+    }
+    fn connecting(&mut self, address: &str, peer: Option<&str>) {
+        self.inner.connecting(address, peer);
+    }
+    fn reconnecting(&mut self, address: &str, peer: Option<&str>, wait: Duration) {
+        self.inner.reconnecting(address, peer, wait);
+    }
+    fn paired(&mut self, peer: &str, key: PublicKey, policy: Policy) {
+        self.paired = true;
+        self.gate.lock().unwrap_or_else(|e| e.into_inner()).exchanged(true);
+        self.inner.paired(peer, key, policy);
+    }
+    fn connected(&mut self, peer: &str, key: PublicKey, side: Side) {
+        self.inner.connected(peer, key, side);
+    }
+    fn link(&mut self, peer: &str, key: PublicKey, link: crate::control::Link) {
+        self.inner.link(peer, key, link);
+    }
+    fn arranged(&mut self, layout: &share::Layout) {
+        self.inner.arranged(layout);
+    }
+    fn disconnected(&mut self, peer: &str, key: PublicKey) {
+        self.inner.disconnected(peer, key);
+    }
+    fn pairing_opened(&mut self) {
+        self.inner.pairing_opened();
+    }
+    fn pairing_closed(&mut self) {
+        self.inner.pairing_closed();
+    }
+    fn connection_failed(&mut self, address: &str, error: &anyhow::Error) {
+        self.inner.connection_failed(address, error);
+    }
 }
 
 /// Futures run side by side within one task, so they may borrow from it.
@@ -341,6 +393,9 @@ struct PairingGate {
     /// grace, so the other system would otherwise open a second exchange
     /// and ask for a second code.
     exchanging: bool,
+    /// No new exchange is opened before this, after one failed or was
+    /// cancelled, so a dismissed prompt does not come straight back.
+    quiet_until: Option<tokio::time::Instant>,
 }
 
 impl PairingGate {
@@ -369,6 +424,7 @@ impl PairingGate {
             completed: false,
             closed: false,
             exchanging: false,
+            quiet_until: None,
         }
     }
 
@@ -404,17 +460,29 @@ impl PairingGate {
 
     /// Whether this system may open a connection to a system open to pairing.
     fn may_open(&self) -> bool {
-        self.is_open() && !self.exchanging
+        self.is_open()
+            && !self.exchanging
+            && self
+                .quiet_until
+                .is_none_or(|until| tokio::time::Instant::now() >= until)
     }
 
-    /// The exchange `for_peer` began has ended, however it ended.
-    fn exchanged(&mut self) {
+    /// The exchange `for_peer` began has ended; `paired` says whether a new
+    /// system was paired.
+    fn exchanged(&mut self, paired: bool) {
         self.exchanging = false;
+        if paired {
+            self.paired(Trust::NewlyPaired);
+        } else {
+            self.quiet_until = Some(tokio::time::Instant::now() + PAIRING_QUIET);
+        }
     }
 
     fn paired(&mut self, trust: Trust) {
         if trust == Trust::NewlyPaired {
             self.completed = true;
+            // an always open gate stays open, now as a member's
+            self.member = true;
         }
     }
 
@@ -735,8 +803,9 @@ where
         settle_trust(&mut channel, config.peers, config.name, policy, prompt, observer),
     )
     .await;
+    let paired = matches!(settled, Ok(Ok((_, Trust::NewlyPaired))));
     if !known && policy.is_some() {
-        gate().exchanged();
+        gate().exchanged(paired);
     }
     let (peer, trust_status) = settled.context("pairing or trust negotiation timed out")??;
     if trust_status == Trust::NewlyPaired {
@@ -1293,7 +1362,7 @@ mod tests {
         assert!(gate.is_open());
         for _ in 0..MAX_PAIRING_ATTEMPTS {
             assert_eq!(gate.for_peer(false), Some(Policy::IDLE));
-            gate.exchanged();
+            gate.exchanged(false);
         }
         assert!(!gate.is_open());
         assert_eq!(gate.for_peer(false), None);
@@ -1314,16 +1383,39 @@ mod tests {
         assert!(!gate.is_open());
     }
 
-    #[test]
-    fn only_one_pairing_exchange_runs_at_a_time() {
+    #[tokio::test(start_paused = true)]
+    async fn only_one_pairing_exchange_runs_at_a_time() {
         let mut gate = PairingGate::new(Some(Policy::IDLE));
         assert_eq!(gate.for_peer(false), Some(Policy::IDLE));
         assert!(!gate.may_open(), "no second connection while a code is being typed");
         assert_eq!(gate.for_peer(false), None, "a second exchange is refused");
         assert_eq!(gate.for_peer(true), Some(Policy::IDLE), "paired peers still connect");
-        gate.exchanged();
+        gate.exchanged(false);
+        assert_eq!(
+            gate.for_peer(false),
+            Some(Policy::IDLE),
+            "the other system may still connect"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_pairing_is_not_reopened_at_once() {
+        let mut gate = PairingGate::listening(Some(Policy::IDLE), Listening::Closed, false);
+        gate.for_peer(false);
+        gate.exchanged(false);
+        assert!(!gate.may_open(), "the prompt does not come straight back");
+        tokio::time::advance(PAIRING_QUIET).await;
         assert!(gate.may_open());
-        assert_eq!(gate.for_peer(false), Some(Policy::IDLE));
+    }
+
+    #[test]
+    fn an_always_open_gate_advertises_a_member_once_it_pairs() {
+        let mut gate = PairingGate::listening(Some(Policy::IDLE), Listening::Always, false);
+        assert!(matches!(gate.offer(), discovery::Offer::Open { member: false, .. }));
+        gate.for_peer(false);
+        gate.exchanged(true);
+        assert!(gate.may_open(), "a paired exchange leaves no pause");
+        assert!(matches!(gate.offer(), discovery::Offer::Open { member: true, .. }));
     }
 
     #[derive(Default)]
@@ -1444,7 +1536,7 @@ mod tests {
         assert!(always.is_open(), "stays open after a system pairs");
         for _ in 0..MAX_PAIRING_ATTEMPTS {
             always.for_peer(false);
-            always.exchanged();
+            always.exchanged(false);
         }
         assert!(!always.is_open());
         assert!(!always.ended(), "out of attempts for now, not closed");
