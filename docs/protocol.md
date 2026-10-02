@@ -10,7 +10,7 @@ A TCP connection, to port 24850 by default. Every frame is a big-endian `u16` le
 
 Every connection starts a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake in which both sides send their long-term keys. The prologue is `daisy` and never changes.
 
-Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 3. Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
+Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 4. Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
 
 The handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
 
