@@ -65,8 +65,7 @@ version of each system.
 - The Bonjour TXT record (`discovery::properties`) is read by every
   version on the network: `p` is 0 closed, 1 open with no peers, 2 open
   group member; `s` is when pairing opened. Add keys freely; change an
-  existing key's meaning only with a new `VERSION` there, which also hides
-  paired peers on older versions from each other.
+  existing key's meaning only with a new `VERSION` there.
 - Short codes are only safe as PAKE input. Never ask people to compare a code
   by eye as a security check; an attacker can grind keys until codes match.
 - The event-tap callback runs on every input event. It must never wait, perform
