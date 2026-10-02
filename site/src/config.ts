@@ -1,4 +1,4 @@
-export const version = "0.1.2";
+export const version = "0.2.0";
 export const repo = "https://github.com/misfitdev/daisy";
 export const releaseAsset = `Daisy-${version}-macos-arm64.dmg`;
 /** The DMG itself. Pinned to this version's tag: `releases/latest` skips
