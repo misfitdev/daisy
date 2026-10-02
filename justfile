@@ -66,6 +66,10 @@ bundle:
     codesign --verify --strict "{{app}}"
     echo "signed {{app}} with $identity"
 
+# Draw the Daisy window with sample systems for the website
+screenshot:
+    cargo run --release --quiet -- screenshot site/public/screenshots/daisy-window.png
+
 # Run Daisy.app with arguments, e.g. `just app permissions`
 app *args: bundle
     # run from a terminal, the app's binary relaunches itself as the app, so

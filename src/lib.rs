@@ -1,5 +1,12 @@
 //! Share one keyboard, mouse and trackpad swipes between systems.
 
+/// The commit this build came from, with `-modified` when the tree had
+/// uncommitted changes.
+pub const COMMIT: &str = env!("DAISY_COMMIT");
+
+/// The version and the commit it was built from.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("DAISY_COMMIT"), ")");
+
 #[cfg(target_os = "macos")]
 pub mod app;
 pub mod clipboard;

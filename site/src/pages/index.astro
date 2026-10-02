@@ -76,17 +76,17 @@ const movesSvg =
         <div class="move">
           <div class="move-node"><Flower size={56} /></div>
           <h3>Pair</h3>
-          <p>One system shows a code; type it on the other. Drag their displays into place, then push the pointer across. Pair a new system with any member to add it.</p>
+          <p>Click Start Sharing on both. The newer one shows a code; type it on the other. Drag their displays into place, then push the pointer across. To add another, choose Add a System on any member.</p>
         </div>
       </div>
       <img
         class="setup-shot"
-        src={href("/screenshots/daisy-setup.png")}
-        width="1160"
-        height="1504"
+        src={href("/screenshots/daisy-window.png")}
+        width="1120"
+        height="824"
         loading="lazy"
         decoding="async"
-        alt="Daisy setup with automatic nearby connections, optional address, screen position, trust and both permissions."
+        alt="The Daisy window: Laptop in control beside Studio's two displays, connected in 4 ms, with Studio listed under Peers."
       />
       <p class="text-links"><a href={href("/docs/getting-started/")}>Read the full getting-started guide</a></p>
     </div>
@@ -123,7 +123,7 @@ const movesSvg =
       <ul class="facts">
         <li>Connections use a Noise handshake with X25519, ChaCha20-Poly1305 and BLAKE2s.</li>
         <li>Pairing runs SPAKE2 on a one-time six-digit code, so someone in the middle gets one guess per attempt: a one-in-a-million chance.</li>
-        <li>At most five unknown systems may try in ten minutes, and pairing closes after the first success.</li>
+        <li>A group accepts a new system only when you choose Add a System, for 30 seconds, and at most five unknown systems may try in ten minutes.</li>
         <li>Releases are signed with Developer ID, notarized by Apple, and built with SLSA Build Level 3 provenance. <a href={href("/download/#verify")}>Verify your download.</a></li>
       </ul>
     </div>

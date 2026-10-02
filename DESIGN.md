@@ -360,6 +360,11 @@ Both states use the identical flower silhouette with no side links or rings:
 Color is the only state difference. The glyph must remain recognizable at native
 menu-bar size and must not acquire link “ears.”
 
+The flower's menu is short and carries no status text or latency; those live in
+the window. In order: **Open Daisy**, a separator, **Start Sharing** or **Stop
+Sharing** on one line, **Add a System** (unavailable while not sharing or while
+Always discoverable is on), a separator, and **Quit**.
+
 ### macOS app icon
 
 The app icon is one centered Daisy bloom in front of two interlocking
@@ -382,12 +387,24 @@ action outrank brand decoration. A single large flower anchors the header with
 its yellow brand center. Connection-state color changes belong to the menu-bar
 glyph; the header mark does not turn gray when disconnected.
 
-Setup is two steps: **Pair a New Peer**, then a **Screen edge** choice for where
-the peer sits. The edge choice is compact and secondary, never a headline,
-device identity, or sentence disguised as a menu item. There is no role or
-connection-direction choice; an optional address field stays quiet below it for
-networks Bonjour does not reach. Future positioned chains should reduce the
-prominence of this choice rather than build more interface around it.
+The main window holds only the screen arrangement, the status title and detail,
+the Peers group, **Advanced…** and one primary **Start Sharing** / **Stop
+Sharing** button. Systems pair by both sharing; there is no pairing button,
+role or connection-direction choice. Advanced holds clipboard sharing, Open at
+login, Always discoverable, Permissions and an optional address for networks
+Bonjour does not reach.
+
+Pairing uses one small floating panel that never takes the keyboard unless this
+system asked: a waiting state with a countdown and Cancel, the code in large
+monospaced digits in two groups on the new system, a centered six-digit field on
+the system it joins, then **Connected to {peer}** with **Arrange…** and
+**Close**, closing on its own after 15 seconds. Pairing copy states the next
+action only; it never lectures about codes.
+
+In the arrangement, the system in control is outlined in coral rather than
+filled, so coral stays an action color. Peer displays show an open-hand cursor.
+Peer rows show connection state and who introduced the peer; the key fingerprint
+is a tooltip, so it is never mistaken for a code.
 
 Conditional rows close up when hidden. Granted permissions retain a quiet text
 status and remove their action buttons. Use native AppKit controls, system type,
@@ -396,10 +413,8 @@ keyboard focus, and platform spacing throughout.
 Connection settings and permissions sit in separate adaptive rounded groups on
 the native window background. Two-choice decisions use direct segmented controls;
 menus are reserved for longer option sets. Coral marks the selected segments and
-exactly one primary action. Before any peer is paired that action is **Pair a New
-Peer**; after pairing it becomes **Start Sharing**. Yellow remains exclusive to the
-connected flower state. A single short coral rule beneath the Connection heading
-keeps the accent present while permission-gated actions are disabled.
+exactly one primary action: **Start Sharing**. Yellow remains exclusive to the
+connected flower state.
 
 ### Buttons
 

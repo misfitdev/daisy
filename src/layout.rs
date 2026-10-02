@@ -84,6 +84,17 @@ impl<K: Copy + PartialEq> Group<K> {
         Some((point.0 - offset.0, point.1 - offset.1))
     }
 
+    /// The center of `key`'s main display, in its own coordinates. macOS
+    /// puts the main display's top-left corner at the origin.
+    pub fn home(&self, key: K) -> Option<Point> {
+        let displays = &self.member(key)?.displays;
+        let main = displays
+            .iter()
+            .find(|display| display.x == 0.0 && display.y == 0.0)
+            .or_else(|| displays.first())?;
+        Some((main.x + main.width / 2.0, main.y + main.height / 2.0))
+    }
+
     /// Whether `point`, in `key`'s own coordinates, is on one of its displays.
     pub fn on_display(&self, key: K, point: Point) -> bool {
         self.member(key)
@@ -769,5 +780,24 @@ mod tests {
         assert_eq!(beside(&local, &[PEER], Side::Above), (-800.0, -1440.0 - 900.0));
         let group = group(vec![PEER], beside(&local, &[PEER], Side::Right));
         assert!(!group.overlaps(1, group.members[1].offset));
+    }
+
+    #[test]
+    fn home_is_the_middle_of_the_main_display() {
+        let side = Rect {
+            x: -1920.0,
+            y: -200.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let main = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1512.0,
+            height: 982.0,
+        };
+        let group = Group::alone(1, vec![side, main]);
+        assert_eq!(group.home(1), Some((756.0, 491.0)), "not the first listed");
+        assert_eq!(group.home(2), None);
     }
 }

@@ -46,7 +46,10 @@ where
     let listener = TcpListener::bind(("0.0.0.0", DEFAULT_PORT)).await?;
     let mut browser = discovery::Browser::start()?;
     let hub = Hub::new(&config);
-    let pairing = std::sync::Mutex::new(PairingGate::new(config.pairing));
+    let mut listening = config.listening.cloned();
+    let has_peers = || config.peers.list(trust::now()).map(|peers| !peers.is_empty());
+    let initial = listening.as_mut().map_or(Listening::Closed, |l| *l.borrow_and_update());
+    let pairing = std::sync::Mutex::new(PairingGate::listening(config.pairing, initial, has_peers()?));
     let gate = || pairing.lock().unwrap_or_else(|e| e.into_inner());
     let observer = std::sync::Mutex::new(observer);
     let mut discoverable = config.discoverable.clone();
@@ -83,7 +86,11 @@ where
                 }
                 finished = running.next() => {
                     if let Some(opened) = finished {
-                        if opened.pairing && opened.key.is_some() { gate().completed = true; }
+                        if opened.pairing {
+                            let mut gate = gate();
+                            gate.exchanged();
+                            if opened.key.is_some() { gate.completed = true; }
+                        }
                         if let Err(error) = opened.result { Shared(&observer).connection_failed(&opened.address, &error); }
                         if let Some(key) = opened.key { busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&key); }
                     }
@@ -93,15 +100,32 @@ where
                     if !changed { anyhow::bail!("Bonjour browsing stopped"); }
                 }
                 Ok(()) = discoverable.changed() => break,
+                Some(now) = listening_changed(&mut listening) => {
+                    let was_open = gate().is_open();
+                    *gate() = PairingGate::listening(config.pairing, now, has_peers()?);
+                    match now {
+                        Listening::For(_) => Shared(&observer).pairing_opened(),
+                        _ if was_open && !gate().is_open() => Shared(&observer).pairing_closed(),
+                        _ => {}
+                    }
+                    // advertise again, with the new offer
+                    break;
+                }
                 _ = scan.tick() => {
-                    let closing = { let gate = gate(); gate.policy.is_some() && !gate.is_open() && !gate.closed };
-                    if closing {
+                    let keys: Vec<_> = config.peers.list(trust::now())?.iter().map(|p| p.key).collect();
+                    gate().tick();
+                    if gate().ended() {
                         gate().close();
                         Shared(&observer).pairing_closed();
                         break;
                     }
+                    // a system whose last peer was forgotten is new again
+                    if keys.is_empty() && gate().closed && config.pairing.is_some() {
+                        *gate() = PairingGate::listening(config.pairing, Listening::Closed, false);
+                        break;
+                    }
+                    if advertiser.as_ref().is_some_and(|a| a.offer != gate().offer()) { break; }
                     if !hub.has_room() { continue; }
-                    let keys: Vec<_> = config.peers.list(trust::now())?.iter().map(|p| p.key).collect();
                     let own = config.identity.public_key();
                     let mut found = browser.current(&keys);
                     found.sort_by_key(|heard| heard.election);
@@ -109,16 +133,18 @@ where
                     first_seen.retain(|election, _| found.iter().any(|heard| heard.election == *election));
                     for heard in &found { first_seen.entry(heard.election).or_insert(now); }
                     let election = advertiser.as_ref().map(|a| a.election);
-                    let pairing_open = gate().is_open();
+                    let offer = if gate().may_open() { gate().offer() } else { discovery::Offer::Closed };
                     for heard in found {
                         let seen_for = now - first_seen[&heard.election];
-                        if !discovery::opens_connection(own, election, &heard, pairing_open, seen_for) { continue; }
-                        let expected = match heard.seen { discovery::Seen::Paired(key) => Some(key), discovery::Seen::Pairing => None };
+                        if !discovery::opens_connection(own, election, &heard, offer, seen_for) { continue; }
+                        let expected = match heard.seen { discovery::Seen::Paired(key) => Some(key), discovery::Seen::Pairing { .. } => None };
                         if let Some(key) = expected && !busy.lock().unwrap_or_else(|e| e.into_inner()).insert(key) { continue; }
+                        let pairing = gate().for_peer(expected.is_some());
+                        if expected.is_none() && pairing.is_none() { continue; }
                         // wait out the grace again, so two systems that both
                         // connected do not keep colliding
                         first_seen.remove(&heard.election);
-                        let attempt = SessionConfig { pairing: gate().for_peer(expected.is_some()), ..config };
+                        let attempt = SessionConfig { pairing, ..config };
                         let address = heard.address.to_string();
                         Shared(&observer).connecting(&address, peer_name(config.peers, expected).as_deref());
                         let (hub, observer) = (&hub, &observer);
@@ -127,13 +153,24 @@ where
                             let mut expected = expected;
                             let mut shared = Shared(observer);
                             let (_, result) = connect_once(attempt, hub, &address, &mut expected, &mut prompt, &mut shared).await;
-                            Some(Opened { address, key: expected, pairing: heard.seen == discovery::Seen::Pairing, result })
+                            Some(Opened { address, key: expected, pairing: expected.is_none(), result })
                         });
                     }
                 }
             }
         }
     }
+}
+
+/// Each new choice of when to accept a new system.
+async fn listening_changed(listening: &mut Option<watch::Receiver<Listening>>) -> Option<Listening> {
+    let Some(listening) = listening else {
+        return std::future::pending().await;
+    };
+    if listening.changed().await.is_err() {
+        return std::future::pending().await;
+    }
+    Some(*listening.borrow_and_update())
 }
 
 /// How a link this system opened ended.
@@ -206,6 +243,9 @@ impl<O: ServiceObserver> ServiceObserver for Shared<'_, '_, O> {
     fn disconnected(&mut self, peer: &str, key: PublicKey) {
         self.lock().disconnected(peer, key);
     }
+    fn pairing_opened(&mut self) {
+        self.lock().pairing_opened();
+    }
     fn pairing_closed(&mut self) {
         self.lock().pairing_closed();
     }
@@ -235,6 +275,8 @@ pub trait ServiceObserver {
     fn arranged(&mut self, _layout: &share::Layout) {}
     /// A link that `connected` reported ended.
     fn disconnected(&mut self, _peer: &str, _key: PublicKey) {}
+    /// Pairing opened while the group runs.
+    fn pairing_opened(&mut self) {}
     fn pairing_closed(&mut self) {}
     fn connection_failed(&mut self, _address: &str, _error: &anyhow::Error) {}
 }
@@ -264,26 +306,87 @@ pub struct SessionConfig<'a> {
     pub discoverable: &'a watch::Receiver<bool>,
     /// Members moved on this system while a session runs, if it can rearrange.
     pub arrangement: Option<&'a watch::Receiver<Option<share::Placing>>>,
+    /// When a running group accepts a new system.
+    pub listening: Option<&'a watch::Receiver<Listening>>,
     /// Signs this system's introductions and revocations.
     pub signer: &'a crate::introduce::Signer,
+}
+
+/// When a running group accepts a system it has not paired with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listening {
+    /// Only while this system has no peers yet.
+    Closed,
+    /// For this long, or until one system pairs.
+    For(Duration),
+    /// Whenever this system is sharing.
+    Always,
 }
 
 struct PairingGate {
     policy: Pairing,
     opened: tokio::time::Instant,
+    /// When it closes; `None` stays open while sharing.
+    until: Option<tokio::time::Instant>,
+    /// Stays open after a system pairs.
+    keep_open: bool,
+    /// Whether this system already has peers when it opened.
+    member: bool,
+    /// When it opened, in Unix seconds, as the advertisement says.
+    since: u64,
     attempts: u8,
     completed: bool,
     closed: bool,
+    /// A pairing exchange is under way. Typing a code outlasts the opener
+    /// grace, so the other system would otherwise open a second exchange
+    /// and ask for a second code.
+    exchanging: bool,
 }
 
 impl PairingGate {
+    /// Open for the usual pairing window, as `listen --pair` is.
     fn new(policy: Pairing) -> Self {
+        Self::window(policy, PAIRING_WINDOW, false)
+    }
+
+    fn window(policy: Pairing, length: Duration, member: bool) -> Self {
+        let opened = tokio::time::Instant::now();
+        Self {
+            until: Some(opened + length),
+            ..Self::open(policy, false, member)
+        }
+    }
+
+    fn open(policy: Pairing, keep_open: bool, member: bool) -> Self {
         Self {
             policy,
             opened: tokio::time::Instant::now(),
+            until: None,
+            keep_open,
+            member,
+            since: discovery::unix_now(),
             attempts: 0,
             completed: false,
             closed: false,
+            exchanging: false,
+        }
+    }
+
+    fn shut(policy: Pairing) -> Self {
+        Self {
+            closed: true,
+            ..Self::open(policy, false, true)
+        }
+    }
+
+    /// The gate a session starts with or switches to: `listening` for a
+    /// group, and open until the first pairing for a system with no peers.
+    fn listening(policy: Pairing, listening: Listening, member: bool) -> Self {
+        match listening {
+            Listening::Always => Self::open(policy, true, member),
+            Listening::For(length) => Self::window(policy, length, member),
+            Listening::Closed if !member => Self::open(policy, false, false),
+            Listening::Closed => Self::shut(policy),
         }
     }
 
@@ -291,11 +394,22 @@ impl PairingGate {
         if already_known {
             return self.policy;
         }
-        if !self.is_open() {
+        if !self.is_open() || self.exchanging {
             return None;
         }
         self.attempts += 1;
+        self.exchanging = true;
         self.policy
+    }
+
+    /// Whether this system may open a connection to a system open to pairing.
+    fn may_open(&self) -> bool {
+        self.is_open() && !self.exchanging
+    }
+
+    /// The exchange `for_peer` began has ended, however it ended.
+    fn exchanged(&mut self) {
+        self.exchanging = false;
     }
 
     fn paired(&mut self, trust: Trust) {
@@ -304,16 +418,46 @@ impl PairingGate {
         }
     }
 
+    /// Starts a gate that stays open on a fresh allowance of attempts each
+    /// pairing window.
+    fn tick(&mut self) {
+        if self.until.is_none() && self.opened.elapsed() >= PAIRING_WINDOW {
+            self.opened = tokio::time::Instant::now();
+            self.attempts = 0;
+        }
+    }
+
     fn is_open(&self) -> bool {
         self.policy.is_some()
             && !self.closed
-            && !self.completed
-            && self.opened.elapsed() < PAIRING_WINDOW
+            && (self.keep_open || !self.completed)
+            && self.until.is_none_or(|until| tokio::time::Instant::now() < until)
             && self.attempts < MAX_PAIRING_ATTEMPTS
     }
 
+    /// Whether it is over for good, rather than out of attempts for now.
+    fn ended(&self) -> bool {
+        self.policy.is_some()
+            && !self.closed
+            && ((self.completed && !self.keep_open)
+                || self
+                    .until
+                    .is_some_and(|until| tokio::time::Instant::now() >= until || self.attempts >= MAX_PAIRING_ATTEMPTS))
+    }
+
+    fn offer(&self) -> discovery::Offer {
+        if self.is_open() {
+            discovery::Offer::Open {
+                member: self.member,
+                since: self.since,
+            }
+        } else {
+            discovery::Offer::Closed
+        }
+    }
+
     fn deadline(&self) -> Option<tokio::time::Instant> {
-        self.is_open().then_some(self.opened + PAIRING_WINDOW)
+        self.until.filter(|_| self.is_open())
     }
 
     fn close(&mut self) {
@@ -375,7 +519,7 @@ where
         }
         // the advertisement says whether pairing is open
         let allowed = *discoverable.borrow_and_update();
-        if advertiser.is_some() != allowed || advertiser.as_ref().is_some_and(|a| a.pairing != gate().is_open()) {
+        if advertiser.is_some() != allowed || advertiser.as_ref().is_some_and(|a| a.offer != gate().offer()) {
             drop(advertiser.take());
             advertiser = advertise(&config, port, &gate(), allowed);
         }
@@ -458,7 +602,7 @@ fn advertise(config: &SessionConfig<'_>, port: u16, pairing: &PairingGate, allow
     if !allowed {
         return None;
     }
-    Advertiser::start(&config.identity.public_key(), port, pairing.is_open())
+    Advertiser::start(&config.identity.public_key(), port, pairing.offer())
         .inspect_err(|error| tracing::warn!(error = format!("{error:#}"), "could not advertise with Bonjour"))
         .ok()
 }
@@ -586,12 +730,15 @@ where
     let key = channel.remote_key();
     let known = config.peers.trusted(&key, trust::now())?.is_some();
     let policy = gate().for_peer(known);
-    let (peer, trust_status) = tokio::time::timeout(
+    let settled = tokio::time::timeout(
         TRUST_TIMEOUT,
         settle_trust(&mut channel, config.peers, config.name, policy, prompt, observer),
     )
-    .await
-    .context("pairing or trust negotiation timed out")??;
+    .await;
+    if !known && policy.is_some() {
+        gate().exchanged();
+    }
+    let (peer, trust_status) = settled.context("pairing or trust negotiation timed out")??;
     if trust_status == Trust::NewlyPaired {
         config.peers.agree_side(&key, config.side, trust::now())?;
     }
@@ -1146,6 +1293,7 @@ mod tests {
         assert!(gate.is_open());
         for _ in 0..MAX_PAIRING_ATTEMPTS {
             assert_eq!(gate.for_peer(false), Some(Policy::IDLE));
+            gate.exchanged();
         }
         assert!(!gate.is_open());
         assert_eq!(gate.for_peer(false), None);
@@ -1164,6 +1312,18 @@ mod tests {
         let mut gate = PairingGate::new(Some(Policy::IDLE));
         gate.close();
         assert!(!gate.is_open());
+    }
+
+    #[test]
+    fn only_one_pairing_exchange_runs_at_a_time() {
+        let mut gate = PairingGate::new(Some(Policy::IDLE));
+        assert_eq!(gate.for_peer(false), Some(Policy::IDLE));
+        assert!(!gate.may_open(), "no second connection while a code is being typed");
+        assert_eq!(gate.for_peer(false), None, "a second exchange is refused");
+        assert_eq!(gate.for_peer(true), Some(Policy::IDLE), "paired peers still connect");
+        gate.exchanged();
+        assert!(gate.may_open());
+        assert_eq!(gate.for_peer(false), Some(Policy::IDLE));
     }
 
     #[derive(Default)]
@@ -1217,6 +1377,7 @@ mod tests {
             clipboard,
             discoverable,
             arrangement: None,
+            listening: None,
             signer: Box::leak(Box::new(crate::introduce::Signer::generate())),
         }
     }
@@ -1233,6 +1394,63 @@ mod tests {
         };
         assert_eq!(take_side_choice(&config), Some(Side::Above));
         assert_eq!(take_side_choice(&config), None);
+    }
+
+    #[tokio::test]
+    async fn each_new_listening_choice_is_seen_once() {
+        let (choose, choices) = watch::channel(Listening::Closed);
+        let mut choices = Some(choices);
+        choose.send_replace(Listening::For(Duration::from_secs(30)));
+        assert_eq!(
+            listening_changed(&mut choices).await,
+            Some(Listening::For(Duration::from_secs(30)))
+        );
+        // asking again, even for the same, opens it again
+        choose.send_replace(Listening::For(Duration::from_secs(30)));
+        assert!(listening_changed(&mut choices).await.is_some());
+        let waited = tokio::time::timeout(Duration::from_millis(20), listening_changed(&mut choices)).await;
+        assert!(waited.is_err(), "no new choice, so nothing changes");
+        let waited = tokio::time::timeout(Duration::from_millis(20), listening_changed(&mut None)).await;
+        assert!(waited.is_err(), "a session without the choice never changes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_system_with_no_peers_accepts_one_new_system_while_sharing() {
+        let mut gate = PairingGate::listening(Some(Policy::IDLE), Listening::Closed, false);
+        assert!(gate.is_open());
+        assert!(matches!(gate.offer(), discovery::Offer::Open { member: false, .. }));
+        tokio::time::advance(PAIRING_WINDOW * 3).await;
+        gate.tick();
+        assert!(gate.is_open(), "no time limit");
+        gate.paired(Trust::NewlyPaired);
+        assert!(gate.ended(), "now it is a member");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_group_accepts_a_new_system_only_when_asked_or_always_listening() {
+        let shut = PairingGate::listening(Some(Policy::IDLE), Listening::Closed, true);
+        assert!(!shut.is_open());
+        assert_eq!(shut.offer(), discovery::Offer::Closed);
+
+        let mut asked = PairingGate::listening(Some(Policy::IDLE), Listening::For(Duration::from_secs(30)), true);
+        assert!(matches!(asked.offer(), discovery::Offer::Open { member: true, .. }));
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(!asked.is_open());
+        assert!(asked.ended());
+        asked.close();
+
+        let mut always = PairingGate::listening(Some(Policy::IDLE), Listening::Always, true);
+        always.paired(Trust::NewlyPaired);
+        assert!(always.is_open(), "stays open after a system pairs");
+        for _ in 0..MAX_PAIRING_ATTEMPTS {
+            always.for_peer(false);
+            always.exchanged();
+        }
+        assert!(!always.is_open());
+        assert!(!always.ended(), "out of attempts for now, not closed");
+        tokio::time::advance(PAIRING_WINDOW).await;
+        always.tick();
+        assert!(always.is_open(), "a fresh allowance each window");
     }
 
     #[test]
@@ -1328,7 +1546,7 @@ mod tests {
             .peers
             .pin(here.identity.public_key(), "Laptop", Policy::IDLE, now)
             .unwrap();
-        let _advertiser = Advertiser::start(&there.identity.public_key(), port, false).unwrap();
+        let _advertiser = Advertiser::start(&there.identity.public_key(), port, discovery::Offer::Closed).unwrap();
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
             let mut channel = Channel::respond(stream, &there.identity).await.unwrap();

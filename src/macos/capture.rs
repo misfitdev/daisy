@@ -532,13 +532,18 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
             }
             !context.send_stamped(|generation| Message::Input { generation, event })
         }
-        Route::Reclaim => {
+        Route::Reclaim { home } => {
             if let Some(mut cursor) = try_lock(&context.cursor) {
-                cursor.thaw(None);
+                cursor.thaw(home.map(|(x, y)| CGPoint { x, y }));
             } else {
                 context.stop_for_contention();
             }
             context.send_stamped(|generation| Message::Reclaim { generation });
+            false
+        }
+        Route::Home { at: (x, y) } => {
+            // SAFETY: plain value
+            unsafe { CGWarpMouseCursorPosition(CGPoint { x, y }) };
             false
         }
     }

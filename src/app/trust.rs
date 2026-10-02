@@ -27,7 +27,7 @@ pub fn ask(
     loop {
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(title));
-        alert.setInformativeText(&NSString::from_str("Daisy asks again once trust ends."));
+        alert.setInformativeText(&NSString::from_str("When trust ends, pair again to connect."));
         alert.addButtonWithTitle(&NSString::from_str(confirm));
         if let Some(cancel) = cancel {
             alert.addButtonWithTitle(&NSString::from_str(cancel));

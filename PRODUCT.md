@@ -64,9 +64,7 @@ long that trust lasts.
   macOS 27, and the recovery chord.
 - Bonjour discovery of paired peers is implemented. Automatic reconnection after sleep, wake and
   network changes is implemented; two-system verification remains. Clipboard sharing of text, rich text and images is implemented;
-  two-system verification remains. Spatial positioning and chained connections
-  among multiple systems are future capabilities and must not be presented as
-  working today.
+  two-system verification remains. Groups of up to eight systems, arranged like Displays, are implemented.
 - Capturing trackpad swipes requires macOS 27 on the system whose trackpad is
   used.
 - Shake-to-locate still needs visual verification on macOS 26.
@@ -74,8 +72,10 @@ long that trust lasts.
   by eye as a security check.
 - Both systems enforce their own trust policy, so the stricter policy wins. When
   trust ends, the systems must pair again.
-- Setup pairs nearby peers automatically and asks where the other screen sits.
-  An optional address remains for networks without Bonjour. There is no input-role selector.
+- Systems pair by sharing: a system with no peers accepts one while sharing,
+  and a group accepts a new system only during Add a System or with Always
+  discoverable on. The new system shows the code. An optional address remains
+  for networks without Bonjour. There is no input-role selector.
 - Product terminology: **this system** for the local computer and **peer** for
   another computer. Input ownership follows physical use and is not a permanent device identity.
   Pair, trust, forget and recovery chord remain the user-facing action terms.
@@ -110,8 +110,8 @@ long that trust lasts.
   macOS internals, and releases.
 - Official releases are Developer ID signed, notarized, and carry SLSA Build
   Level 3 provenance.
-- An approved settings screenshot is available at
-  `site/public/screenshots/daisy-setup.png`. No testimonials, press quotes,
+- A window screenshot is at `site/public/screenshots/daisy-window.png`,
+  drawn with sample systems by `just screenshot`. No testimonials, press quotes,
   benchmarks, pricing or customer claims exist; future work must not fabricate
   them.
 - The project is licensed under Apache-2.0 or MIT, at the user's option.

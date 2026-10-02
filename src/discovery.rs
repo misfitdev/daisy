@@ -44,23 +44,45 @@ pub fn tag(key: &PublicKey, nonce: &[u8; NONCE_LEN]) -> [u8; TAG_LEN] {
     tag
 }
 
+/// Whether a system is open to pairing, as its advertisement says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offer {
+    Closed,
+    /// Open since `since`, in Unix seconds. A `member` already has peers.
+    Open {
+        member: bool,
+        since: u64,
+    },
+}
+
+/// Two systems that opened pairing this close together, in seconds, are
+/// told apart by their nonces instead; clocks are not that exact.
+const SINCE_TIE: u64 = 2;
+
 /// The TXT record for an advertisement.
-pub fn properties(key: &PublicKey, nonce: &[u8; NONCE_LEN], pairing: bool) -> Vec<(&'static str, String)> {
-    vec![
+pub fn properties(key: &PublicKey, nonce: &[u8; NONCE_LEN], offer: Offer) -> Vec<(&'static str, String)> {
+    let mut properties = vec![
         ("v", VERSION.to_owned()),
         ("n", hex(nonce)),
         ("t", hex(&tag(key, nonce))),
-        ("p", if pairing { "1" } else { "0" }.to_owned()),
-    ]
+    ];
+    match offer {
+        Offer::Closed => properties.push(("p", "0".to_owned())),
+        Offer::Open { member, since } => {
+            properties.push(("p", if member { "2" } else { "1" }.to_owned()));
+            properties.push(("s", since.to_string()));
+        }
+    }
+    properties
 }
 
 /// What an advertisement turned out to be.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Seen {
     /// A peer this system paired with.
     Paired(PublicKey),
     /// A system this one does not know, open to pairing now.
-    Pairing,
+    Pairing { member: bool, since: u64 },
 }
 
 /// Recognises an advertisement from its TXT values, given the keys of the
@@ -74,7 +96,13 @@ pub fn identify<'a>(txt: impl Fn(&str) -> Option<&'a str>, trusted: &[PublicKey]
     if let Some(key) = trusted.iter().find(|key| tag(key, &nonce) == seen) {
         return Some(Seen::Paired(*key));
     }
-    (txt("p") == Some("1")).then_some(Seen::Pairing)
+    let member = match txt("p")? {
+        "1" => false,
+        "2" => true,
+        _ => return None,
+    };
+    let since = txt("s")?.parse().ok()?;
+    Some(Seen::Pairing { member, since })
 }
 
 /// The address to connect to: IPv4 first, since it works on every network
@@ -111,17 +139,17 @@ pub struct Advertiser {
     fullname: String,
     pub election: [u8; NONCE_LEN],
     /// Whether it says this system is open to pairing.
-    pub pairing: bool,
+    pub offer: Offer,
 }
 
 impl Advertiser {
-    pub fn start(key: &PublicKey, port: u16, pairing: bool) -> Result<Self> {
+    pub fn start(key: &PublicKey, port: u16, offer: Offer) -> Result<Self> {
         let daemon = ServiceDaemon::new().context("starting Bonjour")?;
         // random names, so the advertisement does not reveal this system
         let id = hex(&random::<6>());
         let host = format!("daisy-{id}.local.");
         let election = random();
-        let properties = properties(key, &election, pairing);
+        let properties = properties(key, &election, offer);
         let info = ServiceInfo::new(SERVICE, &format!("Daisy {id}"), &host, "", port, &properties[..])
             .context("describing the Bonjour advertisement")?
             .enable_addr_auto();
@@ -131,7 +159,7 @@ impl Advertiser {
             daemon,
             fullname,
             election,
-            pairing,
+            offer,
         })
     }
 }
@@ -151,23 +179,54 @@ pub struct Found {
     pub election: [u8; NONCE_LEN],
 }
 
-/// Paired keys elect one opener; pairing beacons use their random nonce.
-/// An equal key or nonce is our own advertisement and never opens a connection.
+/// Paired keys elect one opener, which the other stands in for after a
+/// grace period. For pairing, see `pairing_opener`. An equal key or nonce is
+/// our own advertisement and never opens a connection.
 pub fn opens_connection(
     own: PublicKey,
     election: Option<[u8; NONCE_LEN]>,
     found: &Found,
-    pairing: bool,
+    offer: Offer,
     seen_for: Duration,
 ) -> bool {
-    let (eligible, elected) = match found.seen {
-        Seen::Paired(key) => (own != key, own.as_bytes() < key.as_bytes()),
-        Seen::Pairing => (
-            pairing && election != Some(found.election),
-            election.is_some_and(|nonce| nonce < found.election),
-        ),
-    };
-    eligible && (elected || seen_for >= OPENER_GRACE)
+    match (found.seen, offer) {
+        (Seen::Paired(key), _) => own != key && (own.as_bytes() < key.as_bytes() || seen_for >= OPENER_GRACE),
+        (Seen::Pairing { .. }, Offer::Closed) => false,
+        (
+            Seen::Pairing { member, since },
+            Offer::Open {
+                member: mine,
+                since: my_since,
+            },
+        ) => match election {
+            Some(nonce) if nonce == found.election => false,
+            Some(nonce) => pairing_opener((mine, my_since, nonce), (member, since, found.election)),
+            // not advertising, so the other system cannot find this one
+            None => true,
+        },
+    }
+}
+
+/// Whether this system, rather than the other, opens a pairing connection,
+/// given each side's `(member, since, nonce)`. The opener types the code and
+/// the other shows it, so the code appears on the system just added: a
+/// member opens to a newcomer, and otherwise the system open longer opens.
+pub fn pairing_opener(mine: (bool, u64, [u8; NONCE_LEN]), theirs: (bool, u64, [u8; NONCE_LEN])) -> bool {
+    let ((member, since, nonce), (their_member, their_since, their_nonce)) = (mine, theirs);
+    if member != their_member {
+        return member;
+    }
+    if since.abs_diff(their_since) > SINCE_TIE {
+        return since < their_since;
+    }
+    nonce < their_nonce
+}
+
+/// The current time in Unix seconds, for `Offer::Open`.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// An advertisement as last heard: its TXT values and where to connect.
@@ -290,8 +349,13 @@ mod tests {
         Identity::generate().unwrap().public_key()
     }
 
+    const OPEN: Offer = Offer::Open {
+        member: false,
+        since: 1_000,
+    };
+
     #[test]
-    fn paired_and_anonymous_peers_elect_exactly_one_opener() {
+    fn paired_peers_elect_exactly_one_opener() {
         let (a, b) = (key(), key());
         let address = "127.0.0.1:24850".parse().unwrap();
         let peer_a = Found {
@@ -306,59 +370,77 @@ mod tests {
         };
         let now = Duration::ZERO;
         assert_ne!(
-            opens_connection(a, None, &peer_b, false, now),
-            opens_connection(b, None, &peer_a, false, now)
+            opens_connection(a, None, &peer_b, Offer::Closed, now),
+            opens_connection(b, None, &peer_a, Offer::Closed, now)
         );
-        assert!(!opens_connection(a, None, &peer_a, false, now));
-        let anonymous_a = Found {
-            seen: Seen::Pairing,
-            ..peer_a
-        };
-        let anonymous_b = Found {
-            seen: Seen::Pairing,
-            ..peer_b
-        };
-        assert!(opens_connection(a, Some([1; NONCE_LEN]), &anonymous_b, true, now));
-        assert!(!opens_connection(b, Some([2; NONCE_LEN]), &anonymous_a, true, now));
-        assert!(!opens_connection(a, Some([1; NONCE_LEN]), &anonymous_a, true, now));
-        assert!(!opens_connection(a, Some([1; NONCE_LEN]), &anonymous_b, false, now));
+        assert!(!opens_connection(a, None, &peer_a, Offer::Closed, now));
     }
 
     #[test]
-    fn the_other_system_connects_when_the_elected_one_does_not() {
+    fn the_other_paired_system_connects_when_the_elected_one_does_not() {
         let (a, b) = (key(), key());
         let (low, high) = if a.as_bytes() < b.as_bytes() { (a, b) } else { (b, a) };
-        let address = "127.0.0.1:24850".parse().unwrap();
         let low_found = Found {
             seen: Seen::Paired(low),
-            address,
+            address: "127.0.0.1:24850".parse().unwrap(),
             election: [1; NONCE_LEN],
         };
         let just_under = OPENER_GRACE - Duration::from_millis(1);
-        assert!(!opens_connection(high, None, &low_found, false, just_under));
-        assert!(opens_connection(high, None, &low_found, false, OPENER_GRACE));
-        assert!(!opens_connection(low, None, &low_found, false, OPENER_GRACE));
+        assert!(!opens_connection(high, None, &low_found, Offer::Closed, just_under));
+        assert!(opens_connection(high, None, &low_found, Offer::Closed, OPENER_GRACE));
+        assert!(!opens_connection(low, None, &low_found, Offer::Closed, OPENER_GRACE));
+    }
 
-        let anonymous = Found {
-            seen: Seen::Pairing,
-            ..low_found
+    #[test]
+    fn a_member_types_the_code_a_newcomer_shows() {
+        let (member, newcomer) = ((true, 5_000, [9; NONCE_LEN]), (false, 1_000, [1; NONCE_LEN]));
+        assert!(
+            pairing_opener(member, newcomer),
+            "even when the newcomer was open first"
+        );
+        assert!(!pairing_opener(newcomer, member));
+    }
+
+    #[test]
+    fn of_two_newcomers_the_one_open_longer_types_the_code() {
+        let (first, second) = ((false, 1_000, [9; NONCE_LEN]), (false, 1_030, [1; NONCE_LEN]));
+        assert!(pairing_opener(first, second));
+        assert!(!pairing_opener(second, first));
+        let (a, b) = (
+            (false, 1_000, [1; NONCE_LEN]),
+            (false, 1_000 + SINCE_TIE, [2; NONCE_LEN]),
+        );
+        assert_ne!(
+            pairing_opener(a, b),
+            pairing_opener(b, a),
+            "a near tie still elects one"
+        );
+    }
+
+    #[test]
+    fn pairing_needs_this_system_open_and_never_connects_to_itself() {
+        let found = Found {
+            seen: Seen::Pairing {
+                member: false,
+                since: 1_030,
+            },
+            address: "127.0.0.1:24850".parse().unwrap(),
+            election: [2; NONCE_LEN],
         };
-        assert!(opens_connection(
-            high,
-            Some([2; NONCE_LEN]),
-            &anonymous,
-            true,
-            OPENER_GRACE
-        ));
-        assert!(opens_connection(high, None, &anonymous, true, OPENER_GRACE));
+        let me = key();
+        assert!(opens_connection(me, Some([1; NONCE_LEN]), &found, OPEN, Duration::ZERO));
         assert!(!opens_connection(
-            high,
+            me,
             Some([1; NONCE_LEN]),
-            &anonymous,
-            true,
+            &found,
+            Offer::Closed,
             OPENER_GRACE
         ));
-        assert!(!opens_connection(high, None, &anonymous, false, OPENER_GRACE));
+        assert!(!opens_connection(me, Some([2; NONCE_LEN]), &found, OPEN, OPENER_GRACE));
+        assert!(
+            opens_connection(me, None, &found, OPEN, Duration::ZERO),
+            "not advertising, so only this side can connect"
+        );
     }
 
     fn lookup<'a>(props: &'a [(&'static str, String)]) -> impl Fn(&str) -> Option<&'a str> {
@@ -368,22 +450,37 @@ mod tests {
     #[test]
     fn a_paired_peer_is_recognised() {
         let (mine, other) = (key(), key());
-        let props = properties(&mine, &[7; NONCE_LEN], false);
+        let props = properties(&mine, &[7; NONCE_LEN], Offer::Closed);
         assert_eq!(identify(lookup(&props), &[other, mine]), Some(Seen::Paired(mine)));
     }
 
     #[test]
     fn an_unknown_peer_is_ignored_unless_it_is_pairing() {
-        let props = properties(&key(), &[7; NONCE_LEN], false);
+        let props = properties(&key(), &[7; NONCE_LEN], Offer::Closed);
         assert_eq!(identify(lookup(&props), &[key()]), None);
-        let pairing = properties(&key(), &[7; NONCE_LEN], true);
-        assert_eq!(identify(lookup(&pairing), &[key()]), Some(Seen::Pairing));
+        let pairing = properties(&key(), &[7; NONCE_LEN], OPEN);
+        assert_eq!(
+            identify(lookup(&pairing), &[key()]),
+            Some(Seen::Pairing {
+                member: false,
+                since: 1_000
+            })
+        );
+        let member = Offer::Open {
+            member: true,
+            since: 1_000,
+        };
+        let pairing = properties(&key(), &[7; NONCE_LEN], member);
+        assert!(matches!(
+            identify(lookup(&pairing), &[key()]),
+            Some(Seen::Pairing { member: true, .. })
+        ));
     }
 
     #[test]
     fn the_advertisement_reveals_neither_key_nor_name() {
         let mine = key();
-        let props = properties(&mine, &[7; NONCE_LEN], true);
+        let props = properties(&mine, &[7; NONCE_LEN], OPEN);
         let all: String = props.iter().map(|(k, v)| format!("{k}={v};")).collect();
         assert!(!all.contains(&mine.to_hex()));
         assert!(!all.contains(&mine.to_hex()[..16]));
@@ -398,7 +495,7 @@ mod tests {
     #[test]
     fn malformed_or_foreign_records_are_ignored() {
         let mine = key();
-        let good = properties(&mine, &[7; NONCE_LEN], false);
+        let good = properties(&mine, &[7; NONCE_LEN], Offer::Closed);
         let mut wrong_version = good.clone();
         wrong_version[0].1 = "2".into();
         assert_eq!(identify(lookup(&wrong_version), &[mine]), None);
@@ -425,14 +522,15 @@ mod tests {
     #[ignore = "uses the local network; run by hand with --ignored"]
     async fn an_advertisement_is_found_on_the_network() {
         let mine = key();
-        let _advertiser = Advertiser::start(&mine, 24999, false).unwrap();
+        let _advertiser = Advertiser::start(&mine, 24999, Offer::Closed).unwrap();
         let found = find(mine, Duration::from_secs(8)).await;
         assert_eq!(found.map(|a| a.port()), Some(24999));
     }
 
     fn heard(key: &PublicKey, pairing: bool, last: u8) -> Heard {
+        let offer = if pairing { OPEN } else { Offer::Closed };
         Heard {
-            txt: properties(key, &[last; NONCE_LEN], pairing)
+            txt: properties(key, &[last; NONCE_LEN], offer)
                 .into_iter()
                 .map(|(k, v)| (k.to_owned(), v))
                 .collect(),
@@ -449,7 +547,7 @@ mod tests {
         // both forgotten: the quiet one disappears, the pairing one loses its name
         let forgotten = classify(&advertised, &[]);
         assert_eq!(forgotten.len(), 1);
-        assert_eq!(forgotten[0].seen, Seen::Pairing);
+        assert!(matches!(forgotten[0].seen, Seen::Pairing { .. }));
         assert_eq!(forgotten[0].address, advertised[1].address);
     }
 }

@@ -16,7 +16,7 @@ use daisy::service::{self, ServiceObserver};
 use daisy::trust::{self, Policy, Timestamp};
 
 #[derive(Parser)]
-#[command(version, about = "Share one keyboard, mouse and trackpad swipes between systems")]
+#[command(version = daisy::VERSION, about = "Share one keyboard, mouse and trackpad swipes between systems")]
 struct Cli {
     /// Directory holding this system's key and its peers
     #[arg(long, env = "DAISY_HOME", global = true)]
@@ -33,6 +33,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Save a picture of Daisy's window with sample systems, for the website
+    #[command(hide = true)]
+    Screenshot {
+        /// Where to write the PNG
+        path: PathBuf,
+    },
     /// Show this system's name and key fingerprint
     Id,
     /// Wait for a peer to connect
@@ -162,6 +168,7 @@ struct Keys<'a> {
 async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStore, name: &str) -> Result<()> {
     let Keys { identity, signer } = keys;
     match command {
+        Command::Screenshot { path } => daisy::app::screenshot::save(&path),
         Command::Id => {
             println!("{name}\n{}", identity.public_key());
             Ok(())
@@ -190,6 +197,7 @@ async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStor
                     clipboard: &clipboard,
                     discoverable: &discoverable,
                     arrangement: None,
+                    listening: None,
                     signer,
                 },
                 &bind,
@@ -221,6 +229,7 @@ async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStor
                     clipboard: &clipboard,
                     discoverable: &discoverable,
                     arrangement: None,
+                    listening: None,
                     signer,
                 },
                 &address,

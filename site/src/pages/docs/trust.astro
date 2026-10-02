@@ -5,11 +5,17 @@ import { href } from "../../config";
 
 <Docs title="Trust and pairing" slug="trust" lede="Your systems trust each other directly. You decide for how long." description="How Daisy pairing works, how long trust lasts, and how to forget a peer.">
   <h2>Pairing</h2>
-  <p>Pairing happens once per pair of systems. One shows a six-digit code and you type it on the other. That code is used to prove, cryptographically, that both systems are the ones you meant. It is never something to compare by eye.</p>
-  <p>Only systems that are both set to pair can pair. After one success, pairing closes. From then on, the two systems recognize each other without a code.</p>
+  <p>Each new system pairs once. It shows a six-digit code and you type it on the system it is joining. That code is used to prove, cryptographically, that both systems are the ones you meant. From then on, they recognize each other without a code, and a system that joins a group is introduced to every member.</p>
+  <p>A system accepts a new one only while it is sharing and:</p>
+  <ul>
+    <li>it has no peers yet,</li>
+    <li>someone chose <strong>Add a System</strong> on it in the last 30 seconds (this closes after one success), or</li>
+    <li><strong>Always discoverable</strong> is on under <strong>Advanced…</strong>. Turning it on asks for Touch ID or the login password.</li>
+  </ul>
+  <p>A system that does not accept new systems refuses an unknown one without showing a code. Each accepts at most five attempts in ten minutes.</p>
 
   <h2>How long trust lasts</h2>
-  <p>Each system asks how long to trust a peer as soon as they pair, and keeps its own choice. Changing it later starts it over from that moment. Both must still trust each other to connect, so the stricter choice wins.</p>
+  <p>Each system trusts a new peer until it goes unused for four days, and keeps its own choice; change it from the peer's row. Changing it later starts it over from that moment. Both must still trust each other to connect, so the stricter choice wins.</p>
   <table>
     <thead>
       <tr><th>Choice</th><th>Trusted until</th></tr>
