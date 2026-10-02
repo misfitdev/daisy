@@ -118,8 +118,8 @@ pub enum Command {
     SetDiscoverable(bool),
     /// Choose whether Command-Q quits Daisy or closes its windows.
     SetCommandQQuits(bool),
-    /// Move the connected peer's screen to this side.
-    Arrange(Side),
+    /// Put a member's displays where a person dropped them in the group.
+    Place(PublicKey, crate::layout::Offset),
     Shutdown,
 }
 
@@ -143,10 +143,9 @@ pub enum Status {
         peer: Option<String>,
         wait: std::time::Duration,
     },
+    /// Linked with these members, by name, in the order they joined.
     Connected {
-        peer: String,
-        key: PublicKey,
-        side: Side,
+        peers: Vec<(String, PublicKey)>,
     },
     Problem {
         summary: String,
@@ -159,6 +158,8 @@ pub enum Event {
         settings: AppSettings,
         peers: Vec<Peer>,
         first_run: bool,
+        /// This system's key.
+        me: PublicKey,
     },
     Status(Status),
     Peers(Vec<Peer>),
@@ -181,8 +182,13 @@ pub enum Event {
     },
     /// Peers, and systems open to pairing, found on the network.
     Nearby(Vec<Nearby>),
-    /// Latency or who has control changed in the running session.
-    Link(crate::control::Link),
+    /// How one peer's link is doing.
+    Link {
+        key: PublicKey,
+        link: crate::control::Link,
+    },
+    /// Where every member's displays sit, while the group runs.
+    Arranged(crate::share::Layout),
 }
 
 /// A system found on the network, as the interface shows it.
@@ -271,12 +277,20 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
     let (share_discoverable, discoverable) = watch::channel(stored.discoverable);
     let (arrange, arrangement) = watch::channel(None);
+    let me = match Identity::load_or_create(&home.join("identity")) {
+        Ok(identity) => identity.public_key(),
+        Err(error) => {
+            let _ = send_problem(&events, "Daisy's key could not be read", format!("{error:#}"));
+            return;
+        }
+    };
     tokio::spawn(browse_nearby(home.clone(), events.clone()));
     if events
         .send(Event::Ready {
             settings,
             peers,
             first_run,
+            me,
         })
         .is_err()
     {
@@ -391,8 +405,8 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     );
                 }
             }
-            Command::Arrange(side) => {
-                arrange.send_replace(Some(side));
+            Command::Place(key, offset) => {
+                arrange.send_replace(Some((key, offset)));
             }
             Command::SetCommandQQuits(on) => {
                 stored.command_q_quits = on;
@@ -498,7 +512,7 @@ async fn run_session(
     start: Start,
     clipboard: watch::Receiver<bool>,
     discoverable: watch::Receiver<bool>,
-    arrangement: watch::Receiver<Option<Side>>,
+    arrangement: watch::Receiver<Option<crate::share::Placing>>,
     events: Sender<Event>,
 ) {
     let Start {
@@ -508,6 +522,7 @@ async fn run_session(
     } = start;
     let result = async {
         let identity = Identity::load_or_create(&home.join("identity"))?;
+        let signer = crate::introduce::Signer::load_or_create(&home.join("signing"))?;
         let peers = PeerStore::open(&home)?;
         let choose_side = AtomicBool::new(side_chosen);
         let mut prompt = ControllerPrompt { events: events.clone() };
@@ -516,6 +531,8 @@ async fn run_session(
             events: events.clone(),
             home: home.clone(),
             waiting: None,
+            stats: std::collections::BTreeMap::new(),
+            linked: Vec::new(),
         };
         let pairing = allow_pairing.then_some(settings.trust);
         let config = service::SessionConfig {
@@ -528,6 +545,7 @@ async fn run_session(
             clipboard: &clipboard,
             discoverable: &discoverable,
             arrangement: Some(&arrangement),
+            signer: &signer,
         };
         match settings.connection {
             Connection::Automatic => service::automatic(config, &mut prompt, &mut observer).await,
@@ -553,6 +571,7 @@ async fn run_session(
     }
 }
 
+#[derive(Clone)]
 struct ControllerPrompt {
     events: Sender<Event>,
 }
@@ -585,6 +604,25 @@ struct ControllerObserver {
     events: Sender<Event>,
     home: PathBuf,
     waiting: Option<(u16, bool)>,
+    /// Each running link's round trips, kept for `daisy stats`.
+    stats: std::collections::BTreeMap<PublicKey, crate::latency::LinkStats>,
+    /// The members with a running link, in the order they joined, and how
+    /// many links each has: a second connection briefly overlaps the first.
+    linked: Vec<(String, PublicKey, usize)>,
+}
+
+impl ControllerObserver {
+    fn send_connected(&self) {
+        let peers = self.linked.iter().map(|(name, key, _)| (name.clone(), *key)).collect();
+        let _ = self.events.send(Event::Status(Status::Connected { peers }));
+    }
+
+    fn save_stats(&self) {
+        let links: Vec<_> = self.stats.values().cloned().collect();
+        if let Err(error) = crate::latency::save(&self.home, &links) {
+            tracing::debug!(error = format!("{error:#}"), "round trips could not be saved");
+        }
+    }
 }
 
 impl ControllerObserver {
@@ -623,20 +661,52 @@ impl ServiceObserver for ControllerObserver {
         }));
     }
 
-    fn link(&mut self, _peer: &str, link: crate::control::Link) {
-        let _ = self.events.send(Event::Link(link));
-    }
-
-    fn connected(&mut self, peer: &str, key: PublicKey, side: Side) {
-        let _ = self.events.send(Event::Status(Status::Connected {
-            peer: peer.to_owned(),
+    fn link(&mut self, peer: &str, key: PublicKey, link: crate::control::Link) {
+        let _ = self.events.send(Event::Link { key, link });
+        let now = trust::now();
+        let fresh = self
+            .stats
+            .get(&key)
+            .is_some_and(|kept| kept.stats == link.stats || kept.updated == now);
+        self.stats.insert(
             key,
-            side,
-        }));
+            crate::latency::LinkStats {
+                peer: peer.to_owned(),
+                updated: now,
+                stats: link.stats,
+            },
+        );
+        // at most once a second a link
+        if !fresh {
+            self.save_stats();
+        }
     }
 
-    fn disconnected(&mut self, _peer: &str) {
-        if let Some((port, pairing)) = self.waiting {
+    fn connected(&mut self, peer: &str, key: PublicKey, _side: Side) {
+        match self.linked.iter_mut().find(|(_, linked, _)| *linked == key) {
+            Some((_, _, links)) => *links += 1,
+            None => self.linked.push((peer.to_owned(), key, 1)),
+        }
+        self.send_connected();
+    }
+
+    fn arranged(&mut self, layout: &crate::share::Layout) {
+        let _ = self.events.send(Event::Arranged(layout.clone()));
+    }
+
+    fn disconnected(&mut self, _peer: &str, key: PublicKey) {
+        if let Some(index) = self.linked.iter().position(|(_, linked, _)| *linked == key) {
+            self.linked[index].2 -= 1;
+            if self.linked[index].2 == 0 {
+                self.linked.remove(index);
+                if self.stats.remove(&key).is_some() {
+                    self.save_stats();
+                }
+            }
+        }
+        if !self.linked.is_empty() {
+            self.send_connected();
+        } else if let Some((port, pairing)) = self.waiting {
             self.send_waiting(port, pairing);
         }
     }
@@ -683,13 +753,19 @@ fn list_peers(home: &Path) -> Result<Vec<Peer>> {
     PeerStore::open(home)?.list(trust::now())
 }
 
+/// Forgets the peer `selector` names here and, through a signed
+/// revocation, across the group.
 fn forget_peer(home: &Path, selector: &str) -> Result<Vec<Peer>> {
     let store = PeerStore::open(home)?;
-    let forgotten = store.forget(&[selector.to_owned()], trust::now())?;
+    let now = trust::now();
+    let forgotten = store.forget(&[selector.to_owned()], now)?;
     if forgotten.removed == 0 {
         bail!("no paired peer matches {selector:?}");
     }
-    store.list(trust::now())
+    let me = Identity::load_or_create(&home.join("identity"))?.public_key();
+    let signer = crate::introduce::Signer::load_or_create(&home.join("signing"))?;
+    store.record_revocations(&signer, me, &forgotten.keys, now)?;
+    store.list(now)
 }
 
 fn set_trust(home: &Path, selector: &str, policy: Policy) -> Result<(String, Vec<Peer>)> {
@@ -816,6 +892,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_member_stays_connected_until_its_last_link_ends() {
+        let directory = tempfile::tempdir().unwrap();
+        let (events, received) = mpsc::channel();
+        let mut observer = ControllerObserver {
+            told_version: None,
+            events,
+            home: directory.path().to_owned(),
+            waiting: Some((service::DEFAULT_PORT, false)),
+            stats: std::collections::BTreeMap::new(),
+            linked: Vec::new(),
+        };
+        let studio = Identity::generate().unwrap().public_key();
+        let desk = Identity::generate().unwrap().public_key();
+        observer.connected("Studio", studio, Side::Right);
+        observer.connected("Desk", desk, Side::Left);
+        // a second connection from the studio overlaps the first, which then ends
+        observer.connected("Studio", studio, Side::Right);
+        observer.disconnected("Studio", studio);
+        let last = std::iter::from_fn(|| received.try_recv().ok()).last();
+        assert!(matches!(&last, Some(Event::Status(Status::Connected { peers })) if peers.len() == 2));
+        observer.disconnected("Studio", studio);
+        // two systems can share a name; each is still its own member
+        let twin = Identity::generate().unwrap().public_key();
+        observer.connected("Desk", twin, Side::Left);
+        observer.disconnected("Desk", twin);
+        let last = std::iter::from_fn(|| received.try_recv().ok()).last();
+        assert!(
+            matches!(&last, Some(Event::Status(Status::Connected { peers })) if peers == &[("Desk".to_owned(), desk)])
+        );
+        observer.disconnected("Desk", desk);
+        let last = std::iter::from_fn(|| received.try_recv().ok()).last();
+        assert!(matches!(last, Some(Event::Status(Status::Waiting { .. }))));
+    }
+
+    #[test]
     fn nearby_names_only_trusted_peers() {
         let studio = Identity::generate().unwrap().public_key();
         let address: std::net::SocketAddr = "192.168.1.9:24850".parse().unwrap();
@@ -832,6 +943,8 @@ mod tests {
             policy: Policy::IDLE,
             paired_at: 0,
             last_seen: 0,
+            signing: None,
+            introduced_by: None,
         };
         let list = nearby(found.clone(), &[peer]);
         assert_eq!(list[0].name.as_deref(), Some("Studio"));
@@ -951,6 +1064,8 @@ mod tests {
             events,
             home: directory.path().to_owned(),
             waiting: None,
+            stats: std::collections::BTreeMap::new(),
+            linked: Vec::new(),
         };
         observer.waiting("Studio", key, service::DEFAULT_PORT, Some(Policy::IDLE));
         assert!(matches!(
@@ -964,7 +1079,7 @@ mod tests {
             Event::Status(Status::Waiting { pairing: false, .. })
         ));
 
-        observer.disconnected("Desk");
+        observer.disconnected("Desk", key);
         assert!(matches!(
             received.recv().unwrap(),
             Event::Status(Status::Waiting { pairing: false, .. })

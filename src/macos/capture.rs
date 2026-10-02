@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use super::ffi::*;
 use super::swipe;
 use crate::control::SharedControl;
-use crate::input::{Along, Driver, Rect, Route, ScrollPhase, Side};
+use crate::input::{Driver, Route, ScrollPhase};
 use crate::protocol::Message;
 use crate::swipe::SwipeStep;
 
@@ -184,14 +184,14 @@ impl Capture {
     /// input and crossings are sent on `messages`, stamped with the
     /// generation `control` holds.
     pub fn start(
-        screen: Rect,
-        side: Side,
+        layout: crate::layout::Group<crate::identity::PublicKey>,
+        me: crate::identity::PublicKey,
         messages: mpsc::Sender<Message>,
         control: Arc<SharedControl>,
     ) -> Result<(Self, Arc<AtomicBool>)> {
         allow_background_cursor_changes();
         std::hint::black_box(swipe::can_recognize());
-        let driver = Arc::new(Mutex::new(Driver::new(screen, side)));
+        let driver = Arc::new(Mutex::new(Driver::new(layout, me)));
         let cursor = Arc::new(Mutex::new(Cursor::default()));
         let overflowed = Arc::new(AtomicBool::new(false));
         let (ready, started) = std_mpsc::channel();
@@ -218,10 +218,11 @@ impl Capture {
         ))
     }
 
-    /// The peer handed control back at `along`.
-    pub fn leave(&self, along: Along) {
-        let point = lock(&self.driver).leave(along);
-        lock(&self.cursor).thaw(Some(CGPoint { x: point.0, y: point.1 }));
+    /// Control came back with the pointer `at` a point on this system, or
+    /// where it left when `None`.
+    pub fn leave(&self, at: Option<crate::input::Point>) {
+        let point = lock(&self.driver).leave(at);
+        lock(&self.cursor).thaw(point.map(|point| CGPoint { x: point.0, y: point.1 }));
     }
 }
 
@@ -240,15 +241,15 @@ fn allow_background_cursor_changes() {
 }
 
 impl crate::share::Pointer for Capture {
-    fn leave(&mut self, along: Along) {
-        Capture::leave(self, along);
+    fn leave(&mut self, at: Option<crate::input::Point>) {
+        Capture::leave(self, at);
     }
     fn yield_control(&mut self) {
         lock(&self.driver).reclaim();
         lock(&self.cursor).thaw(None);
     }
-    fn arrange(&mut self, side: Side) {
-        lock(&self.driver).arrange(side);
+    fn arrange(&mut self, layout: crate::layout::Group<crate::identity::PublicKey>) {
+        lock(&self.driver).arrange(layout);
     }
 }
 
@@ -513,14 +514,14 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
     match route {
         Route::Local => true,
         Route::Drop => false,
-        Route::Enter { along } => {
+        Route::Enter { to, at } => {
             // hide and pin the pointer here while it moves on the peer
             let Some(mut cursor) = context.cursor_or_recover() else {
                 return true;
             };
             cursor.freeze(location);
             drop(cursor);
-            !context.send_stamped(|generation| Message::Enter { generation, along })
+            !context.send_stamped(|generation| Message::Enter { generation, to, at })
         }
         Route::Forward(event) => {
             if matches!(event, crate::input::InputEvent::Motion { .. }) {
@@ -586,19 +587,25 @@ fn try_lock<T>(state: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
 mod tests {
     use super::*;
 
+    fn test_key(byte: u8) -> crate::identity::PublicKey {
+        crate::identity::PublicKey::from_bytes(&[byte; 32]).unwrap()
+    }
+
+    const SQUARE: crate::input::Rect = crate::input::Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 500.0,
+        height: 500.0,
+    };
+
     #[test]
     fn injected_events_do_not_claim_control() {
-        let control = Arc::new(SharedControl::new(false));
+        let control = Arc::new(SharedControl::new(test_key(1), test_key(2)));
         let (messages, mut input) = mpsc::channel(1);
         let context = Context {
             driver: Arc::new(Mutex::new(Driver::new(
-                Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 500.0,
-                    height: 500.0,
-                },
-                Side::Right,
+                crate::layout::Group::alone(test_key(1), vec![SQUARE]),
+                test_key(1),
             ))),
             cursor: Arc::new(Mutex::new(Cursor::default())),
             messages,
@@ -620,15 +627,13 @@ mod tests {
 
     #[test]
     fn cursor_contention_reclaims_remote_driver() {
-        let driver = Arc::new(Mutex::new(Driver::new(
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 500.0,
-                height: 500.0,
-            },
-            Side::Left,
-        )));
+        let mut layout = crate::layout::Group::alone(test_key(1), vec![SQUARE]);
+        layout.members.push(crate::layout::Member {
+            key: test_key(2),
+            displays: vec![SQUARE],
+            offset: (-500.0, 0.0),
+        });
+        let driver = Arc::new(Mutex::new(Driver::new(layout, test_key(1))));
         assert!(matches!(
             lock(&driver).motion((0.0, 250.0), (-3.0, 0.0)),
             Route::Enter { .. }
@@ -643,7 +648,7 @@ mod tests {
             messages,
             overflow: overflow.clone(),
             tap: std::ptr::null_mut(),
-            control: Arc::new(SharedControl::new(false)),
+            control: Arc::new(SharedControl::new(test_key(1), test_key(2))),
         };
 
         let _held = lock(&context.cursor);

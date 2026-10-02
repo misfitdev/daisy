@@ -222,6 +222,7 @@ fn confirmation_tag(key: &[u8], role: Role, handshake_hash: &[u8]) -> [u8; CONFI
 }
 
 /// Reads codes typed into a terminal and prints codes to it.
+#[derive(Clone)]
 pub struct TerminalPrompt;
 
 impl PairingPrompt for TerminalPrompt {

@@ -36,6 +36,11 @@ pub struct Peer {
     pub side: crate::input::Side,
     /// When `side` was chosen; the later choice wins when two systems disagree.
     pub side_chosen: Timestamp,
+    /// The key it signs introductions and revocations with, once known.
+    pub signing: Option<[u8; 32]>,
+    /// The member that introduced it, for a peer this system never paired
+    /// with itself. Trust in it ends with trust in that member.
+    pub introduced_by: Option<PublicKey>,
 }
 
 impl Peer {
@@ -57,6 +62,8 @@ impl Peer {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Forgotten {
     pub removed: usize,
+    /// Every peer no longer trusted, including those they introduced.
+    pub keys: Vec<PublicKey>,
     /// Selectors that matched no peer.
     pub unmatched: Vec<String>,
 }
@@ -66,6 +73,37 @@ pub struct Forgotten {
 pub struct PeerStore {
     path: PathBuf,
     lock: PathBuf,
+    arrangement: PathBuf,
+    revocations: PathBuf,
+}
+
+/// The most revocations kept; the oldest go first.
+const MAX_REVOCATIONS: usize = 256;
+
+#[derive(Default, Serialize, Deserialize)]
+struct RevocationFile {
+    /// Each a signed revocation, encoded as the wire carries it, in hex.
+    #[serde(default)]
+    revocation: Vec<String>,
+}
+
+/// Where every member of the group was last placed, as the newest
+/// arrangement this system saw: `(version, author, offsets)`.
+pub type Arrangement = (u64, PublicKey, Vec<(PublicKey, (f64, f64))>);
+
+#[derive(Serialize, Deserialize)]
+struct ArrangementFile {
+    version: u64,
+    author: String,
+    #[serde(default, rename = "member")]
+    members: Vec<Placed>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Placed {
+    key: String,
+    x: f64,
+    y: f64,
 }
 
 impl PeerStore {
@@ -74,7 +112,177 @@ impl PeerStore {
         Ok(Self {
             path: home.join("peers.toml"),
             lock: home.join("peers.lock"),
+            arrangement: home.join("arrangement.toml"),
+            revocations: home.join("revocations.toml"),
         })
+    }
+
+    /// Records the signing key `key` presented over an authenticated session.
+    /// A key already recorded must not change.
+    pub fn set_signing(&self, key: &PublicKey, signing: [u8; 32]) -> Result<()> {
+        self.update(trust::now(), |peers| {
+            match peers.iter_mut().find(|peer| peer.key == *key) {
+                Some(peer) if peer.signing.is_some_and(|known| known != signing) => {
+                    bail!("{} presented a different signing key", peer.name)
+                }
+                Some(peer) => {
+                    peer.signing = Some(signing);
+                    Ok(())
+                }
+                None => Ok(()),
+            }
+        })?
+    }
+
+    /// Trusts the newcomer in `introduction`, made by a member this system
+    /// trusts, for no longer than it trusts that member. Returns whether it
+    /// is newly trusted.
+    pub fn introduce(&self, introduction: &crate::introduce::Introduction, now: Timestamp) -> Result<bool> {
+        let revoked = self
+            .revocations()
+            .iter()
+            .any(|signed| signed.body.revoked == introduction.newcomer && signed.body.at >= introduction.trusted_since);
+        if revoked {
+            return Ok(false);
+        }
+        let name = introduction.name.lines().next().unwrap_or("").trim().to_owned();
+        self.update(now, |peers| {
+            if peers.iter().any(|peer| peer.key == introduction.newcomer) {
+                return false;
+            }
+            let Some(introducer) = peers.iter().find(|peer| peer.key == introduction.introducer) else {
+                return false;
+            };
+            let policy = crate::introduce::stricter(introducer.policy, introduction.policy);
+            // trust runs from when the introducer began it, so arriving late
+            // never stretches it past the introducer's own
+            peers.push(Peer {
+                name,
+                key: introduction.newcomer,
+                policy,
+                paired_at: introduction.trusted_since.min(now),
+                last_seen: now,
+                side: crate::input::Side::Right,
+                side_chosen: 0,
+                signing: Some(introduction.newcomer_signing),
+                introduced_by: Some(introduction.introducer),
+            });
+            true
+        })
+    }
+
+    /// Signs a revocation of each of `keys`, as forgotten here, and keeps it
+    /// to send every member.
+    pub fn record_revocations(
+        &self,
+        signer: &crate::introduce::Signer,
+        me: PublicKey,
+        keys: &[PublicKey],
+        now: Timestamp,
+    ) -> Result<()> {
+        for revoked in keys {
+            let revocation = crate::introduce::Revocation {
+                by: me,
+                revoked: *revoked,
+                at: now,
+            };
+            self.revoke(
+                crate::introduce::Signed::<crate::introduce::Revocation>::new(signer, revocation)?,
+                now,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Every revocation this system knows, oldest first.
+    pub fn revocations(&self) -> Vec<crate::introduce::Signed<crate::introduce::Revocation>> {
+        let Ok(text) = fs::read_to_string(&self.revocations) else {
+            return Vec::new();
+        };
+        let file: RevocationFile = toml::from_str(&text).unwrap_or_default();
+        file.revocation
+            .iter()
+            .filter_map(|hex| postcard::from_bytes(&from_hex(hex)?).ok())
+            .collect()
+    }
+
+    /// Applies a verified revocation: keeps it, and stops trusting the
+    /// system it names and every system that one introduced. Returns those
+    /// systems, or `None` if this revocation was already known.
+    pub fn revoke(
+        &self,
+        revocation: crate::introduce::Signed<crate::introduce::Revocation>,
+        now: Timestamp,
+    ) -> Result<Option<Vec<PublicKey>>> {
+        let _lock = self.lock()?;
+        let mut known = self.revocations();
+        let superseded = known.iter().any(|signed| {
+            signed.body.by == revocation.body.by
+                && signed.body.revoked == revocation.body.revoked
+                && signed.body.at >= revocation.body.at
+        });
+        if superseded {
+            return Ok(None);
+        }
+        let (revoked, at) = (revocation.body.revoked, revocation.body.at);
+        known.push(revocation);
+        if known.len() > MAX_REVOCATIONS {
+            known.drain(..known.len() - MAX_REVOCATIONS);
+        }
+        let file = RevocationFile {
+            revocation: known
+                .iter()
+                .map(|signed| postcard::to_stdvec(signed).map(|bytes| to_hex(&bytes)))
+                .collect::<std::result::Result<_, _>>()?,
+        };
+        let temporary = self.revocations.with_extension("tmp");
+        fs::write(&temporary, toml::to_string(&file)?).with_context(|| format!("creating {}", temporary.display()))?;
+        fs::rename(&temporary, &self.revocations).with_context(|| format!("saving {}", self.revocations.display()))?;
+        let before: Vec<PublicKey> = self.read()?.iter().map(|peer| peer.key).collect();
+        // trust given after the revocation, by pairing again, stands
+        let after = self.change_locked(now, |peers| {
+            peers.retain(|peer| peer.key != revoked || peer.paired_at > at)
+        })?;
+        Ok(Some(
+            before
+                .into_iter()
+                .filter(|key| !after.iter().any(|peer| peer.key == *key))
+                .collect(),
+        ))
+    }
+
+    /// The arrangement last saved, if any can be read.
+    pub fn arrangement(&self) -> Option<Arrangement> {
+        let text = fs::read_to_string(&self.arrangement).ok()?;
+        let file: ArrangementFile = toml::from_str(&text).ok()?;
+        let author = PublicKey::from_hex(&file.author)?;
+        let offsets = file
+            .members
+            .iter()
+            .filter_map(|placed| Some((PublicKey::from_hex(&placed.key)?, (placed.x, placed.y))))
+            .collect();
+        Some((file.version, author, offsets))
+    }
+
+    /// Keeps `arrangement` for the next time the group meets.
+    pub fn save_arrangement(&self, arrangement: &Arrangement) -> Result<()> {
+        let (version, author, offsets) = arrangement;
+        let file = ArrangementFile {
+            version: *version,
+            author: author.to_hex(),
+            members: offsets
+                .iter()
+                .map(|(key, (x, y))| Placed {
+                    key: key.to_hex(),
+                    x: *x,
+                    y: *y,
+                })
+                .collect(),
+        };
+        let text = toml::to_string(&file)?;
+        let temporary = self.arrangement.with_extension("tmp");
+        fs::write(&temporary, text).with_context(|| format!("creating {}", temporary.display()))?;
+        fs::rename(&temporary, &self.arrangement).with_context(|| format!("saving {}", self.arrangement.display()))
     }
 
     pub fn list(&self, now: Timestamp) -> Result<Vec<Peer>> {
@@ -91,6 +299,7 @@ impl PeerStore {
         // a name must not be able to smuggle anything else into the file
         let name = name.lines().next().unwrap_or("").trim().to_owned();
         self.update(now, |peers| {
+            let signing = peers.iter().find(|peer| peer.key == key).and_then(|peer| peer.signing);
             peers.retain(|peer| peer.key != key);
             peers.push(Peer {
                 name,
@@ -100,6 +309,8 @@ impl PeerStore {
                 last_seen: now,
                 side: crate::input::Side::Right,
                 side_chosen: 0,
+                signing,
+                introduced_by: None,
             });
         })
     }
@@ -164,18 +375,25 @@ impl PeerStore {
     /// Stop trusting every peer matching any of `selectors`, by name or
     /// fingerprint. A running session with one ends within `CHECK_EVERY`.
     pub fn forget(&self, selectors: &[String], now: Timestamp) -> Result<Forgotten> {
-        self.update(now, |peers| {
-            let before = peers.len();
+        let before: Vec<PublicKey> = self.list(now)?.iter().map(|peer| peer.key).collect();
+        let (removed, unmatched) = self.update(now, |peers| {
+            let count = peers.len();
             let unmatched = selectors
                 .iter()
                 .filter(|selector| !peers.iter().any(|peer| peer.matches(selector)))
                 .cloned()
                 .collect();
             peers.retain(|peer| !selectors.iter().any(|selector| peer.matches(selector)));
-            Forgotten {
-                removed: before - peers.len(),
-                unmatched,
-            }
+            (count - peers.len(), unmatched)
+        })?;
+        let after = self.list(now)?;
+        Ok(Forgotten {
+            removed,
+            keys: before
+                .into_iter()
+                .filter(|key| !after.iter().any(|peer| peer.key == *key))
+                .collect(),
+            unmatched,
         })
     }
 
@@ -231,19 +449,37 @@ impl PeerStore {
 
     fn update<T>(&self, now: Timestamp, change: impl FnOnce(&mut Vec<Peer>) -> T) -> Result<T> {
         let _lock = self.lock()?;
+        let mut result = None;
+        self.change_locked(now, |peers| result = Some(change(peers)))?;
+        Ok(result.expect("the change ran"))
+    }
+
+    /// Reads, changes and writes the peers while the caller holds the lock.
+    /// Returns the peers as written.
+    fn change_locked(&self, now: Timestamp, change: impl FnOnce(&mut Vec<Peer>)) -> Result<Vec<Peer>> {
         let before = self.read()?;
         // no session counts as live here: a running one keeps its own peer
         // fresh by renewing it well within the shortest window
-        let unexpired = |peers: &mut Vec<Peer>| peers.retain(|peer| !peer.is_expired(false, now));
+        let prune = |peers: &mut Vec<Peer>| {
+            peers.retain(|peer| !peer.is_expired(false, now));
+            // trust in an introduced system ends with trust in its introducer
+            loop {
+                let count = peers.len();
+                let present: Vec<PublicKey> = peers.iter().map(|peer| peer.key).collect();
+                peers.retain(|peer| peer.introduced_by.is_none_or(|by| present.contains(&by)));
+                if peers.len() == count {
+                    break;
+                }
+            }
+        };
         let mut peers = before.clone();
-        unexpired(&mut peers);
-        let result = change(&mut peers);
-        // a change of policy can end trust at once
-        unexpired(&mut peers);
+        prune(&mut peers);
+        change(&mut peers);
+        prune(&mut peers);
         if peers != before {
             self.write(&peers)?;
         }
-        Ok(result)
+        Ok(peers)
     }
 
     fn lock(&self) -> Result<File> {
@@ -279,6 +515,12 @@ impl PeerStore {
                     last_seen: entry.last_seen,
                     side: entry.side,
                     side_chosen: entry.side_chosen,
+                    signing: entry
+                        .signing
+                        .as_deref()
+                        .and_then(from_hex)
+                        .and_then(|bytes| bytes.try_into().ok()),
+                    introduced_by: entry.introduced_by.as_deref().and_then(PublicKey::from_hex),
                 })
             })
             .collect()
@@ -296,6 +538,8 @@ impl PeerStore {
                     last_seen: peer.last_seen,
                     side: peer.side,
                     side_chosen: peer.side_chosen,
+                    signing: peer.signing.map(|signing| to_hex(&signing)),
+                    introduced_by: peer.introduced_by.map(|key| key.to_hex()),
                 })
                 .collect(),
         };
@@ -366,6 +610,24 @@ struct Entry {
     last_seen: Timestamp,
     side: crate::input::Side,
     side_chosen: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signing: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    introduced_by: Option<String>,
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn from_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(text.get(index..index + 2)?, 16).ok())
+        .collect()
 }
 
 #[cfg(test)]
@@ -388,6 +650,160 @@ mod tests {
 
     fn names(peers: &[Peer]) -> Vec<&str> {
         peers.iter().map(|peer| peer.name.as_str()).collect()
+    }
+
+    fn introduction(by: u8, newcomer: u8, trusted_since: Timestamp) -> crate::introduce::Introduction {
+        crate::introduce::Introduction {
+            introducer: key(by),
+            newcomer: key(newcomer),
+            newcomer_signing: [newcomer; 32],
+            name: format!("system {newcomer}"),
+            policy: Policy::Forever,
+            trusted_since,
+        }
+    }
+
+    fn revocation(by: u8, revoked: u8, at: Timestamp) -> crate::introduce::Signed<crate::introduce::Revocation> {
+        crate::introduce::Signed {
+            body: crate::introduce::Revocation {
+                by: key(by),
+                revoked: key(revoked),
+                at,
+            },
+            signature: vec![0; 64],
+        }
+    }
+
+    #[test]
+    fn an_introduced_system_is_trusted_no_longer_than_its_introducer() {
+        let (store, _dir) = store();
+        store.pin(key(1), "laptop", Policy::Idle(5), NOW).unwrap();
+        assert!(store.introduce(&introduction(1, 2, NOW), NOW).unwrap());
+        let studio = store.trusted(&key(2), NOW).unwrap().unwrap();
+        assert_eq!((studio.policy, studio.introduced_by), (Policy::Idle(5), Some(key(1))));
+        assert_eq!(studio.signing, Some([2; 32]));
+        // introduced again: nothing changes
+        assert!(!store.introduce(&introduction(1, 2, NOW), NOW).unwrap());
+        // trust in the introducer ends, and with it trust in what it introduced
+        store.pin(key(3), "kept", Policy::Forever, NOW).unwrap();
+        let later = NOW + 5 * 3600;
+        let peers: Vec<_> = store.list(later).unwrap().iter().map(|peer| peer.key).collect();
+        assert_eq!(peers, [key(3)]);
+    }
+
+    #[test]
+    fn only_a_trusted_system_can_introduce() {
+        let (store, _dir) = store();
+        assert!(!store.introduce(&introduction(1, 2, NOW), NOW).unwrap());
+        assert!(store.list(NOW).unwrap().is_empty());
+    }
+
+    #[test]
+    fn forgetting_a_system_also_forgets_what_it_introduced() {
+        let (store, _dir) = store();
+        store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
+        store.introduce(&introduction(1, 2, NOW), NOW).unwrap();
+        store.introduce(&introduction(2, 3, NOW), NOW).unwrap();
+        let forgotten = store.forget(&["laptop".to_owned()], NOW).unwrap();
+        assert_eq!(forgotten.removed, 1);
+        assert_eq!(forgotten.keys, [key(1), key(2), key(3)]);
+        assert!(store.list(NOW).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pairing_directly_outlives_the_introducer() {
+        let (store, _dir) = store();
+        store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
+        store.introduce(&introduction(1, 2, NOW), NOW).unwrap();
+        store.pin(key(2), "studio", Policy::Forever, NOW).unwrap();
+        store.forget(&["laptop".to_owned()], NOW).unwrap();
+        assert_eq!(store.list(NOW).unwrap()[0].key, key(2));
+    }
+
+    #[test]
+    fn a_revocation_removes_a_system_and_blocks_older_introductions_of_it() {
+        let (store, _dir) = store();
+        store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
+        store.introduce(&introduction(1, 2, NOW), NOW).unwrap();
+        store.introduce(&introduction(2, 3, NOW), NOW).unwrap();
+        let removed = store.revoke(revocation(1, 2, NOW + 10), NOW + 10).unwrap();
+        assert_eq!(removed, Some(vec![key(2), key(3)]));
+        assert_eq!(
+            store.revoke(revocation(1, 2, NOW + 10), NOW + 10).unwrap(),
+            None,
+            "known already"
+        );
+        // a member that has not heard yet introduces it again, from before
+        assert!(!store.introduce(&introduction(1, 2, NOW), NOW + 20).unwrap());
+        // but a fresh pairing after the revocation counts
+        assert!(store.introduce(&introduction(1, 2, NOW + 30), NOW + 30).unwrap());
+        assert_eq!(store.revocations().len(), 1);
+    }
+
+    #[test]
+    fn introduced_trust_runs_from_when_the_introducer_began_it() {
+        let (store, _dir) = store();
+        store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
+        let mut late = introduction(1, 2, NOW);
+        late.policy = Policy::Days(7);
+        // heard six days later, while catching up
+        let heard = NOW + 6 * DAY;
+        assert!(store.introduce(&late, heard).unwrap());
+        assert!(store.trusted(&key(2), NOW + 7 * DAY - 1).unwrap().is_some());
+        assert!(store.trusted(&key(2), NOW + 7 * DAY).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_old_revocation_never_undoes_a_later_pairing() {
+        let (store, _dir) = store();
+        store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
+        // forgotten at NOW + 10, paired again at NOW + 20 and introduced so
+        store.introduce(&introduction(1, 2, NOW + 20), NOW + 30).unwrap();
+        assert_eq!(
+            store.revoke(revocation(1, 2, NOW + 10), NOW + 30).unwrap(),
+            Some(vec![])
+        );
+        assert!(store.trusted(&key(2), NOW + 30).unwrap().is_some());
+        // paired directly after the revocation, too
+        store.pin(key(3), "desk", Policy::Forever, NOW + 40).unwrap();
+        store.revoke(revocation(1, 3, NOW + 35), NOW + 40).unwrap();
+        assert!(store.trusted(&key(3), NOW + 40).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_signing_key_once_known_cannot_change() {
+        let (store, _dir) = store();
+        store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
+        store.set_signing(&key(1), [1; 32]).unwrap();
+        store.set_signing(&key(1), [1; 32]).unwrap();
+        assert!(store.set_signing(&key(1), [2; 32]).is_err());
+        // pairing again keeps it
+        store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
+        assert_eq!(store.trusted(&key(1), NOW).unwrap().unwrap().signing, Some([1; 32]));
+    }
+
+    #[test]
+    fn older_peer_files_load() {
+        let (store, dir) = store();
+        std::fs::write(
+            dir.path().join("peers.toml"),
+            format!(
+                "[[peer]]\nkey = \"{}\"\nname = \"old\"\ntrust = \"idle\"\npaired_at = {NOW}\nlast_seen = {NOW}\nside = \"Right\"\nside_chosen = 0\n",
+                key(1).to_hex()
+            ),
+        )
+        .unwrap();
+        let peer = store.trusted(&key(1), NOW).unwrap().unwrap();
+        assert_eq!((peer.signing, peer.introduced_by), (None, None));
+    }
+
+    #[test]
+    fn an_arrangement_is_kept_between_runs() {
+        let (store, _dir) = store();
+        assert_eq!(store.arrangement(), None);
+        let saved = (42, key(1), vec![(key(1), (0.0, 0.0)), (key(2), (-1440.5, 120.0))]);
+        store.save_arrangement(&saved).unwrap();
+        assert_eq!(store.arrangement(), Some(saved));
     }
 
     #[test]

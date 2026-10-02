@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::identity::PublicKey;
+use crate::layout::Group;
 use crate::swipe::{SwipePhase, SwipeStep};
 
 /// Where the peer sits relative to this system.
@@ -149,73 +151,12 @@ pub type Point = (f64, f64);
 
 /// Screen area in macOS global coordinates: origin at the top left of the
 /// main display, y growing downward.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
     pub width: f64,
     pub height: f64,
-}
-
-// The cursor stops within this distance of a screen edge.
-const EDGE_SLOP: f64 = 1.5;
-
-impl Rect {
-    fn max_x(&self) -> f64 {
-        self.x + self.width
-    }
-
-    fn max_y(&self) -> f64 {
-        self.y + self.height
-    }
-
-    fn along(&self, side: Side, point: Point) -> Along {
-        // the same span entry_point uses, so crossing back and forth does not drift
-        let fraction = match side {
-            Side::Left | Side::Right => (point.1 - self.y) / (self.height - 1.0),
-            Side::Above | Side::Below => (point.0 - self.x) / (self.width - 1.0),
-        };
-        (fraction.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as Along
-    }
-
-    /// Whether `point`, already at `side`, is being pushed out through it.
-    fn pushed_through(&self, side: Side, point: Point, delta: Point) -> bool {
-        match side {
-            Side::Left => point.0 <= self.x + EDGE_SLOP && delta.0 < 0.0,
-            Side::Right => point.0 >= self.max_x() - EDGE_SLOP && delta.0 > 0.0,
-            Side::Above => point.1 <= self.y + EDGE_SLOP && delta.1 < 0.0,
-            Side::Below => point.1 >= self.max_y() - EDGE_SLOP && delta.1 > 0.0,
-        }
-    }
-
-    /// Whether `point` has gone past `side`.
-    fn beyond(&self, side: Side, point: Point) -> bool {
-        match side {
-            Side::Left => point.0 < self.x,
-            Side::Right => point.0 >= self.max_x(),
-            Side::Above => point.1 < self.y,
-            Side::Below => point.1 >= self.max_y(),
-        }
-    }
-
-    /// The point just inside `side`, at `along`.
-    pub fn entry_point(&self, side: Side, along: Along) -> Point {
-        let fraction = f64::from(along) / f64::from(u16::MAX);
-        let inset = 2.0;
-        match side {
-            Side::Left => (self.x + inset, self.y + fraction * (self.height - 1.0)),
-            Side::Right => (self.max_x() - inset, self.y + fraction * (self.height - 1.0)),
-            Side::Above => (self.x + fraction * (self.width - 1.0), self.y + inset),
-            Side::Below => (self.x + fraction * (self.width - 1.0), self.max_y() - inset),
-        }
-    }
-
-    fn clamp(&self, point: Point) -> Point {
-        (
-            point.0.clamp(self.x, self.max_x() - 1.0),
-            point.1.clamp(self.y, self.max_y() - 1.0),
-        )
-    }
 }
 
 /// What the driving system should do with one of its own input events.
@@ -225,8 +166,9 @@ pub enum Route {
     Local,
     /// Swallow it.
     Drop,
-    /// Swallow it, freeze the pointer, and hand control to the peer.
-    Enter { along: Along },
+    /// Swallow it, freeze the pointer, and hand control to the system `to`,
+    /// whose pointer starts `at`, in its own coordinates.
+    Enter { to: PublicKey, at: Point },
     /// Swallow it and send it to the peer.
     Forward(InputEvent),
     /// Swallow it, take control back here at once, and have the peer
@@ -241,8 +183,8 @@ const ESCAPE_MODIFIERS: u64 = 0x0004_0000 | 0x0008_0000 | 0x0010_0000;
 
 /// Decides, on the system with the keyboard, where each input event goes.
 pub struct Driver {
-    screen: Rect,
-    side: Side,
+    layout: Group<PublicKey>,
+    me: PublicKey,
     remote: bool,
     // pressed before control moved away, so their release must stay here
     local_keys: BTreeSet<u16>,
@@ -257,11 +199,11 @@ pub struct Driver {
 }
 
 impl Driver {
-    /// `side` is where the peer sits.
-    pub fn new(screen: Rect, side: Side) -> Self {
+    /// `me` is this system, within `layout`.
+    pub fn new(layout: Group<PublicKey>, me: PublicKey) -> Self {
         Self {
-            screen,
-            side,
+            layout,
+            me,
             remote: false,
             local_keys: BTreeSet::new(),
             local_modifiers: BTreeSet::new(),
@@ -277,12 +219,14 @@ impl Driver {
         self.remote
     }
 
-    /// The peer now sits at `side`.
-    pub fn arrange(&mut self, side: Side) {
-        self.side = side;
+    /// The group was rearranged.
+    pub fn arrange(&mut self, layout: Group<PublicKey>) {
+        self.layout = layout;
     }
 
-    /// The pointer moved by `delta` and is now at `point`.
+    /// The pointer moved by `delta` and is now at `point`. macOS keeps the
+    /// pointer on this system's displays, so pushing past an edge shows as
+    /// a point at the edge with a delta heading out.
     pub fn motion(&mut self, point: Point, delta: Point) -> Route {
         if self.remote {
             return Route::Forward(InputEvent::Motion {
@@ -291,11 +235,13 @@ impl Driver {
             });
         }
         // never cross while dragging: the drag would end up split across two systems
-        if self.local_buttons.is_empty() && self.screen.pushed_through(self.side, point, delta) {
+        if self.local_buttons.is_empty()
+            && let Some(at) = self.layout.to_shared(self.me, point)
+            && let Some((to, entry)) = self.layout.exit(self.me, at, delta)
+            && let Some(at) = self.layout.to_own(to, entry)
+        {
             self.remote = true;
-            return Route::Enter {
-                along: self.screen.along(self.side, point),
-            };
+            return Route::Enter { to, at };
         }
         Route::Local
     }
@@ -426,11 +372,12 @@ impl Driver {
         }
     }
 
-    /// Control came back; returns where to put the pointer.
-    pub fn leave(&mut self, along: Along) -> Point {
+    /// Control came back, with the pointer `at` this system's own
+    /// coordinates, or where it left when `None`; returns where to put it.
+    pub fn leave(&mut self, at: Option<Point>) -> Option<Point> {
         self.remote = false;
         self.orphaned_modifiers.append(&mut self.remote_modifiers);
-        self.screen.entry_point(self.side, along)
+        at.map(|at| self.layout.nearest(self.me, at))
     }
 
     /// The peer is gone; take control back without moving the pointer.
@@ -474,17 +421,18 @@ pub enum Action {
     Swipe {
         step: SwipeStep,
     },
-    /// The pointer went back out; tell the driving system where.
+    /// The pointer went on to the system `to`, `at` a point in its own
+    /// coordinates; tell the driving system.
     Leave {
-        along: Along,
+        to: PublicKey,
+        at: Point,
     },
 }
 
 /// Replays forwarded input on the following system.
 pub struct Target {
-    screen: Rect,
-    // the edge facing the driving system
-    exit: Side,
+    layout: Group<PublicKey>,
+    me: PublicKey,
     pointer: Option<Point>,
     keys: BTreeSet<u16>,
     buttons: BTreeSet<u8>,
@@ -497,11 +445,11 @@ pub struct Target {
 }
 
 impl Target {
-    /// `driver_side` is where the driving system said this one sits.
-    pub fn new(screen: Rect, driver_side: Side) -> Self {
+    /// `me` is this system, within `layout`.
+    pub fn new(layout: Group<PublicKey>, me: PublicKey) -> Self {
         Self {
-            screen,
-            exit: driver_side.opposite(),
+            layout,
+            me,
             pointer: None,
             keys: BTreeSet::new(),
             buttons: BTreeSet::new(),
@@ -516,13 +464,14 @@ impl Target {
         self.pointer.is_some()
     }
 
-    /// The driving system now sits at `side` of this one.
-    pub fn arrange(&mut self, side: Side) {
-        self.exit = side;
+    /// The group was rearranged.
+    pub fn arrange(&mut self, layout: Group<PublicKey>) {
+        self.layout = layout;
     }
 
-    pub fn enter(&mut self, along: Along) -> Vec<Action> {
-        let to = self.screen.entry_point(self.exit, along);
+    /// The pointer arrives `at` a point in this system's own coordinates.
+    pub fn enter(&mut self, at: Point) -> Vec<Action> {
+        let to = self.layout.nearest(self.me, at);
         self.pointer = Some(to);
         vec![Action::Move {
             to,
@@ -538,14 +487,18 @@ impl Target {
         match event {
             InputEvent::Motion { dx, dy } => {
                 let moved = (pointer.0 + dx, pointer.1 + dy);
-                if self.buttons.is_empty() && self.screen.beyond(self.exit, moved) {
-                    let along = self.screen.along(self.exit, self.screen.clamp(moved));
+                if self.buttons.is_empty()
+                    && !self.layout.on_display(self.me, moved)
+                    && let Some(from) = self.layout.to_shared(self.me, pointer)
+                    && let Some((to, entry)) = self.layout.exit(self.me, from, (dx, dy))
+                    && let Some(at) = self.layout.to_own(to, entry)
+                {
                     let mut actions = self.release_all();
                     self.pointer = None;
-                    actions.push(Action::Leave { along });
+                    actions.push(Action::Leave { to, at });
                     return actions;
                 }
-                let to = self.screen.clamp(moved);
+                let to = self.layout.nearest(self.me, moved);
                 self.pointer = Some(to);
                 vec![Action::Move {
                     to,
@@ -711,6 +664,38 @@ mod tests {
         width: 1000.0,
         height: 500.0,
     };
+    fn key(byte: u8) -> PublicKey {
+        PublicKey::from_bytes(&[byte; 32]).unwrap()
+    }
+
+    fn here() -> PublicKey {
+        key(1)
+    }
+
+    fn there() -> PublicKey {
+        key(2)
+    }
+
+    /// This system and a peer on `side` of it, both with `SCREEN`.
+    fn pair(side: Side) -> Group<PublicKey> {
+        let mut group = Group::alone(here(), vec![SCREEN]);
+        group.members.push(crate::layout::Member {
+            key: there(),
+            displays: vec![SCREEN],
+            offset: crate::layout::beside(&[SCREEN], &[SCREEN], side),
+        });
+        group
+    }
+
+    fn driver(side: Side) -> Driver {
+        Driver::new(pair(side), here())
+    }
+
+    /// This system replaying input from a driver on `side` of it.
+    fn target(side: Side) -> Target {
+        Target::new(pair(side), here())
+    }
+
     const COMMAND_KEY: u16 = 55;
     const COMMAND_FLAG: u64 = 0x0010_0000;
 
@@ -765,14 +750,14 @@ mod tests {
     const A_KEY: u16 = 0;
 
     fn entered_driver() -> Driver {
-        let mut driver = Driver::new(SCREEN, Side::Left);
+        let mut driver = driver(Side::Left);
         assert!(matches!(driver.motion((0.0, 250.0), (-3.0, 0.0)), Route::Enter { .. }));
         driver
     }
 
     #[test]
     fn pushing_through_the_shared_edge_hands_over_control() {
-        let mut driver = Driver::new(SCREEN, Side::Left);
+        let mut driver = driver(Side::Left);
         assert_eq!(driver.motion((500.0, 250.0), (-3.0, 0.0)), Route::Local);
         // at the edge but moving away from it
         assert_eq!(driver.motion((0.0, 250.0), (2.0, 0.0)), Route::Local);
@@ -782,7 +767,8 @@ mod tests {
         assert_eq!(
             driver.motion((0.0, 250.0), (-3.0, 0.0)),
             Route::Enter {
-                along: SCREEN.along(Side::Left, (0.0, 250.0))
+                to: there(),
+                at: (999.0, 250.0)
             }
         );
         assert!(driver.is_remote());
@@ -800,14 +786,14 @@ mod tests {
             (Side::Above, (10.0, 0.5), (0.0, -1.0)),
             (Side::Below, (10.0, 499.0), (0.0, 1.0)),
         ] {
-            let mut driver = Driver::new(SCREEN, side);
+            let mut driver = driver(side);
             assert!(matches!(driver.motion(point, delta), Route::Enter { .. }), "{side:?}");
         }
     }
 
     #[test]
     fn does_not_hand_over_mid_drag() {
-        let mut driver = Driver::new(SCREEN, Side::Left);
+        let mut driver = driver(Side::Left);
         assert_eq!(driver.button(0, true, 1), Route::Local);
         assert_eq!(driver.motion((0.0, 250.0), (-3.0, 0.0)), Route::Local);
         assert_eq!(driver.button(0, false, 1), Route::Local);
@@ -816,7 +802,7 @@ mod tests {
 
     #[test]
     fn keys_held_before_crossing_are_released_here() {
-        let mut driver = Driver::new(SCREEN, Side::Left);
+        let mut driver = driver(Side::Left);
         assert_eq!(driver.key(COMMAND_KEY, true, false, COMMAND_FLAG), Route::Local);
         assert!(matches!(driver.motion((0.0, 250.0), (-3.0, 0.0)), Route::Enter { .. }));
 
@@ -830,7 +816,7 @@ mod tests {
 
     #[test]
     fn modifiers_held_before_crossing_are_released_here() {
-        let mut driver = Driver::new(SCREEN, Side::Left);
+        let mut driver = driver(Side::Left);
         assert_eq!(driver.modifiers(COMMAND_KEY, COMMAND_FLAG), Route::Local);
         assert_eq!(driver.modifiers(54, COMMAND_FLAG), Route::Local);
         assert!(matches!(driver.motion((0.0, 250.0), (-3.0, 0.0)), Route::Enter { .. }));
@@ -867,7 +853,7 @@ mod tests {
 
     #[test]
     fn input_goes_over_only_while_remote() {
-        let mut driver = Driver::new(SCREEN, Side::Left);
+        let mut driver = driver(Side::Left);
         assert_eq!(driver.scroll(0.0, 5.0, None), Route::Local);
         assert_eq!(driver.modifiers(COMMAND_KEY, COMMAND_FLAG), Route::Local);
 
@@ -878,9 +864,11 @@ mod tests {
         );
         assert!(matches!(driver.button(1, true, 2), Route::Forward(_)));
 
-        let back = driver.leave(0);
+        let back = driver.leave(Some((-20.0, 40.0)));
         assert!(!driver.is_remote());
-        assert_eq!(back, SCREEN.entry_point(Side::Left, 0));
+        // kept on this system's display
+        assert_eq!(back, Some((0.0, 40.0)));
+        assert_eq!(entered_driver().leave(None), None);
         assert_eq!(driver.scroll(0.0, 5.0, None), Route::Local);
     }
 
@@ -902,14 +890,14 @@ mod tests {
 
     #[test]
     fn escape_chord_does_nothing_while_local() {
-        let mut driver = Driver::new(SCREEN, Side::Left);
+        let mut driver = driver(Side::Left);
         assert_eq!(driver.key(ESCAPE_KEY, true, false, ESCAPE_MODIFIERS), Route::Local);
     }
 
     #[test]
     fn target_reclaim_releases_and_deactivates() {
-        let mut target = Target::new(SCREEN, Side::Left);
-        target.enter(0);
+        let mut target = target(Side::Right);
+        target.enter((999.0, 0.0));
         target.input(InputEvent::Button {
             button: 1,
             down: true,
@@ -938,14 +926,14 @@ mod tests {
     }
 
     fn entered_target() -> Target {
-        let mut target = Target::new(SCREEN, Side::Left);
-        target.enter(0);
+        let mut target = target(Side::Right);
+        target.enter((999.0, 0.0));
         target
     }
 
     #[test]
     fn swipes_go_over_only_while_remote() {
-        let mut driver = Driver::new(SCREEN, Side::Left);
+        let mut driver = driver(Side::Left);
         assert_eq!(driver.swipe(swipe(SwipePhase::Began, 0.0)), Route::Local);
         assert_eq!(driver.swipe(swipe(SwipePhase::Ended, 1.0)), Route::Local);
         let mut driver = entered_driver();
@@ -956,7 +944,7 @@ mod tests {
 
     #[test]
     fn a_swipe_stays_with_the_system_it_began_on() {
-        let mut driver = Driver::new(SCREEN, Side::Left);
+        let mut driver = driver(Side::Left);
         driver.swipe(swipe(SwipePhase::Began, 0.0));
         assert!(matches!(driver.motion((0.0, 250.0), (-3.0, 0.0)), Route::Enter { .. }));
         assert_eq!(driver.swipe(swipe(SwipePhase::Changed, 0.4)), Route::Local);
@@ -1047,7 +1035,7 @@ mod tests {
 
     #[test]
     fn a_scroll_and_its_momentum_stay_with_the_system_it_began_on() {
-        let mut driver = Driver::new(SCREEN, Side::Left);
+        let mut driver = driver(Side::Left);
         scrolled(&mut driver, ScrollPhase::Began);
         scrolled(&mut driver, ScrollPhase::Ended);
         // a mouse carries the pointer across while the flick coasts
@@ -1135,14 +1123,14 @@ mod tests {
 
     #[test]
     fn rearranging_moves_the_edge_that_crosses() {
-        let mut driver = Driver::new(SCREEN, Side::Left);
-        driver.arrange(Side::Right);
+        let mut driver = driver(Side::Left);
+        driver.arrange(pair(Side::Right));
         assert_eq!(driver.motion((0.0, 250.0), (-3.0, 0.0)), Route::Local);
         assert!(matches!(driver.motion((999.0, 250.0), (3.0, 0.0)), Route::Enter { .. }));
 
-        let mut target = Target::new(SCREEN, Side::Left);
-        target.enter(0);
-        target.arrange(Side::Below);
+        let mut target = target(Side::Right);
+        target.enter((999.0, 0.0));
+        target.arrange(pair(Side::Below));
         let left = target.input(InputEvent::Motion { dx: -5000.0, dy: 0.0 });
         assert!(!left.iter().any(|action| matches!(action, Action::Leave { .. })));
         let down = target.input(InputEvent::Motion { dx: 0.0, dy: 5000.0 });
@@ -1175,44 +1163,68 @@ mod tests {
     }
 
     #[test]
-    fn target_enters_opposite_edge_at_the_same_proportion() {
-        // the driver has the target on its left, so the target is entered from its right
-        let target_screen = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 2000.0,
-            height: 1000.0,
-        };
-        let mut target = Target::new(target_screen, Side::Left);
-        let actions = target.enter(u16::MAX / 2);
-        let Action::Move { to, .. } = actions[0] else {
-            panic!("expected a move, got {actions:?}")
-        };
-        assert!(to.0 > 1990.0, "entered at {to:?}");
-        assert!((to.1 - 499.5).abs() < 1.0, "entered at {to:?}");
+    fn an_entry_point_is_kept_on_this_systems_displays() {
+        let mut target = target(Side::Right);
+        let actions = target.enter((2500.0, -10.0));
+        assert!(
+            matches!(actions[0], Action::Move { to: (999.0, 0.0), .. }),
+            "{actions:?}"
+        );
     }
 
     #[test]
-    fn crossing_back_and_forth_does_not_drift() {
-        for along in [0, 1, 12_345, u16::MAX / 2, u16::MAX - 1, u16::MAX] {
-            for side in [Side::Left, Side::Right, Side::Above, Side::Below] {
-                let point = SCREEN.entry_point(side, along);
-                assert_eq!(SCREEN.along(side, point), along, "{side:?} at {along}");
-            }
-        }
+    fn crossing_there_and_back_lands_where_it_left() {
+        let mut driver = driver(Side::Right);
+        let Route::Enter { to, at } = driver.motion((999.0, 123.0), (4.0, 0.0)) else {
+            panic!("did not cross")
+        };
+        assert_eq!((to, at), (there(), (0.0, 123.0)));
+        // the peer replays it, then the pointer heads back
+        let mut peer = Target::new(pair(Side::Right), there());
+        peer.enter(at);
+        let actions = peer.input(InputEvent::Motion { dx: -4.0, dy: 0.0 });
+        assert_eq!(
+            actions,
+            vec![Action::Leave {
+                to: here(),
+                at: (999.0, 123.0)
+            }]
+        );
+        assert_eq!(driver.leave(Some((999.0, 123.0))), Some((999.0, 123.0)));
+    }
+
+    #[test]
+    fn the_pointer_goes_on_to_a_third_system() {
+        // here, then the peer on its right, then a third on the peer's right
+        let mut group = pair(Side::Right);
+        group.members.push(crate::layout::Member {
+            key: key(3),
+            displays: vec![SCREEN],
+            offset: (2000.0, 0.0),
+        });
+        let mut peer = Target::new(group, there());
+        peer.enter((10.0, 300.0));
+        let actions = peer.input(InputEvent::Motion { dx: 1000.0, dy: 0.0 });
+        assert_eq!(
+            actions,
+            vec![Action::Leave {
+                to: key(3),
+                at: (0.0, 300.0)
+            }]
+        );
     }
 
     #[test]
     fn target_ignores_input_until_entered() {
-        let mut target = Target::new(SCREEN, Side::Left);
+        let mut target = target(Side::Right);
         assert!(target.input(InputEvent::Scroll { dx: 0.0, dy: 1.0 }).is_empty());
         assert!(!target.is_active());
     }
 
     #[test]
     fn target_moves_within_its_screen_and_leaves_through_the_driver_edge() {
-        let mut target = Target::new(SCREEN, Side::Left);
-        target.enter(u16::MAX / 2);
+        let mut target = target(Side::Right);
+        target.enter((998.0, 249.5));
 
         let actions = target.input(InputEvent::Motion { dx: -100.0, dy: 0.0 });
         assert!(matches!(actions[0], Action::Move { to, .. } if (to.0 - 898.0).abs() < 0.01));
@@ -1222,14 +1234,20 @@ mod tests {
         assert!(matches!(actions[0], Action::Move { to, .. } if to.0 == 0.0));
 
         let actions = target.input(InputEvent::Motion { dx: 5000.0, dy: 0.0 });
-        assert_eq!(actions, vec![Action::Leave { along: u16::MAX / 2 }]);
+        assert_eq!(
+            actions,
+            vec![Action::Leave {
+                to: there(),
+                at: (0.0, 249.5)
+            }]
+        );
         assert!(!target.is_active());
     }
 
     #[test]
     fn target_drags_and_does_not_leave_mid_drag() {
-        let mut target = Target::new(SCREEN, Side::Left);
-        target.enter(0);
+        let mut target = target(Side::Right);
+        target.enter((999.0, 0.0));
         target.input(InputEvent::Button {
             button: 0,
             down: true,
@@ -1242,8 +1260,8 @@ mod tests {
 
     #[test]
     fn leaving_releases_everything_held() {
-        let mut target = Target::new(SCREEN, Side::Left);
-        target.enter(0);
+        let mut target = target(Side::Right);
+        target.enter((999.0, 0.0));
         target.input(InputEvent::Modifiers {
             code: COMMAND_KEY,
             flags: COMMAND_FLAG,
@@ -1269,7 +1287,10 @@ mod tests {
                     code: COMMAND_KEY,
                     flags: 0
                 },
-                Action::Leave { along: 0 },
+                Action::Leave {
+                    to: there(),
+                    at: (0.0, 0.0)
+                },
             ]
         );
         assert!(target.release_all().is_empty(), "nothing left to release");
@@ -1277,8 +1298,8 @@ mod tests {
 
     #[test]
     fn stray_releases_are_ignored() {
-        let mut target = Target::new(SCREEN, Side::Left);
-        target.enter(0);
+        let mut target = target(Side::Right);
+        target.enter((999.0, 0.0));
         assert!(
             target
                 .input(InputEvent::Key {
@@ -1302,8 +1323,8 @@ mod tests {
 
     #[test]
     fn caps_lock_is_never_released() {
-        let mut target = Target::new(SCREEN, Side::Left);
-        target.enter(0);
+        let mut target = target(Side::Right);
+        target.enter((999.0, 0.0));
         target.input(InputEvent::Modifiers {
             code: 57,
             flags: 0x0001_0000,

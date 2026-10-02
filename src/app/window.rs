@@ -109,7 +109,8 @@ pub struct MainViews {
 /// One paired peer, as its row shows it.
 pub struct PeerRow {
     pub name: String,
-    pub fingerprint: String,
+    /// Its fingerprint, who introduced it, and how its link is doing.
+    pub detail: String,
     pub trust: String,
 }
 
@@ -262,10 +263,11 @@ impl MainViews {
             let name = label(&peer.name, 13.0, false, mtm);
             name.setFrame(rect(16.0, y + 7.0, 200.0, 18.0));
             self.peers.addSubview(&name);
-            let fingerprint = label(&peer.fingerprint, 11.0, false, mtm);
+            let fingerprint = label(&peer.detail, 11.0, false, mtm);
             fingerprint.setTextColor(Some(&NSColor::secondaryLabelColor()));
             fingerprint.setSelectable(true);
-            fingerprint.setFrame(rect(16.0, y + 26.0, 200.0, 16.0));
+            fingerprint.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            fingerprint.setFrame(rect(16.0, y + 26.0, GROUP_WIDTH - 340.0, 16.0));
             self.peers.addSubview(&fingerprint);
             let trust = button(&format!("{}…", peer.trust), sel!(changeTrust:), target, mtm);
             trust.setTag(index as isize);

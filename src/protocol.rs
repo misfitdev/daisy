@@ -6,7 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::input::{Along, InputEvent, Side};
+use crate::identity::PublicKey;
+use crate::input::{InputEvent, Point, Rect, Side};
 
 pub const CONFIRMATION_LEN: usize = 32;
 
@@ -47,23 +48,63 @@ pub enum Message {
     ControlClaim {
         generation: u64,
     },
-    /// The pointer crossed onto the receiver's screen at `along`.
+    /// The pointer crossed onto the receiver `to`, at `at` in its own
+    /// coordinates.
     Enter {
         generation: u64,
-        along: Along,
+        to: PublicKey,
+        at: Point,
     },
     Input {
         generation: u64,
         event: InputEvent,
     },
-    /// The pointer went back to the system in control at `along`.
+    /// The pointer left the receiver for the system `to`, which may be the
+    /// one in control, at `at` in that system's own coordinates.
     Leave {
         generation: u64,
-        along: Along,
+        to: PublicKey,
+        at: Point,
     },
     /// The system in control took the pointer back; release everything held.
     Reclaim {
         generation: u64,
+    },
+    /// Who the sender believes has control, sent when a session starts, so a
+    /// system joining a group learns the current owner and generation.
+    ControlState {
+        generation: u64,
+        owner: PublicKey,
+    },
+    /// The sender's displays in its own coordinates, sent when a session
+    /// starts and whenever they change.
+    Displays {
+        displays: Vec<Rect>,
+    },
+    /// Where every system's displays sit in the group, as a whole. The
+    /// greatest `(version, author)` wins everywhere.
+    Arrangement {
+        version: u64,
+        author: PublicKey,
+        offsets: Vec<(PublicKey, (f64, f64))>,
+    },
+    /// Whether the sender's screen is locked, sent when a session starts and
+    /// whenever it changes. Input sent to a locked system does nothing.
+    Locked {
+        locked: bool,
+    },
+    /// The key the sender signs introductions and revocations with, sent
+    /// once when a session starts.
+    SigningKey {
+        key: [u8; 32],
+    },
+    /// The sender trusts a system, and introduces it, signed.
+    Introduce {
+        introduction: crate::introduce::Signed<crate::introduce::Introduction>,
+    },
+    /// A member no longer trusts a system, signed by that member.
+    Revoke {
+        revocation: crate::introduce::Signed<crate::introduce::Revocation>,
     },
 }
 
@@ -137,7 +178,8 @@ mod tests {
             Message::ControlClaim { generation: 3 },
             Message::Enter {
                 generation: 3,
-                along: 12,
+                to: crate::identity::PublicKey::from_bytes(&[9; 32]).unwrap(),
+                at: (12.5, -3.0),
             },
             Message::Input {
                 generation: 3,
@@ -150,7 +192,21 @@ mod tests {
             },
             Message::Leave {
                 generation: 3,
-                along: u16::MAX,
+                to: crate::identity::PublicKey::from_bytes(&[8; 32]).unwrap(),
+                at: (-1440.0, 900.0),
+            },
+            Message::Displays {
+                displays: vec![Rect {
+                    x: -800.0,
+                    y: -1440.0,
+                    width: 2560.0,
+                    height: 1440.0,
+                }],
+            },
+            Message::Arrangement {
+                version: 7,
+                author: crate::identity::PublicKey::from_bytes(&[1; 32]).unwrap(),
+                offsets: vec![(crate::identity::PublicKey::from_bytes(&[2; 32]).unwrap(), (1512.0, 0.0))],
             },
             Message::Reclaim { generation: 3 },
             Message::Clipboard {
@@ -256,10 +312,12 @@ mod tests {
         };
         assert_eq!(layout.encode().unwrap()[0], 6);
         assert_eq!(Message::ControlClaim { generation: 0 }.encode().unwrap()[0], 7);
+        let key = crate::identity::PublicKey::from_bytes(&[0; 32]).unwrap();
         assert_eq!(
             Message::Enter {
                 generation: 0,
-                along: 0
+                to: key,
+                at: (0.0, 0.0)
             }
             .encode()
             .unwrap()[0],
@@ -273,13 +331,53 @@ mod tests {
         assert_eq!(
             Message::Leave {
                 generation: 0,
-                along: 0
+                to: key,
+                at: (0.0, 0.0)
             }
             .encode()
             .unwrap()[0],
             10
         );
         assert_eq!(Message::Reclaim { generation: 0 }.encode().unwrap()[0], 11);
+        let state = Message::ControlState {
+            generation: 0,
+            owner: crate::identity::PublicKey::from_bytes(&[0; 32]).unwrap(),
+        };
+        assert_eq!(state.encode().unwrap()[0], 12);
+        assert_eq!(Message::Displays { displays: vec![] }.encode().unwrap()[0], 13);
+        let arrangement = Message::Arrangement {
+            version: 0,
+            author: key,
+            offsets: vec![],
+        };
+        assert_eq!(arrangement.encode().unwrap()[0], 14);
+        assert_eq!(Message::Locked { locked: true }.encode().unwrap()[0], 15);
+        assert_eq!(Message::SigningKey { key: [0; 32] }.encode().unwrap()[0], 16);
+        let introduction = Message::Introduce {
+            introduction: crate::introduce::Signed {
+                body: crate::introduce::Introduction {
+                    introducer: key,
+                    newcomer: key,
+                    newcomer_signing: [0; 32],
+                    name: String::new(),
+                    policy: crate::trust::Policy::Forever,
+                    trusted_since: 0,
+                },
+                signature: vec![],
+            },
+        };
+        assert_eq!(introduction.encode().unwrap()[0], 17);
+        let revocation = Message::Revoke {
+            revocation: crate::introduce::Signed {
+                body: crate::introduce::Revocation {
+                    by: key,
+                    revoked: key,
+                    at: 0,
+                },
+                signature: vec![],
+            },
+        };
+        assert_eq!(revocation.encode().unwrap()[0], 18);
     }
 
     #[test]

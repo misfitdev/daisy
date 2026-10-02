@@ -80,11 +80,14 @@ enum Command {
     },
     /// List peers and how long each stays trusted
     Peers,
+    /// Show the round trips on each running link
+    Stats,
     /// Change how long a peer stays trusted
     Trust {
         /// Name or fingerprint, shown by `peers`
         peer: String,
-        /// idle, <days>d counted from pairing, once, or forever
+        /// idle, idle:<hours>h or idle:<days>d, <days>d counted from pairing,
+        /// once, or forever
         policy: Policy,
     },
     /// Show whether macOS lets the app read and send input
@@ -133,10 +136,15 @@ fn main() -> Result<()> {
 
 async fn run_cli(command: Command, home: PathBuf, name: String) -> Result<()> {
     let identity = Identity::load_or_create(&home.join("identity"))?;
+    let signer = daisy::introduce::Signer::load_or_create(&home.join("signing"))?;
     let peers = PeerStore::open(&home)?;
+    let keys = Keys {
+        identity: &identity,
+        signer: &signer,
+    };
 
     tokio::select! {
-        result = execute(command, &home, &identity, &peers, &name) => result,
+        result = execute(command, &home, keys, &peers, &name) => result,
         () = launcher::launcher_gone() => {
             tracing::info!("the terminal that launched Daisy exited; stopping");
             Ok(())
@@ -144,7 +152,15 @@ async fn run_cli(command: Command, home: PathBuf, name: String) -> Result<()> {
     }
 }
 
-async fn execute(command: Command, home: &Path, identity: &Identity, peers: &PeerStore, name: &str) -> Result<()> {
+/// This system's Noise identity and the key it signs introductions with.
+#[derive(Clone, Copy)]
+struct Keys<'a> {
+    identity: &'a Identity,
+    signer: &'a daisy::introduce::Signer,
+}
+
+async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStore, name: &str) -> Result<()> {
+    let Keys { identity, signer } = keys;
     match command {
         Command::Id => {
             println!("{name}\n{}", identity.public_key());
@@ -174,6 +190,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     clipboard: &clipboard,
                     discoverable: &discoverable,
                     arrangement: None,
+                    signer,
                 },
                 &bind,
                 port,
@@ -204,6 +221,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
                     clipboard: &clipboard,
                     discoverable: &discoverable,
                     arrangement: None,
+                    signer,
                 },
                 &address,
                 None,
@@ -230,6 +248,10 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
             }
             Ok(())
         }
+        Command::Stats => {
+            print!("{}", stats_table(&daisy::latency::load(home, trust::now())));
+            Ok(())
+        }
         Command::Trust { peer, policy } => {
             let now = trust::now();
             let (matched, still) = peers.set_policy(&peer, policy, now)?;
@@ -252,10 +274,13 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
         }
         Command::Forget { peers: selectors, all } => {
             let now = trust::now();
+            // forgetting everything is this system leaving; forgetting one
+            // system removes it from the whole group
             let (removed, unmatched) = if all {
                 (peers.forget_all(now)?, Vec::new())
             } else {
                 let forgotten = peers.forget(&selectors, now)?;
+                peers.record_revocations(signer, identity.public_key(), &forgotten.keys, now)?;
                 (forgotten.removed, forgotten.unmatched)
             };
             if removed > 0 {
@@ -270,6 +295,7 @@ async fn execute(command: Command, home: &Path, identity: &Identity, peers: &Pee
         }
         Command::RotateKey => {
             let rotated = Identity::rotate(&home.join("identity"))?;
+            daisy::introduce::Signer::generate().save(&home.join("signing"))?;
             println!(
                 "This system's key changed from {} to {}.\nEvery peer must pair again. Restart Daisy if it is running.",
                 identity.public_key(),
@@ -318,13 +344,34 @@ impl ServiceObserver for TerminalObserver {
         );
     }
 
-    fn disconnected(&mut self, peer: &str) {
+    fn disconnected(&mut self, peer: &str, _key: PublicKey) {
         println!("{peer} disconnected.");
     }
 
     fn connection_failed(&mut self, address: &str, error: &anyhow::Error) {
         eprintln!("Connection from {address} ended: {error:#}");
     }
+}
+
+/// The running links' round trips, one line each, in milliseconds.
+fn stats_table(links: &[daisy::latency::LinkStats]) -> String {
+    if links.is_empty() {
+        return "No running links.\n".to_owned();
+    }
+    let ms = |micros: u64| format!("{:.1}", micros as f64 / 1000.0);
+    let mut table = String::from("peer\tround trips\tp50 ms\tp99 ms\tmax ms\n");
+    for link in links {
+        let stats = &link.stats;
+        table.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            link.peer,
+            stats.count,
+            ms(stats.p50_us),
+            ms(stats.p99_us),
+            ms(stats.max_us)
+        ));
+    }
+    table
 }
 
 fn status(peer: &Peer, now: Timestamp) -> String {
@@ -382,6 +429,25 @@ fn computer_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stats_read_in_milliseconds() {
+        assert_eq!(stats_table(&[]), "No running links.\n");
+        let link = daisy::latency::LinkStats {
+            peer: "Studio".to_owned(),
+            updated: 0,
+            stats: daisy::latency::Stats {
+                count: 120,
+                p50_us: 1_250,
+                p99_us: 9_000,
+                max_us: 31_400,
+            },
+        };
+        assert_eq!(
+            stats_table(&[link]),
+            "peer\tround trips\tp50 ms\tp99 ms\tmax ms\nStudio\t120\t1.2\t9.0\t31.4\n"
+        );
+    }
 
     #[test]
     fn no_subcommand_is_the_menu_bar_app() {

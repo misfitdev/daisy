@@ -12,8 +12,9 @@ use crate::session::NOISE_PATTERN;
 
 pub const KEY_LEN: usize = 32;
 
-/// A peer's long-term X25519 public key.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// A peer's long-term X25519 public key. Ordered by its bytes, which breaks
+/// ties between systems the same way everywhere in a group.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct PublicKey([u8; KEY_LEN]);
 
 impl PublicKey {
