@@ -36,7 +36,7 @@ The handshake tells each side the other's long-term public key, but not whether 
 
 An attacker in the middle has a different handshake with each side and does not know the code, so it gets one guess per attempt: a one-in-a-million chance. Comparing a short code by eye would not be safe because an attacker could grind keys until screens matched; the code is only ever PAKE input.
 
-Each system runs one pairing exchange at a time and accepts at most five unknown-key attempts in a ten-minute window; an always-open gate gets a fresh allowance each window. Noise handshakes time out after 15 seconds; trust negotiation or code entry times out after two minutes. Choosing **Add a System** again, or restarting `listen --pair`, deliberately opens a new window.
+Each system runs one pairing exchange at a time and accepts at most five unknown-key attempts in a ten-minute window; an always-open gate gets a fresh allowance each window. After a pairing fails or is cancelled, a system waits 15 seconds before opening another, so a dismissed prompt does not return at once. **Add a System** is available only while finding systems on the network, not while connecting to a typed address. Noise handshakes time out after 15 seconds; trust negotiation or code entry times out after two minutes. Choosing **Add a System** again, or restarting `listen --pair`, deliberately opens a new window.
 
 ## How long trust lasts
 

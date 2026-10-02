@@ -10,6 +10,7 @@ events for swipes. Read this before changing anything.
 just              # list recipes
 just check        # clippy -D warnings, rustfmt --check, cargo test
 just app <args>   # build, sign and run Daisy.app
+just screenshot   # redraw the website's window screenshot after UI changes
 just package      # create the release zip and DMG; notarize when credentials are set
 ```
 
@@ -43,17 +44,29 @@ version of each system.
   `docs/protocol.md` explains it; code wins if they disagree.
 - Pure decision modules contain no macOS calls and are unit tested directly:
   `input`, `swipe`, `shake`, `pairing`, `trust`, `session`, `control`,
-  `latency`, `share`, `install` and `setup`.
+  `latency`, `share`, `layout`, `install` and `setup`. Keep new decisions
+  out of `src/app/` and the network loops so they can be tested this way;
+  the pairing gate (`service::PairingGate`) and opener election
+  (`discovery::pairing_opener`) are examples.
 - `src/macos/` carries out decisions and nothing more. Undocumented
   WindowServer fields and event types live only in `src/macos/swipe.rs`;
   Mission Control shortcut IDs live only in `src/macos/shortcut.rs`.
-- `docs/` contains usage, architecture, protocol, security, macOS and
-  release documentation.
+- `docs/` contains usage, administration, architecture, protocol, security,
+  macOS and release documentation.
+- Settings an administrator can enforce live only in
+  `src/macos/managed.rs`, read from the `dev.misfit.daisy` domain and honored
+  only when a configuration profile forces them. Document every key in
+  `docs/administration.md`.
 
 ## Conventions and patterns
 
 - Wire enums (`protocol::Message`, `input::InputEvent`) are encoded by
   variant position. Append variants; never reorder or remove them.
+- The Bonjour TXT record (`discovery::properties`) is read by every
+  version on the network: `p` is 0 closed, 1 open with no peers, 2 open
+  group member; `s` is when pairing opened. Add keys freely; change an
+  existing key's meaning only with a new `VERSION` there, which also hides
+  paired peers on older versions from each other.
 - Short codes are only safe as PAKE input. Never ask people to compare a code
   by eye as a security check; an attacker can grind keys until codes match.
 - The event-tap callback runs on every input event. It must never wait, perform

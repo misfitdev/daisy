@@ -33,7 +33,7 @@ For a network without Bonjour, click **Advanced…** and enter the peer's local 
 
 ## Grow a group
 
-To add a system, click **Start Sharing** on it. On any one system already in the group, choose **Add a System** from the menu-bar flower; the group then accepts a new system for 30 seconds, and the panel there counts down and offers **Cancel**. The new system shows the code; type it on the member. If nothing joins in time, the panel says "No new system joined" and offers **Try Again**. Sharing keeps running throughout.
+To add a system, click **Start Sharing** on it. On any one system already in the group, choose **Add a System** from the menu-bar flower; the group then accepts a new system for 30 seconds, and the panel there counts down and offers **Cancel**. The new system shows the code; type it on the member. If nothing joins in time, the panel says "No new system joined" and offers **Try Again**. **Cancel** on the code prompt also ends Add a System, and Daisy waits 15 seconds before asking again. Sharing keeps running throughout. Add a System is unavailable while Daisy connects to an address typed under **Advanced…**.
 
 That member introduces it to the rest with a signed introduction, so every member trusts it and links to it without another code; see the [security model](security-model.md#groups). A group holds up to eight systems; a ninth is refused. Each member trusts an introduced system for no longer than it trusts the member that introduced it.
 

@@ -112,21 +112,15 @@ where
                 }
                 _ = scan.tick() => {
                     let keys: Vec<_> = config.peers.list(trust::now())?.iter().map(|p| p.key).collect();
-                    gate().tick();
-                    if gate().ended() {
-                        gate().close();
-                        Shared(&observer).pairing_closed();
-                        break;
+                    let advertised = advertiser.as_ref().map(|a| a.offer);
+                    match gate().each_second(!keys.is_empty(), advertised) {
+                        Second::Closed => {
+                            Shared(&observer).pairing_closed();
+                            break;
+                        }
+                        Second::Advertise => break,
+                        Second::Carry => {}
                     }
-                    // membership changes as systems pair and are forgotten;
-                    // a changed offer is advertised again below
-                    gate().member = !keys.is_empty();
-                    // a system whose last peer was forgotten is new again
-                    if keys.is_empty() && gate().closed && config.pairing.is_some() {
-                        *gate() = PairingGate::listening(config.pairing, Listening::Closed, false);
-                        break;
-                    }
-                    if advertiser.as_ref().is_some_and(|a| a.offer != gate().offer()) { break; }
                     if !hub.has_room() { continue; }
                     let own = config.identity.public_key();
                     let mut found = browser.current(&keys);
@@ -364,6 +358,16 @@ pub struct SessionConfig<'a> {
     pub signer: &'a crate::introduce::Signer,
 }
 
+/// What a running session does after `PairingGate::each_second`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Second {
+    /// Pairing ended: say so and advertise again.
+    Closed,
+    /// The advertisement no longer matches.
+    Advertise,
+    Carry,
+}
+
 /// When a running group accepts a system it has not paired with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Listening {
@@ -484,6 +488,27 @@ impl PairingGate {
             // an always open gate stays open, now as a member's
             self.member = true;
         }
+    }
+
+    /// Keeps the gate current once a second while sharing, given whether
+    /// this system has peers and what it advertises now.
+    fn each_second(&mut self, has_peers: bool, advertised: Option<discovery::Offer>) -> Second {
+        self.tick();
+        if self.ended() {
+            self.close();
+            return Second::Closed;
+        }
+        // membership changes as systems pair and are forgotten
+        self.member = has_peers;
+        // a system whose last peer was forgotten is new again
+        if !has_peers && self.closed && self.policy.is_some() {
+            *self = Self::listening(self.policy, Listening::Closed, false);
+            return Second::Advertise;
+        }
+        if advertised.is_some_and(|offer| offer != self.offer()) {
+            return Second::Advertise;
+        }
+        Second::Carry
     }
 
     /// Starts a gate that stays open on a fresh allowance of attempts each
@@ -1396,6 +1421,41 @@ mod tests {
             Some(Policy::IDLE),
             "the other system may still connect"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_second_keeps_the_gate_and_its_advertisement_current() {
+        // a system with no peers pairs: the gate closes and is advertised again
+        let mut gate = PairingGate::listening(Some(Policy::IDLE), Listening::Closed, false);
+        let open = gate.offer();
+        assert_eq!(gate.each_second(false, Some(open)), Second::Carry);
+        gate.paired(Trust::NewlyPaired);
+        assert_eq!(gate.each_second(true, Some(open)), Second::Closed);
+        assert_eq!(gate.each_second(true, Some(discovery::Offer::Closed)), Second::Carry);
+
+        // its last peer is forgotten: open again as a newcomer
+        assert_eq!(
+            gate.each_second(false, Some(discovery::Offer::Closed)),
+            Second::Advertise
+        );
+        assert!(matches!(gate.offer(), discovery::Offer::Open { member: false, .. }));
+
+        // Add a System runs out
+        let mut asked = PairingGate::listening(Some(Policy::IDLE), Listening::For(Duration::from_secs(30)), true);
+        let offer = asked.offer();
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(asked.each_second(true, Some(offer)), Second::Closed);
+
+        // an always open gate that gains a peer advertises as a member
+        let mut always = PairingGate::listening(Some(Policy::IDLE), Listening::Always, false);
+        let offer = always.offer();
+        assert_eq!(always.each_second(true, Some(offer)), Second::Advertise);
+        assert!(matches!(always.offer(), discovery::Offer::Open { member: true, .. }));
+
+        // a session that cannot pair never opens
+        let mut never = PairingGate::listening(None, Listening::Closed, false);
+        assert_eq!(never.each_second(false, None), Second::Carry);
+        assert_eq!(never.offer(), discovery::Offer::Closed);
     }
 
     #[tokio::test(start_paused = true)]
