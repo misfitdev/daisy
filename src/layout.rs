@@ -23,7 +23,8 @@ pub const MAX_DISPLAYS: usize = 16;
 const MAX_EXTENT: f64 = 1_000_000.0;
 
 /// `displays` as a member reported them, if they could be real: at most
-/// `MAX_DISPLAYS`, each with a finite position and a positive, finite size.
+/// `MAX_DISPLAYS`, each with a finite position and a finite size of at least
+/// one point, which `clamp` needs.
 pub fn plausible(displays: Vec<Rect>) -> Option<Vec<Rect>> {
     let sane = |value: f64| value.is_finite() && value.abs() <= MAX_EXTENT;
     (!displays.is_empty()
@@ -33,8 +34,8 @@ pub fn plausible(displays: Vec<Rect>) -> Option<Vec<Rect>> {
                 && sane(display.y)
                 && sane(display.width)
                 && sane(display.height)
-                && display.width > 0.0
-                && display.height > 0.0
+                && display.width >= 1.0
+                && display.height >= 1.0
         }))
     .then_some(displays)
 }
@@ -722,10 +723,18 @@ mod tests {
     #[test]
     fn only_displays_that_could_be_real_are_accepted() {
         assert_eq!(plausible(vec![LAPTOP, EXTERNAL]), Some(vec![LAPTOP, EXTERNAL]));
+        let point = Rect {
+            width: 1.0,
+            height: 1.0,
+            ..LAPTOP
+        };
+        assert_eq!(plausible(vec![point]), Some(vec![point]));
         assert_eq!(plausible(vec![]), None);
         assert_eq!(plausible(vec![LAPTOP; MAX_DISPLAYS + 1]), None);
         for bad in [
             Rect { width: 0.0, ..LAPTOP },
+            Rect { width: 0.5, ..LAPTOP },
+            Rect { height: 0.5, ..LAPTOP },
             Rect { height: -1.0, ..LAPTOP },
             Rect { x: f64::NAN, ..LAPTOP },
             Rect {
