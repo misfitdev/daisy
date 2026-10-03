@@ -269,7 +269,7 @@ define_class!(
             self.ivars()
                 .drag
                 .set(Some((index, grabbed, (point.x - grabbed.x, point.y - grabbed.y))));
-            self.setNeedsDisplay(true);
+            self.redraw();
         }
 
         #[unsafe(method(mouseUp:))]
@@ -287,6 +287,19 @@ define_class!(
             };
             if let Some((key, offset)) = dropped {
                 self.place(key, offset);
+            }
+        }
+
+        // an open hand over each peer's displays says they can be dragged
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            let scene = self.ivars().scene.borrow();
+            let fit = self.fit(&scene);
+            let hand = objc2_app_kit::NSCursor::openHandCursor();
+            for shown in scene.iter().filter(|shown| !shown.me) {
+                for display in shown.placed() {
+                    self.addCursorRect_cursor(ns_rect(fit.to_view(display)), &hand);
+                }
             }
         }
 
@@ -311,7 +324,7 @@ define_class!(
                 self.ivars().selected.set(next);
                 self.announce_selection();
                 self.setKeyboardFocusRingNeedsDisplayInRect(self.bounds());
-                self.setNeedsDisplay(true);
+                self.redraw();
                 return;
             }
             let side = match key {
@@ -350,6 +363,13 @@ define_class!(
 );
 
 impl ArrangeView {
+    /// AppKit keeps drawing the focus ring where it last was until told the
+    /// mask changed.
+    fn redraw(&self) {
+        self.setNeedsDisplay(true);
+        self.noteFocusRingMaskChanged();
+    }
+
     /// Sends `action` to `target` when a person places a peer's displays.
     pub fn new(mtm: MainThreadMarker, frame: NSRect, target: &AnyObject, action: Sel) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ArrangeIvars {
@@ -363,6 +383,16 @@ impl ArrangeView {
         });
         // SAFETY: initWithFrame: is NSView's designated initializer
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    /// Makes `key` the peer the arrow keys move, and takes the keyboard.
+    pub fn select(&self, key: Option<PublicKey>) {
+        self.ivars().selected.set(key);
+        if let Some(window) = self.window() {
+            window.makeFirstResponder(Some(self));
+        }
+        self.announce_selection();
+        self.redraw();
     }
 
     /// The member a person just placed, and where.
@@ -387,7 +417,10 @@ impl ArrangeView {
             *self.ivars().scene.borrow_mut() = scene;
         }
         self.refresh_hints();
-        self.setNeedsDisplay(true);
+        if let Some(window) = self.window() {
+            window.invalidateCursorRectsForView(self);
+        }
+        self.redraw();
     }
 
     /// The peer the arrow keys move: the one chosen with [ and ], or else
@@ -404,9 +437,25 @@ impl ArrangeView {
     fn selected_bounds(&self) -> Option<Rect> {
         let scene = self.ivars().scene.borrow();
         let selected = self.selected(&scene)?;
-        let shown = scene.iter().find(|shown| shown.key == selected)?;
+        let index = scene.iter().position(|shown| shown.key == selected)?;
         let fit = self.fit(&scene);
-        crate::layout::bounds(&shown.placed().map(|display| fit.to_view(display)).collect::<Vec<_>>())
+        let moved = self
+            .ivars()
+            .drag
+            .get()
+            .filter(|(dragged, _, _)| *dragged == index)
+            .map_or((0.0, 0.0), |(_, _, by)| by);
+        let bounds = crate::layout::bounds(
+            &scene[index]
+                .placed()
+                .map(|display| fit.to_view(display))
+                .collect::<Vec<_>>(),
+        )?;
+        Some(Rect {
+            x: bounds.x + moved.0,
+            y: bounds.y + moved.1,
+            ..bounds
+        })
     }
 
     /// Tells VoiceOver which peer the arrow keys now move.
@@ -427,7 +476,7 @@ impl ArrangeView {
 
     fn place(&self, key: PublicKey, offset: Offset) {
         self.ivars().placed.set(Some((key, offset)));
-        self.setNeedsDisplay(true);
+        self.redraw();
         let target = self.ivars().target.borrow().load();
         if let (Some(target), Some(action)) = (target, self.ivars().action.get()) {
             // SAFETY: the target implements the action with an object sender
@@ -480,8 +529,9 @@ fn draw_display(shown: &Shown, view: Rect, faded: bool, main: bool, alone: bool)
         NSSize::new(view.width - 2.0, view.height - 2.0),
     );
     let shape = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(inset, 6.0, 6.0);
+    // coral stays the action color, so the system in control is outlined, not filled
     let fill = if active {
-        coral_color().colorWithAlphaComponent(0.14)
+        NSColor::controlBackgroundColor()
     } else {
         NSColor::controlBackgroundColor().colorWithAlphaComponent(alpha)
     };

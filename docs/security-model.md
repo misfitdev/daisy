@@ -28,15 +28,15 @@ After the handshake, every message is encrypted and authenticated with a per-dir
 
 The handshake tells each side the other's long-term public key, but not whether it belongs to the intended peer. Pairing settles that once:
 
-1. Both systems must opt in with **Pair a New Peer** (or `--pair` in the CLI). A system not opted in refuses an unknown key without showing a code.
-2. The listening system shows a random six-digit code; the user types it on the connecting system.
+1. Both systems must be open to pairing. A sharing system is open while it has no peers yet; during **Add a System**, a 30-second window that closes after one success; or while **Always discoverable** is on, which stays open while sharing and requires the owner to authenticate with Touch ID or the login password to turn on. The CLI opens with `--pair`. A system that is not open refuses an unknown key without showing a code.
+2. The connecting system types the code; the listening system shows a random six-digit code. A group member always opens the connection to a system with no peers, so the code appears on the newcomer. Between two systems with no peers, the one open to pairing longer opens; when they opened within two seconds of each other, their random advertisement nonces decide.
 3. Both run SPAKE2 over the Ed25519 group, keyed by that code.
 4. Each proves it derived the same key with HMAC-SHA256 over the Noise handshake hash, labelled by role. The role label stops reflection; the handshake hash binds the proof to this connection.
 5. Only after both proofs verify does each side pin the other's public key.
 
 An attacker in the middle has a different handshake with each side and does not know the code, so it gets one guess per attempt: a one-in-a-million chance. Comparing a short code by eye would not be safe because an attacker could grind keys until screens matched; the code is only ever PAKE input.
 
-Pairing mode accepts at most five unknown-key attempts in a ten-minute window and closes after the first successful pairing. Noise handshakes time out after 15 seconds; trust negotiation or code entry times out after two minutes. Stopping and choosing **Pair a New Peer** again, or restarting `listen --pair`, deliberately opens a new window.
+Each system runs one pairing exchange at a time and accepts at most five unknown-key attempts in a ten-minute window; an always-open gate gets a fresh allowance each window. After a pairing fails or is cancelled, a system waits 15 seconds before opening another, so a dismissed prompt does not return at once. **Add a System** is available only while finding systems on the network, not while connecting to a typed address. Noise handshakes time out after 15 seconds; trust negotiation or code entry times out after two minutes. Choosing **Add a System** again, or restarting `listen --pair`, deliberately opens a new window.
 
 ## How long trust lasts
 
@@ -64,7 +64,7 @@ Introductions widen trust beyond the pairing a person performed: pairing A with 
 
 ## Discovery
 
-Each system advertises `_daisy._tcp` with Bonjour under a random instance and host name. The TXT record holds a random 16-byte nonce and an 8-byte tag, the first 8 bytes of SHA-256 over a fixed label, the advertiser's public key and the nonce, plus whether pairing is open. A peer that pinned the key recognises the tag; anyone else learns neither the key nor the advertiser's name, and each new advertisement uses a fresh nonce, so advertisements cannot be linked. An advertisement only suggests where to connect: every connection still runs the Noise handshake and the trust check, so a forged or replayed advertisement can at most send a connection somewhere it fails. Advertising can be turned off.
+Each system advertises `_daisy._tcp` with Bonjour under a random instance and host name. The TXT record holds a random 16-byte nonce and an 8-byte tag, the first 8 bytes of SHA-256 over a fixed label, the advertiser's public key and the nonce, plus whether pairing is open (`p`: closed, open with no peers, or open as a group member) and, when open, the Unix time it opened (`s`), used to choose who types the code. A peer that pinned the key recognises the tag; anyone else learns neither the key nor the advertiser's name, and each new advertisement uses a fresh nonce, so advertisements cannot be linked. An advertisement only suggests where to connect: every connection still runs the Noise handshake and the trust check, so a forged or replayed advertisement can at most send a connection somewhere it fails. The app advertises whenever it is sharing; `listen --no-discovery` turns advertising off from the command line.
 
 ## Reconnecting
 

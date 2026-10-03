@@ -172,6 +172,7 @@ unsafe extern "C" {
     pub fn CFRunLoopStop(run_loop: CFRunLoopRef);
     pub fn CFRelease(object: *const c_void);
     pub fn CFPreferencesCopyAppValue(key: *const c_void, application: *const c_void) -> *const c_void;
+    pub fn CFPreferencesAppValueIsForced(key: *const c_void, application: *const c_void) -> bool;
     pub fn CFGetTypeID(object: *const c_void) -> usize;
     pub fn CFNumberGetTypeID() -> usize;
     pub fn CFBooleanGetTypeID() -> usize;

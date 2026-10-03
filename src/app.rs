@@ -4,6 +4,10 @@
 mod map;
 #[path = "app/menu.rs"]
 mod menu;
+#[path = "app/panel.rs"]
+mod panel;
+#[path = "app/screenshot.rs"]
+pub mod screenshot;
 #[path = "app/switch.rs"]
 mod switch;
 #[path = "app/trust.rs"]
@@ -31,13 +35,14 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSButton, NSColor, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSPopUpButton,
-    NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSTextField, NSWindow, NSWindowDelegate, NSWorkspace,
+    NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionKey, NSAboutPanelOptionVersion, NSAlert,
+    NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSButton, NSColor, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar,
+    NSStatusItem, NSWindow, NSWindowDelegate, NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
-    NSURL,
+    MainThreadMarker, NSData, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
+    NSString, NSTimer, NSURL,
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
@@ -49,6 +54,13 @@ use crate::setup::Step;
 
 /// Matches `bundle_id` in the justfile, which writes it into Info.plist.
 const BUNDLE_ID: &str = "dev.misfit.daisy";
+/// How long the Connected panel stays before closing on its own.
+const CONNECTED_SHOWN: std::time::Duration = std::time::Duration::from_secs(15);
+/// Past these, the exchange has timed out on the network side as well.
+const CHECKING_SHOWN: std::time::Duration = std::time::Duration::from_secs(20);
+const CODE_SHOWN: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long past its countdown Add a System waits to hear that it closed.
+const WAITING_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 struct AppDelegateIvars {
     controller: Handle,
@@ -63,19 +75,26 @@ struct AppDelegateIvars {
     arranged: RefCell<Option<crate::share::Layout>>,
     main: OnceCell<window::MainViews>,
     advanced: OnceCell<window::AdvancedViews>,
+    /// Whether the running group is open to a new system.
+    adding: Cell<bool>,
     /// This system's name, as the arrangement shows it.
     local_name: RefCell<String>,
     status_item: OnceCell<Retained<NSStatusItem>>,
-    menu_status: OnceCell<Retained<NSMenuItem>>,
     menu_start_stop: OnceCell<Retained<NSMenuItem>>,
-    /// The main menu's Quit Daisy and its stand-in that closes windows; one
-    /// of them carries Command-Q.
-    main_quit: OnceCell<Retained<NSMenuItem>>,
-    main_close_q: OnceCell<Retained<NSMenuItem>>,
-    nearby: RefCell<Vec<controller::Nearby>>,
-    /// The address and key of the peer last picked from Nearby; the key is
-    /// used only while the address field still shows that address.
+    menu_add: OnceCell<Retained<NSMenuItem>>,
+    /// The saved address and the key of the peer at it; the key is used
+    /// only while the address field still shows that address.
     nearby_choice: RefCell<Option<(String, String)>>,
+    pairing: OnceCell<panel::Panel>,
+    /// Where a typed code goes, while one is asked for.
+    code_reply: RefCell<Option<tokio::sync::oneshot::Sender<String>>>,
+    /// When the Connected panel appeared, to close it on its own.
+    connected_at: Cell<Option<std::time::Instant>>,
+    /// Touch ID or password result for Always Discoverable, from AppKit's
+    /// callback thread.
+    owner_confirmed: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    /// Whether a configuration profile allows Always Discoverable.
+    always_allowed: Cell<bool>,
     timer: OnceCell<Retained<NSTimer>>,
     walkthrough: OnceCell<walkthrough::SetupViews>,
     /// The walkthrough step last shown.
@@ -168,6 +187,7 @@ define_class!(
                     }
                 }
             }
+            self.tick_pairing();
             let setup_open = self.ivars().walkthrough.get().is_some_and(|views| views.window.isVisible());
             if setup_open && self.ivars().permission_poll_ticks.get().is_multiple_of(5) {
                 self.refresh_setup();
@@ -191,18 +211,99 @@ define_class!(
             if is_active(&self.ivars().status.borrow()) {
                 let _ = self.ivars().controller.send(Command::Stop);
             } else {
-                self.start(false);
+                self.start();
             }
         }
 
         #[unsafe(method(startSession:))]
         fn start_session(&self, _sender: Option<&AnyObject>) {
-            self.start(false);
+            self.start();
         }
 
-        #[unsafe(method(pairSession:))]
-        fn pair_session(&self, _sender: Option<&AnyObject>) {
-            self.start(true);
+        #[unsafe(method(addSystem:))]
+        fn add_system(&self, _sender: Option<&AnyObject>) {
+            self.add_a_system();
+        }
+
+        #[unsafe(method(pairingPrimary:))]
+        fn pairing_primary(&self, _sender: Option<&AnyObject>) {
+            let Some(panel) = self.ivars().pairing.get() else {
+                return;
+            };
+            match panel.state() {
+                Some(panel::State::EnterCode { peer, .. }) => {
+                    let text = panel.field.stringValue().to_string();
+                    if crate::pairing::PairingCode::parse(text.trim()).is_none() {
+                        let problem = Some(format!("Enter the 6 digits shown on {peer}."));
+                        panel.show(panel::State::EnterCode { peer, problem }, true);
+                        return;
+                    }
+                    if let Some(reply) = self.ivars().code_reply.borrow_mut().take() {
+                        let _ = reply.send(text);
+                    }
+                    panel.show(panel::State::Checking { peer }, false);
+                }
+                Some(panel::State::NoneJoined) => self.add_a_system(),
+                Some(panel::State::Connected { peer }) => {
+                    panel.close();
+                    self.open_window();
+                    if let Some(views) = self.ivars().main.get() {
+                        let key = self.ivars().peers.borrow().iter().find(|p| p.name == peer).map(|p| p.key);
+                        views.arrange.select(key);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        #[unsafe(method(pairingSecondary:))]
+        fn pairing_secondary(&self, _sender: Option<&AnyObject>) {
+            let Some(panel) = self.ivars().pairing.get() else {
+                return;
+            };
+            match panel.state() {
+                Some(panel::State::Waiting { .. }) => {
+                    let _ = self.ivars().controller.send(Command::CancelAdding);
+                }
+                Some(panel::State::EnterCode { .. }) => {
+                    // an empty code ends the exchange on both systems
+                    if let Some(reply) = self.ivars().code_reply.borrow_mut().take() {
+                        let _ = reply.send(String::new());
+                    }
+                    let _ = self.ivars().controller.send(Command::CancelAdding);
+                }
+                _ => {}
+            }
+            panel.close();
+        }
+
+        #[unsafe(method(toggleAlwaysDiscoverable:))]
+        fn toggle_always_discoverable(&self, _sender: Option<&AnyObject>) {
+            let on = self.ivars().settings.borrow().always_discoverable;
+            if on {
+                self.set_always_discoverable(false);
+            } else if self.confirm_always_discoverable() {
+                self.confirm_owner();
+            }
+            self.refresh_always_discoverable();
+        }
+
+        #[unsafe(method(showAbout:))]
+        fn show_about(&self, _sender: Option<&AnyObject>) {
+            let app = NSApplication::sharedApplication(self.mtm());
+            app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+            app.activate();
+            // SAFETY: AppKit's constant keys
+            let keys = unsafe { [NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionVersion] };
+            let options = NSDictionary::<NSAboutPanelOptionKey, AnyObject>::from_slices(
+                &keys,
+                &[
+                    NSString::from_str(env!("CARGO_PKG_VERSION")).as_ref(),
+                    NSString::from_str(crate::COMMIT).as_ref(),
+                ],
+            );
+            // SAFETY: every option is a string, as AppKit expects
+            unsafe { app.orderFrontStandardAboutPanelWithOptions(&options) };
         }
 
         #[unsafe(method(stopSession:))]
@@ -256,33 +357,6 @@ define_class!(
                 permissions::INPUT_MONITORING_SETTINGS,
             ));
             self.refresh_permissions();
-        }
-
-        #[unsafe(method(pickNearby:))]
-        fn pick_nearby(&self, sender: &NSPopUpButton) {
-            // item 0 is the pull-down's title
-            let index = sender.indexOfSelectedItem() - 1;
-            let Some(peer) = usize::try_from(index)
-                .ok()
-                .and_then(|index| self.ivars().nearby.borrow().get(index).cloned())
-            else {
-                return;
-            };
-            if let Some(views) = self.ivars().advanced.get() {
-                views.address.setStringValue(&NSString::from_str(&peer.address));
-            }
-            *self.ivars().nearby_choice.borrow_mut() = peer.key.map(|key| (peer.address.clone(), key.to_hex()));
-        }
-
-        #[unsafe(method(toggleDiscoverable:))]
-        fn toggle_discoverable(&self, _sender: Option<&AnyObject>) {
-            let on = {
-                let mut settings = self.ivars().settings.borrow_mut();
-                settings.discoverable = !settings.discoverable;
-                settings.discoverable
-            };
-            let _ = self.ivars().controller.send(Command::SetDiscoverable(on));
-            self.refresh_discoverable();
         }
 
         #[unsafe(method(toggleShareClipboard:))]
@@ -447,17 +521,6 @@ define_class!(
             }
         }
 
-        #[unsafe(method(toggleCommandQ:))]
-        fn toggle_command_q(&self, _sender: Option<&AnyObject>) {
-            let on = {
-                let mut settings = self.ivars().settings.borrow_mut();
-                settings.command_q_quits = !settings.command_q_quits;
-                settings.command_q_quits
-            };
-            let _ = self.ivars().controller.send(Command::SetCommandQQuits(on));
-            self.refresh_command_q();
-        }
-
         #[unsafe(method(quitDaisy:))]
         fn quit_daisy(&self, _sender: Option<&AnyObject>) {
             let _ = self.ivars().controller.send(Command::Shutdown);
@@ -478,13 +541,16 @@ impl AppDelegate {
             arranged: RefCell::new(None),
             main: OnceCell::new(),
             advanced: OnceCell::new(),
+            adding: Cell::new(false),
             local_name: RefCell::new(controller::computer_name()),
             status_item: OnceCell::new(),
-            menu_status: OnceCell::new(),
             menu_start_stop: OnceCell::new(),
-            main_quit: OnceCell::new(),
-            main_close_q: OnceCell::new(),
-            nearby: RefCell::new(Vec::new()),
+            menu_add: OnceCell::new(),
+            pairing: OnceCell::new(),
+            code_reply: RefCell::new(None),
+            connected_at: Cell::new(None),
+            owner_confirmed: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            always_allowed: Cell::new(true),
             nearby_choice: RefCell::new(None),
             timer: OnceCell::new(),
             walkthrough: OnceCell::new(),
@@ -502,15 +568,15 @@ impl AppDelegate {
         let status_item = status_bar.statusItemWithLength(NSSquareStatusItemLength);
         let menu = menu::new("Daisy", mtm);
 
-        let status = self.menu_item("Stopped", None, false);
+        let open = self.menu_item("Open Daisy", Some(sel!(openDaisy:)), true);
         let start_stop = self.menu_item("Start Sharing", Some(sel!(startOrStop:)), true);
-        let open = self.menu_item("Open Daisy…", Some(sel!(openDaisy:)), true);
-        let quit = self.menu_item("Quit Daisy", Some(sel!(quitDaisy:)), true);
+        let add = self.menu_item("Add a System", Some(sel!(addSystem:)), false);
+        let quit = self.menu_item("Quit", Some(sel!(quitDaisy:)), true);
 
-        menu.addItem(&status);
+        menu.addItem(&open);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         menu.addItem(&start_stop);
-        menu.addItem(&open);
+        menu.addItem(&add);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         menu.addItem(&quit);
         status_item.setMenu(Some(&menu));
@@ -520,8 +586,8 @@ impl AppDelegate {
         }
 
         self.ivars().status_item.set(status_item).ok();
-        self.ivars().menu_status.set(status).ok();
         self.ivars().menu_start_stop.set(start_stop).ok();
+        self.ivars().menu_add.set(add).ok();
     }
 
     /// Offers to move a downloaded Daisy into Applications. Returns whether
@@ -590,8 +656,11 @@ impl AppDelegate {
             parent
         };
 
+        let about = item("About Daisy", Some(sel!(showAbout:)), "");
         let quit = item("Quit Daisy", Some(sel!(quitDaisy:)), "");
-        let close_q = item("Close Windows", Some(sel!(closeWindows:)), "");
+        // Command-Q closes windows; quitting stops sharing, so it is only in
+        // the menu-bar flower and this menu
+        let close_q = item("Close Windows", Some(sel!(closeWindows:)), "q");
         close_q.setHidden(true);
         close_q.setAllowsKeyEquivalentWhenHidden(true);
         let close = item("Close", Some(sel!(closeKeyWindow:)), "w");
@@ -599,7 +668,7 @@ impl AppDelegate {
         escape.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
         escape.setHidden(true);
         escape.setAllowsKeyEquivalentWhenHidden(true);
-        for target in [&quit, &close_q, &close, &escape] {
+        for target in [&about, &quit, &close_q, &close, &escape] {
             // SAFETY: Daisy implements these actions and outlives the menu
             unsafe { target.setTarget(Some(self)) };
         }
@@ -608,7 +677,10 @@ impl AppDelegate {
         redo.setKeyEquivalentModifierMask(NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
 
         let main = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(""));
-        main.addItem(&submenu("Daisy", &[&quit, &close_q]));
+        main.addItem(&submenu(
+            "Daisy",
+            &[&about, &NSMenuItem::separatorItem(mtm), &quit, &close_q],
+        ));
         main.addItem(&submenu("File", &[&close, &escape]));
         main.addItem(&submenu(
             "Edit",
@@ -623,9 +695,6 @@ impl AppDelegate {
             ],
         ));
         NSApplication::sharedApplication(mtm).setMainMenu(Some(&main));
-        self.ivars().main_quit.set(quit).ok();
-        self.ivars().main_close_q.set(close_q).ok();
-        self.refresh_command_q();
     }
 
     /// Daisy's own windows, open or not.
@@ -682,39 +751,23 @@ impl AppDelegate {
         views.show(step, self.ivars().setup_asked.get());
     }
 
-    fn refresh_command_q(&self) {
-        let quits = self.ivars().settings.borrow().command_q_quits;
-        if let Some(views) = self.ivars().main.get() {
-            views.command_q.set_on(quits);
-        }
-        let (quit, close) = if quits { ("q", "") } else { ("", "q") };
-        if let Some(item) = self.ivars().main_quit.get() {
-            item.setKeyEquivalent(&NSString::from_str(quit));
-        }
-        if let Some(item) = self.ivars().main_close_q.get() {
-            item.setKeyEquivalent(&NSString::from_str(close));
-        }
-    }
-
     fn build_window(&self) {
         let main = window::MainViews::new(self.mtm(), self);
         main.window.setDelegate(Some(ProtocolObject::from_ref(self)));
         self.ivars().main.set(main).ok();
+        self.ivars().pairing.set(panel::Panel::new(self.mtm(), self)).ok();
         self.ivars()
             .advanced
             .set(window::AdvancedViews::new(self.mtm(), self))
             .ok();
         self.refresh_launch_at_login();
         self.refresh_share_clipboard();
-        self.refresh_discoverable();
-        self.refresh_command_q();
         self.rebuild_peers_list();
         self.render_status();
     }
 
     fn handle_event(&self, event: Event) {
         match event {
-            Event::Nearby(nearby) => self.show_nearby(nearby),
             Event::Link { key, link } => {
                 self.ivars().links.borrow_mut().insert(key, link);
                 self.render_status();
@@ -729,53 +782,73 @@ impl AppDelegate {
                 peers,
                 first_run,
                 me,
+                always_discoverable_allowed,
             } => {
                 self.ivars().me.set(Some(me));
+                self.ivars().always_allowed.set(always_discoverable_allowed);
                 *self.ivars().settings.borrow_mut() = settings.clone();
-                self.refresh_discoverable();
                 self.refresh_share_clipboard();
-                self.refresh_command_q();
+                self.refresh_always_discoverable();
                 *self.ivars().peers.borrow_mut() = peers;
                 self.apply_settings(&settings.last_session);
                 self.rebuild_peers_list();
                 self.refresh_permissions();
                 self.render_status();
+                if first_run {
+                    self.open_at_login();
+                }
                 if first_run && self.setup_step() == Step::Done {
                     self.open_window();
                 }
+                if settings.sharing && self.setup_step() == Step::Done {
+                    self.start();
+                }
             }
             Event::Status(status) => self.apply_status(status),
+            Event::Adding(adding) => {
+                self.ivars().adding.set(adding);
+                if !adding
+                    && let Some(panel) = self.ivars().pairing.get()
+                    && matches!(panel.state(), Some(panel::State::Waiting { .. }))
+                {
+                    panel.show(panel::State::NoneJoined, false);
+                }
+                self.render_status();
+                self.update_action_buttons();
+            }
             Event::Peers(peers) => {
                 *self.ivars().peers.borrow_mut() = peers;
                 self.rebuild_peers_list();
                 self.update_action_buttons();
             }
             Event::ShowPairingCode { peer, code } => {
-                self.show_alert(
-                    &format!("Enter {code} on {peer}"),
-                    "This one-time code is only for pairing. Daisy never asks you to compare codes by eye.",
-                    NSAlertStyle::Informational,
-                );
+                if let Some(panel) = self.ivars().pairing.get() {
+                    panel.show(panel::State::ShowCode { peer, code }, false);
+                }
             }
             Event::AskPairingCode { peer, reply } => {
-                let answer = self.ask_for_pairing_code(&peer);
-                let _ = reply.send(answer.unwrap_or_default());
+                *self.ivars().code_reply.borrow_mut() = Some(reply);
+                if let Some(panel) = self.ivars().pairing.get() {
+                    // only take the keyboard when this system asked to add one
+                    let asked = matches!(panel.state(), Some(panel::State::Waiting { .. }))
+                        || NSApplication::sharedApplication(self.mtm()).isActive();
+                    panel.show(panel::State::EnterCode { peer, problem: None }, asked);
+                }
             }
-            Event::Paired { peer, key, policy } => {
-                self.open_window();
-                let chosen = trust_form::ask(
-                    self.mtm(),
-                    self,
-                    &format!("Paired with {peer}. Trust it for how long?"),
-                    "Done",
-                    None,
-                    policy,
-                );
-                if let Some(chosen) = chosen.filter(|chosen| *chosen != policy) {
-                    let _ = self.ivars().controller.send(Command::SetTrust {
-                        selector: key.to_hex(),
-                        policy: chosen,
-                    });
+            Event::Paired { peer, key: _ } => {
+                if let Some(panel) = self.ivars().pairing.get() {
+                    panel.show(panel::State::Connected { peer }, false);
+                    self.ivars().connected_at.set(Some(std::time::Instant::now()));
+                }
+            }
+            Event::CodeMismatch => {
+                if let Some(panel) = self.ivars().pairing.get()
+                    && matches!(
+                        panel.state(),
+                        Some(panel::State::ShowCode { .. } | panel::State::Checking { .. })
+                    )
+                {
+                    panel.show(panel::State::Mismatch, false);
                 }
             }
             Event::Notice { title, detail } => {
@@ -796,12 +869,8 @@ impl AppDelegate {
                 *self.ivars().arranged.borrow_mut() = None;
             }
         }
-        if let Some(item) = self.ivars().menu_start_stop.get() {
-            item.setTitle(&NSString::from_str(if is_active(&status) {
-                "Stop Sharing"
-            } else {
-                "Start Sharing"
-            }));
+        if !matches!(status, Status::Connected { .. }) {
+            self.ivars().adding.set(false);
         }
         let problem = matches!(status, Status::Problem { .. });
         *self.ivars().status.borrow_mut() = status;
@@ -815,7 +884,10 @@ impl AppDelegate {
     fn render_status(&self) {
         let status = self.ivars().status.borrow();
         let links = self.ivars().links.borrow();
-        let copy = status_copy(&status, &links);
+        let mut copy = status_copy(&status, &links);
+        if self.ivars().adding.get() && matches!(*status, Status::Connected { .. }) {
+            copy.detail = "Waiting for a new system. Click Start Sharing on it.".to_owned();
+        }
         if let Some(views) = self.ivars().main.get()
             && let Some(me) = self.ivars().me.get()
         {
@@ -837,9 +909,6 @@ impl AppDelegate {
             views.detail.setStringValue(&NSString::from_str(&copy.detail));
             views.arrange.show(shown);
         }
-        if let Some(item) = self.ivars().menu_status.get() {
-            item.setTitle(&NSString::from_str(&copy.menu));
-        }
         if let Some(item) = self.ivars().status_item.get()
             && let Some(button) = item.button(self.mtm())
         {
@@ -847,7 +916,118 @@ impl AppDelegate {
         }
     }
 
-    fn start(&self, allow_pairing: bool) {
+    /// Opens this group to a new system for a short while, from the menu.
+    fn add_a_system(&self) {
+        let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
+        let nearby = self.ivars().settings.borrow().last_session.connection == Connection::Automatic;
+        if !is_active(&self.ivars().status.borrow()) || always || !nearby {
+            return;
+        }
+        let _ = self.ivars().controller.send(Command::AddSystem);
+        if let Some(panel) = self.ivars().pairing.get() {
+            let until = std::time::Instant::now() + controller::ADD_SYSTEM_WINDOW;
+            panel.show(panel::State::Waiting { until }, true);
+        }
+    }
+
+    /// Keeps the pairing panel current: its countdown, and closing
+    /// Connected on its own.
+    fn tick_pairing(&self) {
+        let Some(panel) = self.ivars().pairing.get() else {
+            return;
+        };
+        panel.tick();
+        // an exchange that ended some other way leaves nothing to wait for
+        let stale = match panel.state() {
+            // no session reports the window closing for a typed address
+            Some(panel::State::Waiting { until }) if std::time::Instant::now() >= until + WAITING_GRACE => {
+                panel.show(panel::State::NoneJoined, false);
+                false
+            }
+            Some(panel::State::Checking { .. }) => panel.age() >= CHECKING_SHOWN,
+            Some(panel::State::ShowCode { .. } | panel::State::EnterCode { .. }) => panel.age() >= CODE_SHOWN,
+            _ => false,
+        };
+        if stale {
+            panel.close();
+        }
+        let shown_for = self.ivars().connected_at.get().map(|at| at.elapsed());
+        if shown_for.is_some_and(|shown| shown >= CONNECTED_SHOWN) {
+            self.ivars().connected_at.set(None);
+            if matches!(panel.state(), Some(panel::State::Connected { .. })) && !panel.panel.isKeyWindow() {
+                panel.close();
+            }
+        }
+        if let Some(confirmed) = self
+            .ivars()
+            .owner_confirmed
+            .lock()
+            .ok()
+            .and_then(|mut result| result.take())
+        {
+            if confirmed {
+                self.set_always_discoverable(true);
+            }
+            self.refresh_always_discoverable();
+        }
+    }
+
+    fn confirm_always_discoverable(&self) -> bool {
+        if !self.ivars().always_allowed.get() {
+            self.show_alert(
+                "Always Discoverable is turned off by your organization",
+                "Use Add a System in the menu bar to add a system.",
+                NSAlertStyle::Informational,
+            );
+            return false;
+        }
+        let alert = NSAlert::new(self.mtm());
+        alert.setMessageText(&NSString::from_str("Make this system always discoverable?"));
+        alert.setInformativeText(&NSString::from_str(
+            "While it is sharing, nearby systems running Daisy can ask to join without you clicking Add a System. They still need the code.",
+        ));
+        alert.addButtonWithTitle(&NSString::from_str("Turn On"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        alert.runModal() == NSAlertFirstButtonReturn
+    }
+
+    /// Asks for Touch ID or the login password. The answer arrives on
+    /// another thread and is picked up by `tick_pairing`.
+    fn confirm_owner(&self) {
+        use objc2_local_authentication::{LAContext, LAPolicy};
+        let result = self.ivars().owner_confirmed.clone();
+        let reply = block2::RcBlock::new(
+            move |ok: objc2::runtime::Bool, _error: *mut objc2_foundation::NSError| {
+                if let Ok(mut slot) = result.lock() {
+                    *slot = Some(ok.as_bool());
+                }
+            },
+        );
+        // SAFETY: the reply only stores a bool behind a mutex, so it may run
+        // on any thread
+        unsafe {
+            LAContext::new().evaluatePolicy_localizedReason_reply(
+                LAPolicy::DeviceOwnerAuthentication,
+                &NSString::from_str("turn on Always Discoverable"),
+                &reply,
+            );
+        }
+    }
+
+    fn set_always_discoverable(&self, on: bool) {
+        self.ivars().settings.borrow_mut().always_discoverable = on;
+        let _ = self.ivars().controller.send(Command::SetAlwaysDiscoverable(on));
+        self.update_action_buttons();
+    }
+
+    fn refresh_always_discoverable(&self) {
+        if let Some(views) = self.ivars().advanced.get() {
+            let on = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
+            views.always.set_on(on);
+        }
+    }
+
+    fn start(&self) {
         if self.setup_step() != Step::Done {
             self.open_setup();
             return;
@@ -857,7 +1037,6 @@ impl AppDelegate {
         };
         let _ = self.ivars().controller.send(Command::Start {
             settings,
-            allow_pairing,
             side_chosen: false,
         });
     }
@@ -908,7 +1087,7 @@ impl AppDelegate {
     fn refresh_permissions(&self) {
         let accessibility = permissions::accessibility();
         let input = permissions::input_monitoring();
-        if let Some(views) = self.ivars().main.get() {
+        if let Some(views) = self.ivars().advanced.get() {
             views.show_permissions([accessibility == Access::Granted, input == Access::Granted]);
         }
         self.update_action_buttons();
@@ -921,24 +1100,26 @@ impl AppDelegate {
     fn update_action_buttons(&self) {
         let active = is_active(&self.ivars().status.borrow());
         let can_start = !active && self.permissions_granted();
-        let has_peers = !self.ivars().peers.borrow().is_empty();
         if let Some(views) = self.ivars().main.get() {
             views.start.setEnabled(can_start);
             views.start.setHidden(active);
-            views
-                .start
-                .setKeyEquivalent(&NSString::from_str(if has_peers { "\r" } else { "" }));
-            self.style_action_button(&views.start, has_peers);
-            views.pair.setEnabled(can_start);
-            views
-                .pair
-                .setKeyEquivalent(&NSString::from_str(if has_peers { "" } else { "\r" }));
-            self.style_action_button(&views.pair, !has_peers);
+            views.start.setKeyEquivalent(&NSString::from_str("\r"));
+            self.style_action_button(&views.start, true);
             views.stop.setEnabled(active);
             views.stop.setHidden(!active);
         }
         if let Some(item) = self.ivars().menu_start_stop.get() {
             item.setEnabled(active || can_start);
+            item.setTitle(&NSString::from_str(if active {
+                "Stop Sharing"
+            } else {
+                "Start Sharing"
+            }));
+        }
+        if let Some(item) = self.ivars().menu_add.get() {
+            let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
+            let nearby = self.ivars().settings.borrow().last_session.connection == Connection::Automatic;
+            item.setEnabled(active && nearby && !always && !self.ivars().adding.get());
         }
     }
 
@@ -957,7 +1138,8 @@ impl AppDelegate {
                     .map(|other| other.name.as_str());
                 window::PeerRow {
                     name: peer.name.clone(),
-                    detail: peer_detail(&peer.key.fingerprint(), introducer, links.get(&peer.key)),
+                    detail: peer_detail(introducer, links.get(&peer.key)),
+                    fingerprint: peer.key.fingerprint(),
                     trust: peer.policy.label(),
                 }
             })
@@ -965,37 +1147,26 @@ impl AppDelegate {
         views.show_peers(&rows, self);
     }
 
-    fn refresh_discoverable(&self) {
-        if let Some(views) = self.ivars().advanced.get() {
-            views.discoverable.set_on(self.ivars().settings.borrow().discoverable);
-        }
-    }
-
-    fn show_nearby(&self, nearby: Vec<controller::Nearby>) {
-        if let Some(popup) = self.ivars().advanced.get().map(|views| &views.nearby) {
-            popup.removeAllItems();
-            popup.addItemWithTitle(&NSString::from_str("Nearby"));
-            if nearby.is_empty() {
-                popup.addItemWithTitle(&NSString::from_str("No peers found"));
-                if let Some(item) = popup.lastItem() {
-                    item.setEnabled(false);
-                }
-            }
-            for peer in &nearby {
-                popup.addItemWithTitle(&NSString::from_str(&nearby_title(peer)));
-            }
-        }
-        *self.ivars().nearby.borrow_mut() = nearby;
-    }
-
     fn refresh_share_clipboard(&self) {
-        if let Some(views) = self.ivars().main.get() {
+        if let Some(views) = self.ivars().advanced.get() {
             views.clipboard.set_on(self.ivars().settings.borrow().share_clipboard);
         }
     }
 
+    /// Registers Daisy to open at login; on by default, so done on first run.
+    fn open_at_login(&self) {
+        // SAFETY: a plain status query and registration
+        let service = unsafe { SMAppService::mainAppService() };
+        if unsafe { service.status() } != SMAppServiceStatus::Enabled
+            && let Err(error) = unsafe { service.registerAndReturnError() }
+        {
+            tracing::warn!(error = %error.localizedDescription(), "open at login could not be turned on");
+        }
+        self.refresh_launch_at_login();
+    }
+
     fn refresh_launch_at_login(&self) {
-        let Some(views) = self.ivars().main.get() else {
+        let Some(views) = self.ivars().advanced.get() else {
             return;
         };
         // SAFETY: a plain status query
@@ -1019,27 +1190,10 @@ impl AppDelegate {
         let app = NSApplication::sharedApplication(self.mtm());
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         window.makeKeyAndOrderFront(None);
+        // the arrangement would otherwise take focus and show its focus ring
+        // to people not using the keyboard; Tab still reaches it
+        window.makeFirstResponder(None);
         app.activate();
-    }
-
-    fn ask_for_pairing_code(&self, peer: &str) -> Option<String> {
-        let alert = NSAlert::new(self.mtm());
-        alert.setMessageText(&NSString::from_str(&format!("Enter the code shown on {peer}")));
-        alert.setInformativeText(&NSString::from_str(
-            "The code has six digits. It is used directly to secure pairing.",
-        ));
-        alert.setAlertStyle(NSAlertStyle::Informational);
-        alert.addButtonWithTitle(&NSString::from_str("Pair"));
-        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-        let field = NSTextField::textFieldWithString(&NSString::from_str(""), self.mtm());
-        field.setPlaceholderString(Some(&NSString::from_str("000-000")));
-        field.setFrame(frame(0.0, 0.0, 240.0, 28.0));
-        alert.setAccessoryView(Some(&field));
-        if alert.runModal() == NSAlertFirstButtonReturn {
-            Some(field.stringValue().to_string())
-        } else {
-            None
-        }
     }
 
     fn show_alert(&self, title: &str, detail: &str, style: NSAlertStyle) {
@@ -1108,8 +1262,8 @@ pub fn run(home: PathBuf, name: String) -> Result<()> {
 
 /// The line under a peer's name: its fingerprint, who introduced it, and
 /// how its link is doing while it runs.
-fn peer_detail(fingerprint: &str, introducer: Option<&str>, link: Option<&Link>) -> String {
-    let mut parts = vec![fingerprint.to_owned()];
+fn peer_detail(introducer: Option<&str>, link: Option<&Link>) -> String {
+    let mut parts = Vec::new();
     if let Some(introducer) = introducer {
         parts.push(format!("via {introducer}"));
     }
@@ -1119,7 +1273,7 @@ fn peer_detail(fingerprint: &str, introducer: Option<&str>, link: Option<&Link>)
             latency_ms: Some(ms), ..
         }) => parts.push(format!("Connected, {ms} ms")),
         Some(_) => parts.push("Connected".to_owned()),
-        None => {}
+        None => parts.push("Not connected".to_owned()),
     }
     parts.join(" · ")
 }
@@ -1143,19 +1297,24 @@ fn status_copy(status: &Status, links: &std::collections::BTreeMap<crate::identi
         connected: false,
     };
     match status {
-        Status::Idle => plain("Stopped".to_owned(), "Start sharing, or pair a new peer.".to_owned()),
+        Status::Idle => plain(
+            "Not Sharing".to_owned(),
+            "Click Start Sharing to use this keyboard on other systems.".to_owned(),
+        ),
         Status::Starting => plain("Starting…".to_owned(), "Daisy is preparing the connection.".to_owned()),
         Status::Waiting {
-            port,
-            pairing,
-            looking_for,
+            pairing, looking_for, ..
         } => plain(
             match (pairing, looking_for) {
-                (true, _) => "Waiting to pair".to_owned(),
+                (true, _) => "Looking for another system".to_owned(),
                 (false, Some(peer)) => format!("Looking for {peer}"),
                 (false, None) => "Looking for peers".to_owned(),
             },
-            format!("This system is available on port {port}."),
+            if *pairing {
+                "Click Start Sharing on it.".to_owned()
+            } else {
+                "Daisy connects when a peer is on this network.".to_owned()
+            },
         ),
         Status::Connecting { address, peer } => plain(
             peer.as_ref()
@@ -1230,13 +1389,6 @@ fn open_settings(pane: Option<&str>) {
     let Some(pane) = pane else { return };
     if let Some(url) = NSURL::URLWithString(&NSString::from_str(pane)) {
         NSWorkspace::sharedWorkspace().openURL(&url);
-    }
-}
-
-fn nearby_title(peer: &controller::Nearby) -> String {
-    match &peer.name {
-        Some(name) => name.clone(),
-        None => format!("Peer open to pairing at {}", peer.address),
     }
 }
 
@@ -1315,15 +1467,12 @@ mod tests {
 
     #[test]
     fn a_peer_row_says_who_introduced_it_and_how_its_link_is() {
-        assert_eq!(peer_detail("4074-8321", None, None), "4074-8321");
+        assert_eq!(peer_detail(None, None), "Not connected");
         assert_eq!(
-            peer_detail("4074-8321", Some("Laptop"), Some(&measured(Some(12), false))),
-            "4074-8321 · via Laptop · Connected, 12 ms"
+            peer_detail(Some("Laptop"), Some(&measured(Some(12), false))),
+            "via Laptop · Connected, 12 ms"
         );
-        assert_eq!(
-            peer_detail("4074-8321", None, Some(&measured(None, true))),
-            "4074-8321 · Locked"
-        );
+        assert_eq!(peer_detail(None, Some(&measured(None, true))), "Locked");
     }
 
     #[test]
@@ -1346,7 +1495,7 @@ mod tests {
             )
             .title
         };
-        assert_eq!(waiting(true, Some("Studio")), "Waiting to pair");
+        assert_eq!(waiting(true, Some("Studio")), "Looking for another system");
         assert_eq!(waiting(false, Some("Studio")), "Looking for Studio");
         assert_eq!(waiting(false, None), "Looking for peers");
     }
@@ -1379,6 +1528,6 @@ mod tests {
             &Default::default(),
         );
         assert_eq!(unknown.title, "Connecting…");
-        assert_eq!(status_copy(&Status::Idle, &Default::default()).title, "Stopped");
+        assert_eq!(status_copy(&Status::Idle, &Default::default()).title, "Not Sharing");
     }
 }

@@ -16,12 +16,11 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
-use crate::discovery;
 use crate::identity::{Identity, PublicKey};
 use crate::input::Side;
 use crate::pairing::{PairingCode, PairingPrompt};
 use crate::peers::{Peer, PeerStore};
-use crate::service::{self, ServiceObserver};
+use crate::service::{self, Listening, ServiceObserver};
 use crate::session::{Mismatch, SessionError};
 use crate::trust::{self, Policy};
 
@@ -68,12 +67,12 @@ pub struct AppSettings {
     /// Send and receive the clipboard when control crosses.
     #[serde(default = "default_share_clipboard")]
     pub share_clipboard: bool,
-    /// Advertise this system with Bonjour while it waits for a connection.
-    #[serde(default = "default_discoverable")]
-    pub discoverable: bool,
-    /// Command-Q quits Daisy, rather than closing its windows.
+    /// Accept a new system whenever sharing, not only when asked.
     #[serde(default)]
-    pub command_q_quits: bool,
+    pub always_discoverable: bool,
+    /// Sharing was on when Daisy last ran, so it starts again.
+    #[serde(default)]
+    pub sharing: bool,
 }
 
 impl Default for AppSettings {
@@ -81,14 +80,10 @@ impl Default for AppSettings {
         Self {
             last_session: SessionSettings::default(),
             share_clipboard: default_share_clipboard(),
-            discoverable: default_discoverable(),
-            command_q_quits: false,
+            always_discoverable: false,
+            sharing: false,
         }
     }
-}
-
-fn default_discoverable() -> bool {
-    true
 }
 
 fn default_share_clipboard() -> bool {
@@ -99,7 +94,6 @@ fn default_share_clipboard() -> bool {
 pub enum Command {
     Start {
         settings: SessionSettings,
-        allow_pairing: bool,
         /// The screen edge was chosen for this start, rather than left as saved.
         side_chosen: bool,
     },
@@ -114,10 +108,12 @@ pub enum Command {
     Refresh,
     /// Turn clipboard sharing on or off, including for a running session.
     SetClipboard(bool),
-    /// Turn Bonjour advertising on or off, including while waiting.
-    SetDiscoverable(bool),
-    /// Choose whether Command-Q quits Daisy or closes its windows.
-    SetCommandQQuits(bool),
+    /// Accept a new system for `ADD_SYSTEM_WINDOW`.
+    AddSystem,
+    /// Stop accepting a new system early.
+    CancelAdding,
+    /// Accept a new system whenever sharing.
+    SetAlwaysDiscoverable(bool),
     /// Put a member's displays where a person dropped them in the group.
     Place(PublicKey, crate::layout::Offset),
     Shutdown,
@@ -160,8 +156,12 @@ pub enum Event {
         first_run: bool,
         /// This system's key.
         me: PublicKey,
+        /// Whether a configuration profile allows Always Discoverable.
+        always_discoverable_allowed: bool,
     },
     Status(Status),
+    /// Whether the running group is open to a new system.
+    Adding(bool),
     Peers(Vec<Peer>),
     ShowPairingCode {
         peer: String,
@@ -171,17 +171,17 @@ pub enum Event {
         peer: String,
         reply: oneshot::Sender<String>,
     },
+    /// A new peer was paired and trusted with the saved default.
     Paired {
         peer: String,
         key: PublicKey,
-        policy: Policy,
     },
+    /// A pairing ended because the code typed did not match.
+    CodeMismatch,
     Notice {
         title: String,
         detail: String,
     },
-    /// Peers, and systems open to pairing, found on the network.
-    Nearby(Vec<Nearby>),
     /// How one peer's link is doing.
     Link {
         key: PublicKey,
@@ -189,15 +189,6 @@ pub enum Event {
     },
     /// Where every member's displays sit, while the group runs.
     Arranged(crate::share::Layout),
-}
-
-/// A system found on the network, as the interface shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Nearby {
-    /// The peer's name, or `None` for a system open to pairing.
-    pub name: Option<String>,
-    pub key: Option<PublicKey>,
-    pub address: String,
 }
 
 pub struct Handle {
@@ -275,8 +266,16 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     }
     let mut stored = settings.clone();
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
-    let (share_discoverable, discoverable) = watch::channel(stored.discoverable);
+    // always advertised while sharing; the advertisement names no one
+    let (_discoverable, discoverable) = watch::channel(true);
     let (arrange, arrangement) = watch::channel(None);
+    let base_listening = |stored: &AppSettings| {
+        listening(
+            stored.always_discoverable,
+            crate::macos::managed::always_discoverable_allowed(),
+        )
+    };
+    let (listen, listening) = watch::channel(base_listening(&stored));
     let me = match Identity::load_or_create(&home.join("identity")) {
         Ok(identity) => identity.public_key(),
         Err(error) => {
@@ -284,13 +283,13 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             return;
         }
     };
-    tokio::spawn(browse_nearby(home.clone(), events.clone()));
     if events
         .send(Event::Ready {
             settings,
             peers,
             first_run,
             me,
+            always_discoverable_allowed: crate::macos::managed::always_discoverable_allowed(),
         })
         .is_err()
     {
@@ -300,15 +299,12 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let mut session: Option<tokio::task::JoinHandle<()>> = None;
     while let Some(command) = commands.recv().await {
         match command {
-            Command::Start {
-                settings,
-                allow_pairing,
-                side_chosen,
-            } => {
+            Command::Start { settings, side_chosen } => {
                 if let Some(running) = session.take() {
                     running.abort();
                 }
                 stored.last_session = settings.clone();
+                stored.sharing = true;
                 if let Err(error) = save_settings(&home, &stored) {
                     tracing::error!(error = ?error, "setup could not be saved");
                     let _ = send_problem(
@@ -322,30 +318,25 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 let session_home = home.clone();
                 let session_name = name.clone();
                 let session_events = events.clone();
-                let session_clipboard = clipboard.clone();
-                let session_discoverable = discoverable.clone();
-                let session_arrangement = arrangement.clone();
+                listen.send_replace(base_listening(&stored));
+                let live = Live {
+                    clipboard: clipboard.clone(),
+                    discoverable: discoverable.clone(),
+                    arrangement: arrangement.clone(),
+                    listening: listening.clone(),
+                };
                 session = Some(tokio::spawn(async move {
-                    let start = Start {
-                        settings,
-                        allow_pairing,
-                        side_chosen,
-                    };
-                    run_session(
-                        session_home,
-                        session_name,
-                        start,
-                        session_clipboard,
-                        session_discoverable,
-                        session_arrangement,
-                        session_events,
-                    )
-                    .await;
+                    let start = Start { settings, side_chosen };
+                    run_session(session_home, session_name, start, live, session_events).await;
                 }));
             }
             Command::Stop => {
                 if let Some(running) = session.take() {
                     running.abort();
+                }
+                stored.sharing = false;
+                if let Err(error) = save_settings(&home, &stored) {
+                    tracing::error!(error = ?error, "sharing state could not be saved");
                 }
                 let _ = events.send(Event::Status(Status::Idle));
             }
@@ -405,31 +396,29 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     );
                 }
             }
+            Command::AddSystem => {
+                listen.send_replace(Listening::For(ADD_SYSTEM_WINDOW));
+            }
+            Command::CancelAdding => {
+                listen.send_replace(base_listening(&stored));
+            }
+            Command::SetAlwaysDiscoverable(on) => {
+                if on && !crate::macos::managed::always_discoverable_allowed() {
+                    continue;
+                }
+                stored.always_discoverable = on;
+                listen.send_replace(base_listening(&stored));
+                if let Err(error) = save_settings(&home, &stored) {
+                    tracing::error!(error = ?error, "Always Discoverable could not be saved");
+                    let _ = send_problem(
+                        &events,
+                        "Always Discoverable could not be saved",
+                        "Check that Daisy can write its data folder, then try again.".to_owned(),
+                    );
+                }
+            }
             Command::Place(key, offset) => {
                 arrange.send_replace(Some((key, offset)));
-            }
-            Command::SetCommandQQuits(on) => {
-                stored.command_q_quits = on;
-                if let Err(error) = save_settings(&home, &stored) {
-                    tracing::error!(error = ?error, "Command-Q setting could not be saved");
-                    let _ = send_problem(
-                        &events,
-                        "Command-Q setting could not be saved",
-                        "Check that Daisy can write its data folder, then try again.".to_owned(),
-                    );
-                }
-            }
-            Command::SetDiscoverable(on) => {
-                stored.discoverable = on;
-                share_discoverable.send_replace(on);
-                if let Err(error) = save_settings(&home, &stored) {
-                    tracing::error!(error = ?error, "discovery setting could not be saved");
-                    let _ = send_problem(
-                        &events,
-                        "Discovery setting could not be saved",
-                        "Check that Daisy can write its data folder, then try again.".to_owned(),
-                    );
-                }
             }
             Command::Shutdown => {
                 if let Some(running) = session.take() {
@@ -441,85 +430,43 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     }
 }
 
-/// How often the Nearby list re-reads which peers are trusted, so a peer
-/// forgotten, re-trusted, newly paired or expired is shown correctly even
-/// when the network is quiet.
-const NEARBY_TRUST_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// The Nearby list for the systems heard on the network, given this system's
-/// peers now. Only trusted peers are named; others appear only while
-/// open to pairing.
-fn nearby(found: Vec<discovery::Found>, peers: &[Peer]) -> Vec<Nearby> {
-    let mut nearby: Vec<Nearby> = found
-        .into_iter()
-        .map(|heard| match heard.seen {
-            discovery::Seen::Paired(key) => Nearby {
-                name: peers.iter().find(|peer| peer.key == key).map(|peer| peer.name.clone()),
-                key: Some(key),
-                address: heard.address.to_string(),
-            },
-            discovery::Seen::Pairing => Nearby {
-                name: None,
-                key: None,
-                address: heard.address.to_string(),
-            },
-        })
-        .collect();
-    nearby.sort_by(|a, b| (a.name.is_none(), &a.name, &a.address).cmp(&(b.name.is_none(), &b.name, &b.address)));
-    nearby
-}
-
-/// Reports the systems found on the network whenever that list changes, from
-/// either the network or this system's trust.
-async fn browse_nearby(home: PathBuf, events: Sender<Event>) {
-    let mut browser = match discovery::Browser::start() {
-        Ok(browser) => browser,
-        Err(error) => {
-            tracing::warn!(error = format!("{error:#}"), "could not browse with Bonjour");
-            return;
-        }
-    };
-    let mut shown = None;
-    let mut check = tokio::time::interval(NEARBY_TRUST_CHECK);
-    loop {
-        tokio::select! {
-            more = browser.changed() => if !more { return },
-            _ = check.tick() => {}
-        }
-        let peers = list_peers(&home).unwrap_or_default();
-        let keys: Vec<PublicKey> = peers.iter().map(|peer| peer.key).collect();
-        let list = nearby(browser.current(&keys), &peers);
-        if shown.as_ref() == Some(&list) {
-            continue;
-        }
-        if events.send(Event::Nearby(list.clone())).is_err() {
-            return;
-        }
-        shown = Some(list);
-    }
-}
-
 /// One press of Start, as `Command::Start` carries it.
 struct Start {
     settings: SessionSettings,
-    allow_pairing: bool,
     side_chosen: bool,
 }
 
-async fn run_session(
-    home: PathBuf,
-    name: String,
-    start: Start,
+/// When a running group accepts a new system, unless Add a System asks:
+/// always only if chosen here and allowed by any configuration profile.
+fn listening(always_discoverable: bool, allowed: bool) -> Listening {
+    if always_discoverable && allowed {
+        Listening::Always
+    } else {
+        Listening::Closed
+    }
+}
+
+/// How long Add a System accepts a new system.
+pub const ADD_SYSTEM_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What may change while a session runs.
+struct Live {
     clipboard: watch::Receiver<bool>,
     discoverable: watch::Receiver<bool>,
     arrangement: watch::Receiver<Option<crate::share::Placing>>,
-    events: Sender<Event>,
-) {
-    let Start {
-        settings,
-        allow_pairing,
-        side_chosen,
-    } = start;
+    listening: watch::Receiver<Listening>,
+}
+
+async fn run_session(home: PathBuf, name: String, start: Start, live: Live, events: Sender<Event>) {
+    let Live {
+        clipboard,
+        discoverable,
+        arrangement,
+        mut listening,
+    } = live;
+    // the session starts from the current choice; only later ones are news
+    listening.mark_unchanged();
+    let Start { settings, side_chosen } = start;
     let result = async {
         let identity = Identity::load_or_create(&home.join("identity"))?;
         let signer = crate::introduce::Signer::load_or_create(&home.join("signing"))?;
@@ -533,8 +480,9 @@ async fn run_session(
             waiting: None,
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
+            adding: false,
         };
-        let pairing = allow_pairing.then_some(settings.trust);
+        let pairing = Some(settings.trust);
         let config = service::SessionConfig {
             identity: &identity,
             peers: &peers,
@@ -545,6 +493,7 @@ async fn run_session(
             clipboard: &clipboard,
             discoverable: &discoverable,
             arrangement: Some(&arrangement),
+            listening: Some(&listening),
             signer: &signer,
         };
         match settings.connection {
@@ -609,6 +558,8 @@ struct ControllerObserver {
     /// The members with a running link, in the order they joined, and how
     /// many links each has: a second connection briefly overlaps the first.
     linked: Vec<(String, PublicKey, usize)>,
+    /// Whether pairing was opened while the group runs.
+    adding: bool,
 }
 
 impl ControllerObserver {
@@ -711,18 +662,25 @@ impl ServiceObserver for ControllerObserver {
         }
     }
 
+    fn pairing_opened(&mut self) {
+        self.adding = true;
+        let _ = self.events.send(Event::Adding(true));
+    }
+
     fn pairing_closed(&mut self) {
+        if std::mem::take(&mut self.adding) {
+            let _ = self.events.send(Event::Adding(false));
+        }
         if let Some((port, _)) = self.waiting {
             self.waiting = Some((port, false));
             self.send_waiting(port, false);
         }
     }
 
-    fn paired(&mut self, peer: &str, key: PublicKey, policy: Policy) {
+    fn paired(&mut self, peer: &str, key: PublicKey, _policy: Policy) {
         let _ = self.events.send(Event::Paired {
             peer: peer.to_owned(),
             key,
-            policy,
         });
         if let Ok(peers) = list_peers(&self.home) {
             let _ = self.events.send(Event::Peers(peers));
@@ -740,12 +698,11 @@ impl ServiceObserver for ControllerObserver {
             }
             return;
         }
-        let _ = self.events.send(Event::Notice {
-            title: "A peer could not connect".to_owned(),
-            detail: format!(
-                "Daisy is still waiting. If {address} is the other system, choose Pair a New Peer on both systems and try again."
-            ),
-        });
+        // anything else is retried, and the status already says so; an
+        // alert here would come back on every retry
+        if error.chain().any(|cause| cause.is::<crate::pairing::CodeMismatch>()) {
+            let _ = self.events.send(Event::CodeMismatch);
+        }
     }
 }
 
@@ -902,6 +859,7 @@ mod tests {
             waiting: Some((service::DEFAULT_PORT, false)),
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
+            adding: false,
         };
         let studio = Identity::generate().unwrap().public_key();
         let desk = Identity::generate().unwrap().public_key();
@@ -927,34 +885,6 @@ mod tests {
     }
 
     #[test]
-    fn nearby_names_only_trusted_peers() {
-        let studio = Identity::generate().unwrap().public_key();
-        let address: std::net::SocketAddr = "192.168.1.9:24850".parse().unwrap();
-        let found = vec![discovery::Found {
-            election: [0; 16],
-            seen: discovery::Seen::Paired(studio),
-            address,
-        }];
-        let peer = Peer {
-            side: Side::Right,
-            side_chosen: 0,
-            name: "Studio".into(),
-            key: studio,
-            policy: Policy::IDLE,
-            paired_at: 0,
-            last_seen: 0,
-            signing: None,
-            introduced_by: None,
-        };
-        let list = nearby(found.clone(), &[peer]);
-        assert_eq!(list[0].name.as_deref(), Some("Studio"));
-        assert_eq!(list[0].address, "192.168.1.9:24850");
-        // a key that is no longer among the peers is never named
-        assert_eq!(nearby(found, &[])[0].name, None);
-    }
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
     fn settings_round_trip_and_default_to_simple_path() {
         let directory = tempfile::tempdir().unwrap();
         let defaults = load_settings(directory.path()).unwrap();
@@ -972,8 +902,8 @@ mod tests {
                 trust: Policy::Days(30),
             },
             share_clipboard: false,
-            discoverable: false,
-            command_q_quits: true,
+            always_discoverable: true,
+            sharing: true,
         };
         save_settings(directory.path(), &settings).unwrap();
         assert_eq!(load_settings(directory.path()).unwrap(), settings);
@@ -1066,6 +996,7 @@ mod tests {
             waiting: None,
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
+            adding: false,
         };
         observer.waiting("Studio", key, service::DEFAULT_PORT, Some(Policy::IDLE));
         assert!(matches!(
@@ -1084,5 +1015,55 @@ mod tests {
             received.recv().unwrap(),
             Event::Status(Status::Waiting { pairing: false, .. })
         ));
+    }
+
+    #[test]
+    fn adding_a_system_to_a_running_group_is_reported_open_then_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let (events, received) = mpsc::channel();
+        let mut observer = ControllerObserver {
+            told_version: None,
+            events,
+            home: directory.path().to_owned(),
+            waiting: None,
+            stats: std::collections::BTreeMap::new(),
+            linked: Vec::new(),
+            adding: false,
+        };
+        let next = || received.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        observer.pairing_opened();
+        assert!(matches!(next(), Event::Adding(true)));
+        observer.pairing_closed();
+        assert!(matches!(next(), Event::Adding(false)));
+        observer.pairing_closed();
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_configuration_profile_overrides_always_discoverable() {
+        assert_eq!(listening(true, true), Listening::Always);
+        assert_eq!(listening(true, false), Listening::Closed);
+        assert_eq!(listening(false, true), Listening::Closed);
+    }
+
+    #[test]
+    fn a_dropped_peer_raises_no_alert_however_often_it_is_retried() {
+        let directory = tempfile::tempdir().unwrap();
+        let (events, received) = mpsc::channel();
+        let mut observer = ControllerObserver {
+            told_version: None,
+            events,
+            home: directory.path().to_owned(),
+            waiting: None,
+            stats: std::collections::BTreeMap::new(),
+            linked: Vec::new(),
+            adding: false,
+        };
+        for _ in 0..3 {
+            observer.connection_failed("192.168.1.20:24850", &anyhow::anyhow!("connection refused"));
+        }
+        assert!(received.try_recv().is_err());
+        observer.connection_failed("192.168.1.20:24850", &crate::pairing::CodeMismatch.into());
+        assert!(matches!(received.try_recv(), Ok(Event::CodeMismatch)));
     }
 }

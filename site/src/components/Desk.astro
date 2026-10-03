@@ -14,7 +14,7 @@ const svg = renderDesk(initialState(), { pointer: false });
       <button type="button" class="desk-btn" data-action="arrange" aria-pressed="false">Arrange displays</button>
       <button type="button" class="desk-btn" data-action="swipe">Swipe to next Space</button>
       <button type="button" class="desk-btn" data-action="connect" aria-pressed="true">Disconnect</button>
-      <button type="button" class="desk-btn desk-btn-planned" data-action="add">Add a system <span class="planned-chip">Planned</span></button>
+      <button type="button" class="desk-btn" data-action="add">Add a system</button>
       <button type="button" class="desk-btn desk-btn-quiet" data-action="reset">Reset</button>
     </div>
   </div>
@@ -390,7 +390,7 @@ const svg = renderDesk(initialState(), { pointer: false });
         if (anchor) bodies.set(s.id, { x: s.x + (s.x - anchor.x) * 0.6, y: s.y + (s.y - anchor.y) * 0.6, vx: 0, vy: 0 });
         syncRopes(true);
         render();
-        say("Added another system. Dynamic chaining is planned.");
+        say("Added another system. It joins the group with one code.");
       }
       button.disabled = state.screens.length >= 4;
     }

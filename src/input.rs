@@ -172,12 +172,15 @@ pub enum Route {
     /// Swallow it and send it to the peer.
     Forward(InputEvent),
     /// Swallow it, take control back here at once, and have the peer
-    /// release everything.
-    Reclaim,
+    /// release everything. The pointer goes to `home` when known.
+    Reclaim { home: Option<Point> },
+    /// Swallow it and put the pointer at `at`, in this system's coordinates.
+    Home { at: Point },
 }
 
 /// Escape takes control back from anywhere with Control, Option and Command
-/// held, even if the peer or the connection is misbehaving.
+/// held, even if the peer or the connection is misbehaving, and brings the
+/// pointer to the middle of this system's main display.
 const ESCAPE_KEY: u16 = 53;
 const ESCAPE_MODIFIERS: u64 = 0x0004_0000 | 0x0008_0000 | 0x0010_0000;
 
@@ -260,7 +263,11 @@ impl Driver {
     }
 
     pub fn key(&mut self, code: u16, down: bool, repeat: bool, flags: u64) -> Route {
+        let chord = down && code == ESCAPE_KEY && flags & ESCAPE_MODIFIERS == ESCAPE_MODIFIERS;
         if !self.remote {
+            if chord && let Some(at) = self.layout.home(self.me) {
+                return Route::Home { at };
+            }
             if down {
                 self.local_keys.insert(code);
             } else {
@@ -268,9 +275,11 @@ impl Driver {
             }
             return Route::Local;
         }
-        if down && code == ESCAPE_KEY && flags & ESCAPE_MODIFIERS == ESCAPE_MODIFIERS {
+        if chord {
             self.remote = false;
-            return Route::Reclaim;
+            return Route::Reclaim {
+                home: self.layout.home(self.me),
+            };
         }
         if !down && self.local_keys.remove(&code) {
             return Route::Local;
@@ -882,16 +891,24 @@ mod tests {
             Route::Forward(_)
         ));
 
-        assert_eq!(driver.key(ESCAPE_KEY, true, false, ESCAPE_MODIFIERS), Route::Reclaim);
+        assert!(matches!(
+            driver.key(ESCAPE_KEY, true, false, ESCAPE_MODIFIERS),
+            Route::Reclaim { home: Some(_) }
+        ));
         assert!(!driver.is_remote());
         // local again, so the pointer must be pushed across to go back
         assert_eq!(driver.scroll(0.0, 1.0, None), Route::Local);
     }
 
     #[test]
-    fn escape_chord_does_nothing_while_local() {
+    fn escape_chord_while_local_brings_the_pointer_home() {
         let mut driver = driver(Side::Left);
-        assert_eq!(driver.key(ESCAPE_KEY, true, false, ESCAPE_MODIFIERS), Route::Local);
+        assert!(matches!(
+            driver.key(ESCAPE_KEY, true, false, ESCAPE_MODIFIERS),
+            Route::Home { .. }
+        ));
+        assert_eq!(driver.key(ESCAPE_KEY, true, false, 0), Route::Local);
+        assert!(!driver.is_remote());
     }
 
     #[test]

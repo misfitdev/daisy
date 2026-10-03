@@ -33,6 +33,11 @@ const MAX_PEER_NAME_CHARS: usize = 80;
 const SPAKE_IDENTITY: &[u8] = b"daisy pairing v1";
 const CONFIRMATION_LABEL: &[u8] = b"daisy pairing confirmation v1";
 
+/// The code typed did not match the one shown, so nothing was paired.
+#[derive(Debug, thiserror::Error)]
+#[error("the pairing code did not match, so nothing was paired; try again with the code on screen")]
+pub struct CodeMismatch;
+
 /// Six digit one-time code, shown on one system and typed on the other.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PairingCode(u32);
@@ -203,7 +208,7 @@ where
 
     let expected = confirmation_tag(key, peer_role, channel.handshake_hash());
     if !bool::from(expected.ct_eq(&received)) {
-        bail!("the pairing code did not match, so nothing was paired; try again with the code on screen");
+        return Err(CodeMismatch.into());
     }
     Ok(())
 }

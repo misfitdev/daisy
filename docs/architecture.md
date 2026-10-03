@@ -4,7 +4,7 @@
 
 A group is up to eight systems, each holding one encrypted session with every other. Every member captures physical input and can replay remote input. The system being used supplies input; touching another member takes control there immediately. Connection direction is independent of control.
 
-Every member listens and advertises with Bonjour, and connects to each trusted member it finds; for each pair, the lower public key opens the connection. Anonymous pairing advertisements use their random nonces. A direct address remains available.
+Every member listens and advertises with Bonjour, and connects to each trusted member it finds; for each pair, the lower public key opens the connection. For pairing, a group member opens the connection to a system with no peers; between two systems with no peers, the one open to pairing longer opens, and random nonces break a tie. A direct address remains available.
 
 Each member shares its displays and one agreed arrangement: an offset per member that places its displays in a shared space, never overlapping another member's. The greatest `(version, author)` wins everywhere, so every member converges on the same arrangement whoever changes it. A member that joins without a position is placed on the side its pairing chose, clear of the rest. The arrangement is saved, so a member returns where it was placed.
 

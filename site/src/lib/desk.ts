@@ -253,7 +253,7 @@ export function snap(state: DeskState, id: string, x: number, y: number, origin:
 export function addScreen(state: DeskState): Screen | null {
   if (state.screens.length >= MAX_SCREENS) return null;
   const id = String.fromCharCode(97 + state.screens.length);
-  const s: Screen = { id, kind: "desktop", x: 0, y: 0, w: 500, h: 300, label: "Another system · planned", planned: true };
+  const s: Screen = { id, kind: "desktop", x: 0, y: 0, w: 500, h: 300, label: "Another system", planned: false };
   const last = state.screens[state.screens.length - 1];
   const order = [last, ...state.screens.filter((o) => o !== last)];
   for (const o of order) {

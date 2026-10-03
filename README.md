@@ -16,7 +16,7 @@ Daisy is in beta. It supports:
 - Connection status that names each member and shows its round-trip latency, plus `daisy stats` percentiles
 - Finding paired peers on the local network with Bonjour
 - Pairing with a one-time code; a system paired with any member joins the whole group
-- Immediate return of control with Control-Option-Command-Escape
+- Control-Option-Command-Escape returns control and brings the pointer to the middle of the main display
 
 Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes through requires macOS 27 on the system whose trackpad you use.
 
@@ -24,20 +24,21 @@ Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes thro
 
 1. Download the DMG from the latest release on [Releases](https://github.com/misfitdev/daisy/releases), open it and drag **Daisy** to Applications. Install it on every system.
 2. Open Daisy. It walks through allowing Accessibility and Input Monitoring, which macOS requires before Daisy can read and send input.
-3. Click **Pair a New Peer** on both systems. Nearby systems find each other automatically. Enter the six-digit code shown on one into the other. To add another system, pair it with any one of them.
+3. Click **Start Sharing** on both systems. They find each other automatically, and one shows a six-digit code. Type it on the other and click **Connect**.
    - Once connected, drag each system's displays to where they sit, as in Displays. Every member keeps the same arrangement.
+   - To add another system, click **Start Sharing** on it, then choose **Add a System** from the menu bar flower on any member and type the code the new system shows.
    - For networks without Bonjour, click **Advanced…** and enter the peer's address on one system, leaving it empty on the other.
-4. Click **Start Sharing** on each, then move the pointer off a screen toward another system's. The menu bar flower shows a yellow center while connected.
+4. Move the pointer off a screen toward another system's. The menu bar flower shows a yellow center while connected.
 
 After pairing, they recognize each other; a new code is needed only when trust ends.
 
 ## Trust
 
-Each system asks how long to trust a peer when they pair: until it goes unused for a number of hours or days (four days by default; regular use keeps it active), for this session only, or until you forget it. Change it any time in the **Peers** group; the new choice starts from that moment. When the two sides differ, the shorter one applies. After trust expires, pair again with a new code.
+A new peer is trusted until it goes unused for four days; regular use keeps it active. Click its trust in the **Peers** group to choose a number of hours or days, this session only, or until you forget it; the new choice starts from that moment. When the two sides differ, the shorter one applies. After trust expires, pair again with a new code.
 
 ## Security
 
-Only paired devices can connect, and pairing requires consent on both sides. Input, clipboard contents and pairing messages are encrypted in transit. The pairing code works once and is never sent over the network, so it cannot be captured by anyone listening.
+Only paired systems can connect. A system accepts a new one only while it has no peers, during **Add a System**, or with **Always discoverable** turned on. Input, clipboard contents and pairing messages are encrypted in transit. The pairing code works once and is never sent over the network, so it cannot be captured by anyone listening.
 
 The [security model](docs/security-model.md) describes the design in detail. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
