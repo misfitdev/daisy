@@ -9,6 +9,8 @@ on:
       - ".mise.toml"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
+  # the release workflow redeploys once its DMG is published
+  workflow_call:
 
 permissions: {}
 
@@ -32,7 +34,11 @@ jobs:
 
       - name: Build the site
         working-directory: site
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          export DAISY_VERSION="${tag#v}"
           npm ci
           npm run build
 

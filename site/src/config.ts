@@ -1,4 +1,4 @@
-export const version = "0.4.0";
+export const version: string = import.meta.env.DAISY_VERSION;
 export const repo = "https://github.com/misfitdev/daisy";
 export const releaseAsset = `Daisy-${version}-macos-arm64.dmg`;
 /** The DMG itself. The asset name carries the version, so the link pins its tag. */
