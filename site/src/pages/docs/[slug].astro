@@ -12,9 +12,10 @@ export async function getStaticPaths() {
 }
 
 const { entry, meta } = Astro.props;
-const { Content } = await render(entry);
+const { Content, headings } = await render(entry);
+const sections = headings.filter((h) => h.depth === 2);
 ---
 
-<Docs title={meta.title} slug={meta.slug}>
+<Docs title={meta.title} slug={meta.slug} lede={meta.lede} description={meta.lede} sections={sections.length >= 6 ? sections : undefined}>
   <Content />
 </Docs>

@@ -7,7 +7,7 @@ import { downloadUrl, href, version } from "../../config";
   <h2>Before you start</h2>
   <ul>
     <li>Two systems with Apple silicon, running macOS 26 or later.</li>
-    <li>Both on the same network, able to reach each other.</li>
+    <li>Both on the same network, wired or Wi-Fi.</li>
     <li>macOS 27 on the system whose trackpad you use, if you want Multi-Touch gestures for Spaces, Mission Control and App Exposé to pass through.</li>
   </ul>
 
@@ -16,32 +16,34 @@ import { downloadUrl, href, version } from "../../config";
     <li>
       <div>
         <h3>Download and install</h3>
-        <p><a href={downloadUrl}>Download Daisy {version}</a>, open the DMG, and drag Daisy into Applications. Do the same on the other system.</p>
+        <p><a class="dl-only" href={downloadUrl}>Download Daisy {version}</a><span class="handoff-inline">Download Daisy {version} on your computer</span>, open the DMG, and drag Daisy into Applications. Do the same on the other system.</p>
       </div>
     </li>
     <li>
       <div>
         <h3>Open Daisy</h3>
-        <p>Daisy lives in the menu bar. Its flower is gray until your systems are connected. Daisy opens at login from now on.</p>
+        <p>Daisy lives in the menu bar. Its flower is gray until your systems are connected. Daisy opens at login from now on; turn off <strong>Open at login</strong> under <strong>Advanced…</strong> to stop that.</p>
       </div>
     </li>
     <li>
       <div>
         <h3>Allow Accessibility and Input Monitoring</h3>
-        <p>Daisy needs both to read and replay the keyboard and trackpad. It opens the right place in System Settings and waits until each one is on.</p>
-        <img class="setup-shot" src={href("/screenshots/daisy-window.png")} width="1120" height="824" loading="lazy" decoding="async" alt="The Daisy window: Laptop in control beside Studio's two displays, connected in 4 ms, with Studio listed under Peers." />
+        <p>macOS asks whether Daisy may read your keyboard and pointer. Daisy needs that to pass them to your other systems. It opens the right place in System Settings and waits until each permission is on. If macOS asks Daisy to reopen, click <strong>Reopen Daisy</strong>.</p>
+        <p class="assurance">What you type goes only to systems you paired, encrypted on the way, and is never recorded. <a href={href("/security/#c-network")}>What Daisy sends</a></p>
+        <p>Not working? Open Daisy, click <strong>Advanced…</strong> and use <strong>Set Up…</strong> beside the missing permission. <a href={href("/docs/user-guide/#troubleshooting")}>Troubleshooting</a></p>
       </div>
     </li>
     <li>
       <div>
         <h3>Pair the two systems</h3>
-        <p>Click <strong>Start Sharing</strong> on both systems. They find each other automatically, and the one you started second shows a six-digit code. Type that code on the other system and click <strong>Connect</strong>. The code works once, and only for this pairing.</p>
+        <p>Keep both systems within reach. Click <strong>Start Sharing</strong> on both. They find each other automatically, and the system you started last shows a six-digit code. Type that code on the other system and click <strong>Connect</strong>. The code works once, and only for this pairing.</p>
       </div>
     </li>
     <li>
       <div>
-        <h3>Arrange the displays</h3>
-        <p>At the top of the Daisy window, drag the other system's displays to where they sit, as in Displays. Both systems keep one arrangement; the most recent change wins.</p>
+        <h3>Arrange the screens</h3>
+        <p>At the top of the Daisy window, drag the other system's screens to where they sit. Both systems keep one arrangement; the most recent change wins.</p>
+        <img class="setup-shot" src={href("/screenshots/daisy-window.png")} width="1120" height="824" loading="lazy" decoding="async" alt="The Daisy window: Laptop in control beside Studio's two displays, connected in 4 ms, with Studio listed under Peers." />
       </div>
     </li>
     <li>

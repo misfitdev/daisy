@@ -31,8 +31,8 @@ const controls = [
       ["Authentication", "SPAKE2 password-authenticated key exchange over the Ed25519 group, keyed by a one-time six-digit code"],
       ["Key confirmation", "HMAC-SHA256 over the Noise handshake hash, role-labelled against reflection"],
       ["Result", "Peer public key pinned after mutual confirmation"],
-      ["Guessing resistance", "One online guess per attempt; at most five unknown-key attempts per ten minutes; one pairing at a time"],
-      ["Consent", "A system accepts a new one only before its first pairing, for 30 seconds after Add a System, or with Always discoverable on; unknown keys are refused otherwise"],
+      ["Guessing resistance", "One guess per code; at most five unknown-key attempts per ten minutes; one pairing at a time"],
+      ["Consent", "A sharing system accepts a new one only while it has no peers, for 30 seconds after Add a System, or with Always discoverable on; unknown keys are refused otherwise"],
       ["Timeouts", "Handshake 15 seconds; pairing two minutes"],
     ],
   },
@@ -40,7 +40,7 @@ const controls = [
     id: "trust",
     title: "Trust lifecycle",
     rows: [
-      ["Policies", "Idle expiry after 96 hours (default), fixed term in days, single session, or until revoked"],
+      ["Policies", "Expiry after 4 days unused (default; any number of hours or days), single session, or until revoked; a fixed term in days from the command line"],
       ["Enforcement", "Each system enforces its own policy; a session requires mutual trust, so the stricter policy applies"],
       ["Revocation", "Immediate from the app; within one second for changes made outside it; expired trust purged"],
     ],
@@ -81,7 +81,7 @@ const controls = [
   <div class="wrap page">
     <header class="page-head">
       <h1>Security</h1>
-      <p>Security controls implemented in Daisy.</p>
+      <p>Daisy sends your keyboard and pointer only to systems you paired, encrypted and authenticated, with no account, server or telemetry. The controls behind that are below.</p>
     </header>
 
     <div class="controls">

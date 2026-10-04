@@ -6,12 +6,7 @@ import { href } from "../../config";
 const blurbs: Record<string, string> = {
   "getting-started": "Install Daisy, allow it, pair two systems and cross your first edge.",
   trust: "How pairing works, how long trust lasts, and how to forget a peer.",
-  "user-guide": "Everything the app does, trust and data, troubleshooting, and the optional command line.",
-  "how-it-works": "Control and layout, the layers, and what happens at the edge.",
-  "security-model": "Security controls, trust boundaries, and key handling.",
-  protocol: "The wire format and the session, step by step.",
-  "macos-internals": "Permissions, the event tap, pointer pinning and swipes.",
-  releasing: "Signing, notarization and verifying a release.",
+  ...Object.fromEntries(docs.map((d) => [d.slug, d.lede])),
 };
 const groups = [
   { name: "Use", items: [{ slug: "getting-started", title: "Getting started" }, { slug: "trust", title: "Trust and pairing" }, ...docs.filter((d) => d.group === "Use")] },
@@ -24,7 +19,7 @@ const groups = [
   <div class="wrap page">
     <header class="page-head">
       <h1>Docs</h1>
-      <p>Start with getting started. Everything after it is there when you want it.</p>
+      <p>New to Daisy? Start with <a href={href("/docs/getting-started/")}>Getting started</a>. The rest is here when you want it.</p>
     </header>
     {groups.map((g) => (
       <section class="doc-group" aria-labelledby={`g-${g.name}`}>

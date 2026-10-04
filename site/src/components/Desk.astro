@@ -10,10 +10,9 @@ const svg = renderDesk(initialState(), { pointer: false });
       <p class="desk-hint" data-hint>Push the pointer through the right edge of this system.</p>
       <p class="desk-status" role="status" aria-live="polite" data-status>This system has control.</p>
     </div>
-    <div class="desk-controls">
+    <div class="desk-controls" role="group" aria-labelledby="desk-try">
+      <span class="desk-try" id="desk-try">Try it</span>
       <button type="button" class="desk-btn" data-action="arrange" aria-pressed="false">Arrange displays</button>
-      <button type="button" class="desk-btn" data-action="swipe">Swipe to next Space</button>
-      <button type="button" class="desk-btn" data-action="connect" aria-pressed="true">Disconnect</button>
       <button type="button" class="desk-btn" data-action="add">Add a system</button>
       <button type="button" class="desk-btn desk-btn-quiet" data-action="reset">Reset</button>
     </div>
@@ -21,7 +20,7 @@ const svg = renderDesk(initialState(), { pointer: false });
   <div class="desk-stage" data-stage set:html={svg} />
   <p class="desk-keys"><kbd>Esc</kbd> takes control back, standing in for <kbd>Control</kbd>-<kbd>Option</kbd>-<kbd>Command</kbd>-<kbd>Escape</kbd>. Typing goes to the system with control.</p>
   <p class="desk-fallback">
-    <span class="fallback-small">Open this page on a computer with a mouse or trackpad to drive the desk yourself.</span>
+    <span class="fallback-small">Push the pointer across the edge and it arrives on the next screen.</span>
     <span class="fallback-motion">The interactive desk is paused because reduced motion is on.</span>
   </p>
 </section>
@@ -108,10 +107,8 @@ const svg = renderDesk(initialState(), { pointer: false });
 
   function syncRopes(dropIn: boolean) {
     const next = new Map<string, Rope>();
-    if (state.connected) {
-      for (const { key, a, b } of adjacentPairs(state)) {
-        next.set(key, ropes.get(key) ?? makeRope(key, a.id, b.id, drawnCenter(a), drawnCenter(b), dropIn ? 70 : 0));
-      }
+    for (const { key, a, b } of adjacentPairs(state)) {
+      next.set(key, ropes.get(key) ?? makeRope(key, a.id, b.id, drawnCenter(a), drawnCenter(b), dropIn ? 70 : 0));
     }
     ropes = next;
   }
@@ -196,7 +193,6 @@ const svg = renderDesk(initialState(), { pointer: false });
   }
 
   function controlStatus() {
-    if (!state.connected) return "Disconnected. Input stays on this system.";
     if (state.active === state.home) return "This system has control.";
     return `${name(state.active)} has control. Press Esc to take it back.`;
   }
@@ -204,10 +200,6 @@ const svg = renderDesk(initialState(), { pointer: false });
   function updateHint() {
     if (state.arranging) {
       hint.textContent = "Drag a display to any edge of another. It snaps into place.";
-      return;
-    }
-    if (!state.connected) {
-      hint.textContent = "Connect again to share the keyboard and trackpad.";
       return;
     }
     const sides = homeSides(state);
@@ -280,7 +272,11 @@ const svg = renderDesk(initialState(), { pointer: false });
       return;
     }
     if (state.arranging || swiping) return;
-    const real = toSvg(e);
+    moveTo(toSvg(e));
+  }
+
+  /** Drive the virtual pointer from a real position, crossing to a peer when it pushes through an edge. */
+  function moveTo(real: Vec) {
     lastReal = real;
     const want = { x: real.x + offset.x, y: real.y + offset.y };
     const result = step(state, want.x - state.pointer.x, want.y - state.pointer.y, held);
@@ -370,18 +366,6 @@ const svg = renderDesk(initialState(), { pointer: false });
       render();
       say(state.arranging ? "Arranging displays." : controlStatus());
     }
-    if (kind === "swipe") swipe(1);
-    if (kind === "connect") {
-      state.connected = !state.connected;
-      if (!state.connected && reclaim(state) && lastReal) {
-        offset = { x: state.pointer.x - lastReal.x, y: state.pointer.y - lastReal.y };
-      }
-      button.setAttribute("aria-pressed", String(state.connected));
-      button.textContent = state.connected ? "Disconnect" : "Connect";
-      syncRopes(true);
-      render();
-      say(controlStatus());
-    }
     if (kind === "add") {
       const s = addScreen(state);
       if (s) {
@@ -403,9 +387,6 @@ const svg = renderDesk(initialState(), { pointer: false });
       const arrange = root.querySelector<HTMLButtonElement>('[data-action="arrange"]')!;
       arrange.textContent = "Arrange displays";
       arrange.setAttribute("aria-pressed", "false");
-      const connect = root.querySelector<HTMLButtonElement>('[data-action="connect"]')!;
-      connect.textContent = "Disconnect";
-      connect.setAttribute("aria-pressed", "true");
       syncRopes(true);
       render();
       say(controlStatus());
@@ -415,6 +396,11 @@ const svg = renderDesk(initialState(), { pointer: false });
   function start() {
     if (started) return;
     started = true;
+    stopDemo();
+    state = initialState();
+    offset = { x: 0, y: 0 };
+    bodies.clear();
+    ropes = new Map();
     root.classList.add("is-live");
     view = bounds(state);
     syncRopes(true);
@@ -439,6 +425,95 @@ const svg = renderDesk(initialState(), { pointer: false });
     root.querySelectorAll<HTMLButtonElement>("[data-action]").forEach((b) => b.addEventListener("click", () => action(b.dataset.action!, b)));
   }
 
+  // Without a fine pointer the desk plays itself: the pointer crosses into the
+  // laptop on a loop, only while on screen. Reduced motion keeps the static frame.
+  const LOOP = 4.6;
+  const MOVE = [0.5, 2.1];
+  let demoFrame = 0;
+  let demoClock = 0;
+  let demoLast = 0;
+  let demoLap = -1;
+  let demoSeen = false;
+  let demoFrom: Vec = { x: 0, y: 0 };
+  let demoTravel = 0;
+
+  function demoReset() {
+    state = initialState();
+    offset = { x: 0, y: 0 };
+    const r = interior(byId(state.home));
+    demoFrom = { x: r.x + r.w * 0.55, y: r.y + r.h * 0.52 };
+    demoTravel = r.x + r.w - demoFrom.x + 150;
+    state.pointer = { ...demoFrom };
+    ropes = new Map();
+    syncRopes(false);
+    render();
+  }
+
+  function demoTick(now: number) {
+    demoClock += Math.min(now - (demoLast || now), 50) / 1000;
+    demoLast = now;
+    const lap = Math.floor(demoClock / LOOP);
+    if (lap !== demoLap) {
+      demoLap = lap;
+      demoReset();
+    }
+    const t = demoClock % LOOP;
+    const k = Math.min(1, Math.max(0, (t - MOVE[0]) / (MOVE[1] - MOVE[0])));
+    moveTo({ x: demoFrom.x + demoTravel * (1 - Math.pow(1 - k, 3)), y: demoFrom.y + 26 * k });
+    const fade = Math.min(1, t / 0.3, (LOOP - t) / 0.3);
+    svg.querySelector(".pointer")?.setAttribute("opacity", fade.toFixed(3));
+    demoFrame = requestAnimationFrame(demoTick);
+  }
+
+  function playDemo() {
+    if (demoFrame || started) return;
+    demoLast = 0;
+    demoFrame = requestAnimationFrame(demoTick);
+  }
+
+  function stopDemo() {
+    cancelAnimationFrame(demoFrame);
+    demoFrame = 0;
+  }
+
+  const still = matchMedia("(prefers-reduced-motion: reduce)");
+  const seen = new IntersectionObserver(([entry]) => {
+    demoSeen = entry.isIntersecting;
+    if (demoSeen && !still.matches) playDemo();
+    else stopDemo();
+  });
+
   if (live.matches) start();
-  live.addEventListener("change", () => live.matches && start());
+  else seen.observe(root);
+  live.addEventListener("change", () => {
+    if (!live.matches) return;
+    seen.disconnect();
+    start();
+  });
+  still.addEventListener("change", () => {
+    if (started) return;
+    if (!still.matches) {
+      if (demoSeen) playDemo();
+      return;
+    }
+    stopDemo();
+    demoLap = -1;
+    demoClock = 0;
+    stage.innerHTML = renderDesk(initialState(), { pointer: false });
+  });
 </script>
+
+<style>
+  .desk-try {
+    align-self: center;
+    margin-right: 0.25rem;
+    font-size: var(--step-small);
+    font-weight: 600;
+    color: var(--ink-2);
+  }
+
+  /* The desk shrinks to a phone's width; keep the pointer legible. */
+  .desk:not(.is-live) :global(.pointer path) {
+    transform: scale(1.8);
+  }
+</style>

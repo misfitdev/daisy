@@ -135,7 +135,7 @@ package: bundle
 notes:
     @git cliff --latest --strip header 2>/dev/null || git cliff --unreleased --strip header
 
-# Serve the website locally at http://localhost:4321/daisy/
+# Serve the website locally at http://localhost:4321/
 site-dev:
     cd site && npm ci && npm run dev
 

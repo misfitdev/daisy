@@ -48,7 +48,7 @@ export const features: Feature[] = [
   },
   {
     title: "Dynamic chaining",
-    detail: "Up to eight systems, every display arranged as in Displays. Pair one with any member to join.",
+    detail: "Up to eight systems. Drag their screens into any layout.",
     status: "available",
   },
 ];
