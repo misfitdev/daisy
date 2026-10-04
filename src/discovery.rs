@@ -16,8 +16,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use getrandom::SysRng;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-use rand_core::{OsRng, RngCore};
+use rand_core::{Rng, UnwrapErr};
 use sha2::{Digest, Sha256};
 
 use crate::identity::PublicKey;
@@ -129,7 +130,7 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
 
 fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0; N];
-    OsRng.fill_bytes(&mut bytes);
+    UnwrapErr(SysRng).fill_bytes(&mut bytes);
     bytes
 }
 

@@ -28,7 +28,7 @@ pub struct Signer(SigningKey);
 
 impl Signer {
     pub fn generate() -> Self {
-        Self(SigningKey::generate(&mut rand_core::OsRng))
+        Self(SigningKey::generate(&mut rand_core::UnwrapErr(getrandom::SysRng)))
     }
 
     /// Reads the key at `path`, or creates it there readable only by this user.
