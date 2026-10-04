@@ -33,7 +33,11 @@ Delete the local `.p12` and `.p8` after the secrets are stored.
 ## Cutting a release
 
 1. Set `version` in `Cargo.toml` and make sure `main` is green.
-2. Run the local release review:
+2. Run `just update`. It updates crates, site packages and the pinned GitHub
+   Actions, then lists everything still behind, including major versions and
+   the tool pins in `.mise.toml`. Take every update, majors included, and
+   commit the result.
+3. Run the local release review:
 
    ```bash
    just check
@@ -44,8 +48,8 @@ Delete the local `.p12` and `.p8` after the secrets are stored.
    mise exec -- actionlint
    ```
 
-3. Tag and push, for example `git tag v0.1.0 && git push origin v0.1.0`. The tag must match `Cargo.toml` or the workflow stops.
-4. The workflow runs `just check`, builds `Daisy.app`, signs it with Developer ID, notarizes and staples it, and creates the zip and a DMG that is signed, notarized and stapled the same way. It records a GitHub artifact attestation, generates SLSA Build Level 3 provenance through the OpenSSF generator, and publishes a GitHub release with notes since the previous tag.
+4. Tag and push, for example `git tag v0.1.0 && git push origin v0.1.0`. The tag must match `Cargo.toml` or the workflow stops.
+5. The workflow runs `just check`, builds `Daisy.app`, signs it with Developer ID, notarizes and staples it, and creates the zip and a DMG that is signed, notarized and stapled the same way. It records a GitHub artifact attestation, generates SLSA Build Level 3 provenance through the OpenSSF generator, and publishes a GitHub release with notes since the previous tag.
 
 ## Verifying a release
 
