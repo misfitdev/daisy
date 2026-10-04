@@ -19,7 +19,6 @@ export interface DeskState {
   home: string;
   active: string;
   pointer: Point;
-  connected: boolean;
   arranging: boolean;
   space: Record<string, number>;
   notes: Record<string, string>;
@@ -40,7 +39,6 @@ export function initialState(): DeskState {
     home: home.id,
     active: home.id,
     pointer: { x: inner.x + inner.w * 0.62, y: inner.y + inner.h * 0.58 },
-    connected: true,
     arranging: false,
     space: {},
     notes: {},
@@ -110,7 +108,7 @@ export function step(state: DeskState, dx: number, dy: number, held: boolean): S
     p.y = Math.min(r.y + r.h, Math.max(r.y, ny));
   };
 
-  if (!side || !state.connected) {
+  if (!side) {
     clamp();
     return { kind: "moved" };
   }
@@ -345,7 +343,7 @@ function spaceLayer(state: DeskState, s: Screen, space: number) {
     : active
       ? `<text class="note-hint" x="${nx + 12}" y="${ny + 38}">Type something</text>`
       : "";
-  const caret = active && state.connected ? `<rect class="caret" x="${nx + 12 + Math.min(note.length, 26) * 6.1}" y="${ny + 28}" width="1.6" height="13" fill="${colors.graphite}"/>` : "";
+  const caret = active ? `<rect class="caret" x="${nx + 12 + Math.min(note.length, 26) * 6.1}" y="${ny + 28}" width="1.6" height="13" fill="${colors.graphite}"/>` : "";
   const extras = [
     () => windowShape(r.x + r.w - Math.min(190, r.w * 0.36) - 16, r.y + r.h - 108, Math.min(190, r.w * 0.36), 92),
     () => windowShape(r.x + r.w - 150, r.y + 30, 134, 84) + windowShape(r.x + 26, r.y + r.h - 96, 170, 80),
@@ -361,7 +359,7 @@ function menuBar(state: DeskState, s: Screen) {
   for (let i = 0; i < SPACES; i++) {
     dots += `<circle cx="${r.x + r.w - 58 + i * 9}" cy="${r.y + 7}" r="2.4" fill="${i === space ? colors.graphite : "#C8CACB"}"/>`;
   }
-  const glyph = `<g transform="translate(${r.x + r.w - 16} ${r.y + 7})">${flower(state.connected ? colors.yellow : colors.gray, "#8A9196", 0.19)}</g>`;
+  const glyph = `<g transform="translate(${r.x + r.w - 16} ${r.y + 7})">${flower(colors.yellow, "#8A9196", 0.19)}</g>`;
   return `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="14" fill="#EFEEE9"/>${dots}${glyph}`;
 }
 
@@ -410,7 +408,7 @@ export function renderDesk(state: DeskState, opts: { pointer?: boolean; liveChai
 
   if (opts.liveChains) {
     parts.push(`<g class="chains-live"></g>`);
-  } else if (state.connected) {
+  } else {
     const seen = new Set<string>();
     for (const s of state.screens) {
       for (const o of state.screens) {
@@ -424,7 +422,7 @@ export function renderDesk(state: DeskState, opts: { pointer?: boolean; liveChai
 
   for (const s of state.screens) {
     const c = center(s);
-    parts.push(`<g class="flower-at" data-id="${s.id}" transform="translate(${c.x} ${c.y})">${flower(state.connected ? colors.yellow : colors.gray, colors.graphite, 1.22)}</g>`);
+    parts.push(`<g class="flower-at" data-id="${s.id}" transform="translate(${c.x} ${c.y})">${flower(colors.yellow, colors.graphite, 1.22)}</g>`);
   }
 
   if (opts.pointer !== false && !state.arranging) {

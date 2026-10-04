@@ -2,9 +2,11 @@
 import Base from "../layouts/Base.astro";
 import Desk from "../components/Desk.astro";
 import Flower from "../components/Flower.astro";
+import GetDaisy from "../components/GetDaisy.astro";
+import SetupLoop from "../components/SetupLoop.astro";
 import { features } from "../lib/status";
 import { chain, colors, flower } from "../lib/marks";
-import { downloadUrl, href, repo, version } from "../config";
+import { href, repo } from "../config";
 
 // Flowers sit over the center of each equal column; the SVG scales uniformly with the row.
 const nodes = [0, 1, 2].map((k) => ({ x: ((k * 2 + 1) * 1240) / 6, y: 40 }));
@@ -18,11 +20,11 @@ const movesSvg =
   <section class="hero" aria-labelledby="hero-title">
     <div class="wrap">
       <div class="hero-row">
-        <h1 id="hero-title"><span class="hero-line">One keyboard and trackpad.</span> <span class="coral-mark">Every screen.</span></h1>
+        <h1 id="hero-title"><span class="hero-line">One keyboard</span> <span class="hero-line">One trackpad</span> <span class="coral-mark">Every screen</span></h1>
         <div class="hero-action">
           <p class="hero-lede">Daisy shares one keyboard, mouse and trackpad across up to eight systems on the same network. No Apple ID, no iCloud, no account.</p>
-          <a class="btn" href={downloadUrl}>Download Daisy {version}</a>
-          <p class="hero-meta">Free and open source · Beta · macOS 26 or later · Apple silicon</p>
+          <GetDaisy />
+          <p class="hero-meta">Free and open source · macOS 26 or later</p>
         </div>
       </div>
     </div>
@@ -30,6 +32,64 @@ const movesSvg =
   </section>
 
   <div class="thread" data-thread>
+  <section class="section" aria-labelledby="native-title">
+    <div class="wrap">
+      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
+      <div class="section-head">
+        <h2 id="native-title">Gestures everywhere</h2>
+      </div>
+      <div class="native-points">
+        <div>
+          <h3>macOS-native</h3>
+          <p>Swipe between Spaces, open Mission Control or App Exposé on any screen. Gestures need macOS 27.</p>
+        </div>
+        <div>
+          <h3>Your hands decide</h3>
+          <p>There is no main system. Use the keyboard or trackpad in front of you and that system takes control at once.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="setup-title">
+    <div class="wrap">
+      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
+      <div class="section-head">
+        <h2 id="setup-title">Three moves</h2>
+      </div>
+      <svg class="moves-chain" viewBox="0 0 1240 80" aria-hidden="true" set:html={movesSvg} />
+      <div class="moves" data-moves>
+        <div class="move">
+          <div class="move-node"><Flower size={56} /></div>
+          <h3>Install</h3>
+          <p>Download and install like any other app.</p>
+        </div>
+        <div class="move">
+          <div class="move-node"><Flower size={56} /></div>
+          <h3>Allow</h3>
+          <p>Grant Daisy permission to read and replay input.</p>
+        </div>
+        <div class="move">
+          <div class="move-node"><Flower size={56} /></div>
+          <h3>Pair</h3>
+          <p>Start sharing and follow the prompts.</p>
+        </div>
+      </div>
+      <SetupLoop />
+      <p class="text-links"><a href={href("/docs/getting-started/")}>Read the full getting-started guide</a></p>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="security-title">
+    <div class="wrap">
+      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
+      <div class="section-head">
+        <h2 id="security-title">Input stays private</h2>
+        <p>Encrypted, direct and never recorded. <a href={href("/security/")}>How Daisy keeps it that way</a></p>
+      </div>
+    </div>
+  </section>
+
   <section class="section" aria-labelledby="status-title">
     <div class="wrap">
       <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
@@ -54,90 +114,14 @@ const movesSvg =
     </div>
   </section>
 
-  <section class="section" aria-labelledby="setup-title">
-    <div class="wrap">
-      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
-      <div class="section-head">
-        <h2 id="setup-title">Set up in three moves</h2>
-        <p>Do it once on each system. After that, they recognize each other.</p>
-      </div>
-      <svg class="moves-chain" viewBox="0 0 1240 80" aria-hidden="true" set:html={movesSvg} />
-      <div class="moves">
-        <div class="move">
-          <div class="move-node"><Flower size={56} /></div>
-          <h3>Install</h3>
-          <p>Download Daisy, open the DMG and drag Daisy into Applications. Do the same on each system.</p>
-        </div>
-        <div class="move">
-          <div class="move-node"><Flower size={56} /></div>
-          <h3>Allow</h3>
-          <p>Open Daisy. It lives in the menu bar and walks you through allowing Accessibility and Input Monitoring.</p>
-        </div>
-        <div class="move">
-          <div class="move-node"><Flower size={56} /></div>
-          <h3>Pair</h3>
-          <p>Click Start Sharing on both. The newer one shows a code; type it on the other. Drag their displays into place, then push the pointer across. To add another, choose Add a System on any member.</p>
-        </div>
-      </div>
-      <img
-        class="setup-shot"
-        src={href("/screenshots/daisy-window.png")}
-        width="1120"
-        height="824"
-        loading="lazy"
-        decoding="async"
-        alt="The Daisy window: Laptop in control beside Studio's two displays, connected in 4 ms, with Studio listed under Peers."
-      />
-      <p class="text-links"><a href={href("/docs/getting-started/")}>Read the full getting-started guide</a></p>
-    </div>
-  </section>
-
-  <section class="section" aria-labelledby="native-title">
-    <div class="wrap native">
-      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
-      <h2 id="native-title" class="native-statement">Both ends speak macOS, so keys, clicks and swipes arrive as themselves.</h2>
-      <div class="native-points">
-        <div>
-          <h3>Mac-to-Mac, by design</h3>
-          <p>Nothing is translated through another operating system. A three-finger swipe to the next Space on this system is a three-finger swipe to the next Space on that one.</p>
-        </div>
-        <div>
-          <h3>No account, anywhere</h3>
-          <p>Your systems trust each other directly, through a one-time code. There is no sign-in, no cloud service and nothing to sync.</p>
-        </div>
-        <div>
-          <h3>You decide how long trust lasts</h3>
-          <p>Each system chooses: until it has been idle for 96 hours, for a number of days, for one session, or until you forget it. The stricter choice wins.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section class="section" aria-labelledby="security-title">
-    <div class="wrap">
-      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
-      <div class="section-head">
-        <h2 id="security-title">Paired, encrypted and verifiable</h2>
-        <p>Systems pair once with a one-time code, and members introduce each other with signed introductions. Every connection after that is encrypted and authenticated, and every release can be traced to its source.</p>
-      </div>
-      <ul class="facts">
-        <li>Connections use a Noise handshake with X25519, ChaCha20-Poly1305 and BLAKE2s.</li>
-        <li>Pairing runs SPAKE2 on a one-time six-digit code, so someone in the middle gets one guess per attempt: a one-in-a-million chance.</li>
-        <li>A group accepts a new system only for 30 seconds after you choose Add a System, or while Always discoverable is on, and at most five unknown systems may try in ten minutes.</li>
-        <li>Releases are signed with Developer ID, notarized by Apple, and built with SLSA Build Level 3 provenance. <a href={href("/download/#verify")}>Verify your download.</a></li>
-      </ul>
-    </div>
-  </section>
-
   <section class="section" aria-labelledby="closing-title">
     <div class="wrap closing">
-      <span class="thread-end" data-thread-end aria-hidden="true"><Flower size={72} state="disconnected" /></span>
-      <h2 id="closing-title">Put your systems anywhere and use them as one desk.</h2>
+      <span class="thread-node" data-thread-node aria-hidden="true"><Flower size={60} state="disconnected" /></span>
+      <h2 id="closing-title">Every system, one desk</h2>
       <div class="closing-actions">
-        <a class="btn" href={downloadUrl}>Download Daisy {version}</a>
+        <GetDaisy />
         <a class="btn btn-ghost" href={repo}>View on GitHub</a>
       </div>
-      <p>Beta. Free and open source.</p>
     </div>
   </section>
   </div>
@@ -159,16 +143,14 @@ const movesSvg =
     return { x: r.left - origin.left + r.width / 2, y: r.top - origin.top + r.height / 2 };
   };
 
-  /** Lay one chain from flower to flower down the rail, ending at the Download flower. */
+  /** Lay one chain from flower to flower down the rail. */
   function build() {
     svg?.remove();
     svg = null;
     links = [];
-    const nodes = [...thread.querySelectorAll<HTMLElement>("[data-thread-node]")];
-    const end = thread.querySelector<HTMLElement>("[data-thread-end]")!;
-    flowers = [...nodes, end];
+    flowers = [...thread.querySelectorAll<HTMLElement>("[data-thread-node]")];
     if (!wide.matches) {
-      flowers.forEach((f) => f.classList.add("is-on"));
+      update();
       return;
     }
     const origin = thread.getBoundingClientRect();
@@ -225,4 +207,19 @@ const movesSvg =
   wide.addEventListener("change", build);
   document.fonts?.ready.then(build);
   build();
+
+  // Light the move whose scene is playing in the setup loop; moves after it wait gray.
+  const moves = document.querySelector<HTMLElement>("[data-moves]")!;
+  const steps = [...moves.querySelectorAll<HTMLElement>(".move")];
+  const stepFlowers = [...document.querySelectorAll<SVGGElement>(".moves-chain .flower")];
+  addEventListener("setupstep", (e) => {
+    const at = (e as CustomEvent<number | null>).detail;
+    moves.classList.toggle("is-playing", at !== null);
+    [steps, stepFlowers].forEach((list) =>
+      list.forEach((el, i) => {
+        el.classList.toggle("is-current", at === i);
+        el.classList.toggle("is-ahead", at !== null && i > at);
+      }),
+    );
+  });
 </script>

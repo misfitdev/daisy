@@ -8,8 +8,9 @@ interface Props {
   description?: string;
   slug: string;
   lede?: string;
+  sections?: { slug: string; text: string }[];
 }
-const { title, description, slug, lede } = Astro.props;
+const { title, description, slug, lede, sections } = Astro.props;
 const guides = [
   { slug: "getting-started", title: "Getting started", group: "Use" },
   { slug: "trust", title: "Trust and pairing", group: "Use" },
@@ -37,9 +38,39 @@ const groups = ["Use", "Understand", "Contribute"].map((g) => ({ name: g, items:
         <h1>{title}</h1>
         {lede && <p>{lede}</p>}
       </header>
+      <details class="docs-nav-compact">
+        <summary>{sections ? "Contents" : "All docs"}</summary>
+        {sections && (
+          <>
+            <h2>On this page</h2>
+            <ul>
+              {sections.map((s) => (
+                <li><a href={`#${s.slug}`}>{s.text}</a></li>
+              ))}
+            </ul>
+            <h2>All docs</h2>
+          </>
+        )}
+        <ul>
+          {all.map((d) => (
+            <li><a href={href(`/docs/${d.slug}/`)} aria-current={d.slug === slug ? "page" : undefined}>{d.title}</a></li>
+          ))}
+        </ul>
+      </details>
+      {sections && (
+        <nav class="toc" aria-label="On this page">
+          <h2>On this page</h2>
+          <ul>
+            {sections.map((s) => (
+              <li><a href={`#${s.slug}`}>{s.text}</a></li>
+            ))}
+          </ul>
+        </nav>
+      )}
       <div class="prose">
         <slot />
       </div>
+      {sections && <p class="back-top"><a href="#main">Back to top</a></p>}
     </article>
   </div>
 </Base>

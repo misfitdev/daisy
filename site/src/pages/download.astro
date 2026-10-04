@@ -1,7 +1,8 @@
 ---
 import Base from "../layouts/Base.astro";
 import Flower from "../components/Flower.astro";
-import { downloadUrl, href, releaseAsset, repo, version } from "../config";
+import GetDaisy from "../components/GetDaisy.astro";
+import { href, releaseAsset, repo, version } from "../config";
 ---
 
 <Base title="Download" description={`Download Daisy ${version} for macOS.`}>
@@ -9,12 +10,13 @@ import { downloadUrl, href, releaseAsset, repo, version } from "../config";
     <header class="page-head">
       <Flower size={64} />
       <h1>Download Daisy</h1>
-      <p>Version {version}, beta. Signed with Developer ID and notarized by Apple.</p>
+      <p>Version {version}. Signed with Developer ID and notarized by Apple.</p>
     </header>
     <div class="download-panel">
       <div class="verify">
-        <a class="btn" href={downloadUrl}>Download {releaseAsset}</a>
-        <p>Opens the latest release on GitHub. Install it on every system you want to share.</p>
+        <GetDaisy />
+        <p class="download-meta dl-only">{releaseAsset} · Apple silicon</p>
+        <p class="dl-only">The download starts right away. Install it on every system you want to share.</p>
         <h2 class="section-sub">Install</h2>
         <ol class="steps">
           <li><div><h3>Open the DMG</h3><p>It opens from Downloads.</p></div></li>
@@ -28,7 +30,7 @@ import { downloadUrl, href, releaseAsset, repo, version } from "../config";
           <dt>Hardware</dt><dd>Apple silicon</dd>
           <dt>macOS</dt><dd>26 or later</dd>
           <dt>Swipes</dt><dd>macOS 27 on the system whose trackpad you use</dd>
-          <dt>Network</dt><dd>Both systems reachable on the same network</dd>
+          <dt>Network</dt><dd>Same network, wired or Wi-Fi</dd>
           <dt>Account</dt><dd>None</dd>
         </dl>
       </div>
@@ -41,12 +43,12 @@ import { downloadUrl, href, releaseAsset, repo, version } from "../config";
       </div>
       <div class="security">
         <div class="verify">
-          <h3>With the GitHub CLI</h3>
+          <div class="verify-head"><h3>With the GitHub CLI</h3><button class="copy" type="button" data-copy>Copy</button></div>
           <pre class="code"><code>gh attestation verify {releaseAsset} \
   --repo misfitdev/daisy</code></pre>
         </div>
         <div class="verify">
-          <h3>With slsa-verifier</h3>
+          <div class="verify-head"><h3>With slsa-verifier</h3><button class="copy" type="button" data-copy>Copy</button></div>
           <pre class="code"><code>slsa-verifier verify-artifact {releaseAsset} \
   --provenance-path {releaseAsset}.intoto.jsonl \
   --source-uri github.com/misfitdev/daisy \
@@ -58,7 +60,43 @@ import { downloadUrl, href, releaseAsset, repo, version } from "../config";
   </div>
 </Base>
 
+<script>
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-copy]")) {
+    button.addEventListener("click", async () => {
+      const code = button.closest(".verify")?.querySelector("pre code")?.textContent ?? "";
+      try {
+        await navigator.clipboard.writeText(code);
+        button.textContent = "Copied";
+      } catch {
+        button.textContent = "Select and copy";
+      }
+      setTimeout(() => (button.textContent = "Copy"), 2000);
+    });
+  }
+</script>
+
 <style>
+  .verify-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+  .copy {
+    font: inherit;
+    font-size: var(--step-small);
+    min-height: 2rem;
+    padding: 0.2rem 0.8rem;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+  .copy:hover {
+    color: var(--ink);
+    border-color: var(--ink-2);
+  }
   .section-sub {
     font-size: var(--step-title);
     margin-top: var(--space-4);
@@ -66,6 +104,14 @@ import { downloadUrl, href, releaseAsset, repo, version } from "../config";
   }
   .download-panel > div > .section-sub:first-child {
     margin-top: 0;
+  }
+  .download-panel .btn {
+    justify-self: start;
+  }
+  .verify .download-meta {
+    margin-top: -0.5rem;
+    font-size: var(--step-small);
+    font-variant-numeric: tabular-nums;
   }
   .page .section {
     padding-bottom: 0;

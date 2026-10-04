@@ -1,0 +1,126 @@
+---
+import { renderSetupLoop } from "../lib/setup-loop";
+
+const svg = renderSetupLoop(undefined, { pointer: false });
+---
+
+<div
+  class="setup-loop"
+  data-setup-loop
+  role="img"
+  aria-label="Setup in three moves: drag Daisy into Applications, turn on Accessibility and Input Monitoring, then type the code one system shows on the other to link them."
+  set:html={svg}
+/>
+
+<script>
+  import { frame, LOOP, renderSetupLoop, stepAt, STILL } from "../lib/setup-loop";
+
+  // Announces the playing scene as `setupstep` (0, 1, 2, or null when stopped)
+  // so the page can light the matching move.
+  const root = document.querySelector<HTMLElement>("[data-setup-loop]")!;
+  const still = matchMedia("(prefers-reduced-motion: reduce)");
+  let nodes = new Map<string, Element>();
+  let clock = 0;
+  let last = 0;
+  let raf = 0;
+  let step: number | null = null;
+  let seen = false;
+
+  function announce(next: number | null) {
+    if (next === step) return;
+    step = next;
+    root.dispatchEvent(new CustomEvent("setupstep", { detail: next, bubbles: true }));
+  }
+
+  function mount(t: number, pointer: boolean) {
+    root.innerHTML = renderSetupLoop(t, { pointer });
+    nodes = new Map([...root.querySelectorAll("[data-k]")].map((el) => [el.getAttribute("data-k")!, el]));
+  }
+
+  function tick(now: number) {
+    clock = (clock + Math.min(now - (last || now), 50) / 1000) % LOOP;
+    last = now;
+    for (const [k, attrs] of Object.entries(frame(clock))) {
+      const el = nodes.get(k);
+      if (el) for (const [name, value] of Object.entries(attrs)) el.setAttribute(name, value);
+    }
+    announce(stepAt(clock));
+    raf = requestAnimationFrame(tick);
+  }
+
+  function play() {
+    if (raf || still.matches || !seen) return;
+    if (!nodes.size) mount(clock, true);
+    last = 0;
+    raf = requestAnimationFrame(tick);
+  }
+
+  function stop() {
+    cancelAnimationFrame(raf);
+    raf = 0;
+    announce(null);
+  }
+
+  new IntersectionObserver(([entry]) => {
+    seen = entry.isIntersecting;
+    if (seen) play();
+    else stop();
+  }, { threshold: 0.25 }).observe(root);
+
+  still.addEventListener("change", () => {
+    if (!still.matches) return play();
+    stop();
+    nodes.clear();
+    clock = 0;
+    root.innerHTML = renderSetupLoop(STILL, { pointer: false });
+  });
+</script>
+
+<style>
+  .setup-loop {
+    width: min(100%, 580px);
+    margin: var(--space-5) auto 0;
+  }
+
+  .setup-loop :global(svg) {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .setup-loop :global(text) {
+    font-family: var(--font);
+    fill: var(--ink);
+  }
+
+  .setup-loop :global(.loop-label) {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .setup-loop :global(.loop-code) {
+    font: 500 24px var(--mono);
+    letter-spacing: 0.04em;
+  }
+
+  .setup-loop :global(.loop-digit) {
+    font: 500 15px var(--mono);
+  }
+
+  .setup-loop :global(.link path),
+  .setup-loop :global(.petals) {
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+
+  /* The drawing shrinks to a phone's width; keep labels and the pointer legible. */
+  @media (max-width: 640px) {
+    .setup-loop :global(.loop-label) {
+      font-size: 17px;
+    }
+
+    .setup-loop :global(.loop-pointer path) {
+      transform: scale(1.4);
+    }
+  }
+</style>

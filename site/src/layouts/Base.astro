@@ -1,7 +1,7 @@
 ---
 import "../styles/global.css";
 import Flower from "../components/Flower.astro";
-import { downloadUrl, href, releasesUrl, repo, version } from "../config";
+import { downloadUrl, href, releasesUrl, repo } from "../config";
 
 interface Props {
   title?: string;
@@ -41,6 +41,12 @@ const nav = [
     <meta property="og:image" content={og} />
     <meta property="og:image:alt" content="Daisy connects a flowing chain of systems into one desk." />
     <meta name="twitter:card" content="summary_large_image" />
+    <script is:inline>
+      // Only macOS can run Daisy. iPadOS reports a macOS user agent; touch points tell them apart.
+      if (!/Macintosh/.test(navigator.userAgent) || navigator.maxTouchPoints > 0) {
+        document.documentElement.classList.add("not-macos");
+      }
+    </script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
@@ -57,7 +63,7 @@ const nav = [
             <li><a href={repo}>GitHub</a></li>
           </ul>
         </nav>
-        <a class="btn btn-small" href={downloadUrl}>Download</a>
+        <a class="btn btn-small dl-only" href={downloadUrl}>Download</a>
       </div>
     </header>
     <main id="main">
@@ -65,10 +71,6 @@ const nav = [
     </main>
     <footer class="site-footer">
       <div class="wrap footer-row">
-        <div class="footer-brand">
-          <Flower size={36} />
-          <p>Daisy {version} beta. Mac-to-Mac, by design.</p>
-        </div>
         <ul class="footer-links">
           <li><a href={href("/download/")}>Download</a></li>
           <li><a href={href("/docs/getting-started/")}>Getting started</a></li>
