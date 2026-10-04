@@ -137,10 +137,8 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           git cliff --latest --strip header > notes.md
-          # beta until Daisy runs from the menu bar (mn-075)
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Daisy $version (beta)" \
+            --title "Daisy $version" \
             --notes-file notes.md \
-            --prerelease \
             --verify-tag
