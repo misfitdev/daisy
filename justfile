@@ -25,6 +25,14 @@ run *args:
 # Everything CI would check
 check: lint test
 
+# Update dependencies and list what is still behind, majors included
+update:
+    cargo update --verbose
+    cd site && npm update
+    pinact run -u
+    mise outdated --bump
+    cd site && npm outdated || true
+
 # macOS files permissions under this ID; changing it means granting them again
 bundle_id := "dev.misfit.daisy"
 app := "target/Daisy.app"
