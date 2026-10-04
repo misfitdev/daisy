@@ -16,8 +16,9 @@ use std::fmt;
 use std::future::Future;
 
 use anyhow::{Context, Result, bail};
-use hmac::{Hmac, Mac};
-use rand_core::{OsRng, RngCore};
+use getrandom::SysRng;
+use hmac::{Hmac, KeyInit, Mac};
+use rand_core::{Rng, UnwrapErr};
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity as SpakeIdentity, Password, Spake2};
 use subtle::ConstantTimeEq;
@@ -47,7 +48,7 @@ impl PairingCode {
         // reject the top of the range so every code is equally likely
         let limit = u32::MAX - u32::MAX % CODE_SPACE;
         loop {
-            let value = OsRng.next_u32();
+            let value = UnwrapErr(SysRng).next_u32();
             if value < limit {
                 return Self(value % CODE_SPACE);
             }
@@ -216,7 +217,7 @@ where
 // The role keeps one side's proof from being reflected back as the other's,
 // and the handshake hash ties the proof to this session alone.
 fn confirmation_tag(key: &[u8], role: Role, handshake_hash: &[u8]) -> [u8; CONFIRMATION_LEN] {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts keys of any length");
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepts keys of any length");
     mac.update(CONFIRMATION_LABEL);
     mac.update(match role {
         Role::Initiator => b"initiator",
