@@ -47,8 +47,6 @@ Delete the local `.p12` and `.p8` after the secrets are stored.
 3. Tag and push, for example `git tag v0.1.0 && git push origin v0.1.0`. The tag must match `Cargo.toml` or the workflow stops.
 4. The workflow runs `just check`, builds `Daisy.app`, signs it with Developer ID, notarizes and staples it, and creates the zip and a DMG that is signed, notarized and stapled the same way. It records a GitHub artifact attestation, generates SLSA Build Level 3 provenance through the OpenSSF generator, and publishes a GitHub release with notes since the previous tag.
 
-Releases are published as prereleases while Daisy is in beta.
-
 ## Verifying a release
 
 Either command proves that a release file was built by this repository's release workflow:
