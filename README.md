@@ -6,10 +6,10 @@ Daisy needs no account and no cloud service. Connections run directly over your 
 
 ## Current Status
 
-Daisy is in beta. It supports:
+Daisy supports:
 
 - Groups of up to eight systems: the pointer moves onto whichever screen it reaches, with typing, clicks and drags following it
-- Every display of every system arranged as in Displays, by dragging
+- Every screen of every system arranged by dragging
 - Scrolling, with trackpad momentum, and swipes for Spaces, Mission Control and app windows
 - Clipboard sharing for text, rich text and images
 - Automatic reconnection after sleep or a network change
@@ -25,7 +25,7 @@ Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes thro
 1. Download the DMG from the latest release on [Releases](https://github.com/misfitdev/daisy/releases), open it and drag **Daisy** to Applications. Install it on every system.
 2. Open Daisy. It walks through allowing Accessibility and Input Monitoring, which macOS requires before Daisy can read and send input.
 3. Click **Start Sharing** on both systems. They find each other automatically, and one shows a six-digit code. Type it on the other and click **Connect**.
-   - Once connected, drag each system's displays to where they sit, as in Displays. Every member keeps the same arrangement.
+   - Once connected, drag each system's screens to where they sit. Every member keeps the same arrangement.
    - To add another system, click **Start Sharing** on it, then choose **Add a System** from the menu bar flower on any member and type the code the new system shows.
    - For networks without Bonjour, click **Advanced…** and enter the peer's address on one system, leaving it empty on the other.
 4. Move the pointer off a screen toward another system's. The menu bar flower shows a yellow center while connected.

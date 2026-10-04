@@ -158,7 +158,6 @@ It contains:
 
 - A system needs macOS 27 to capture three- and four-finger swipes from its trackpad.
 - A macOS 27 peer replays live progress, including pullback cancellation.
-- Shake-to-locate replay is verified on macOS 27; macOS 26 visual verification remains.
 
 ## Troubleshooting
 

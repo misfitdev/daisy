@@ -53,4 +53,4 @@ macOS enlarges the pointer when physical input shakes it, but the system detecto
 
 The system replaying input therefore detects shake in replayed motion through `src/shake.rs`: five quick reversals within one second, each stroke at least 80 points and under 200 ms, horizontally or vertically. It grows the pointer toward four times its configured size through private `CGSSetCursorScale`, then shrinks it within about one third of a second.
 
-The behavior follows that system's “Shake mouse pointer to locate” setting and Accessibility pointer size. Pointer scale outlives the process that changed it, so Daisy restores the configured size when magnification ends, when the session ends and whenever any Daisy command starts. macOS 27 replay and forced-termination recovery are verified; visual verification on macOS 26 remains tracked in `mn-96q`.
+The behavior follows that system's “Shake mouse pointer to locate” setting and Accessibility pointer size. Pointer scale outlives the process that changed it, so Daisy restores the configured size when magnification ends, when the session ends and whenever any Daisy command starts.
