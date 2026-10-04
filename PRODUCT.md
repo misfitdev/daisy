@@ -11,8 +11,7 @@ The product is macOS only; no other operating system is in scope. Impeccable has
 ## Stack
 
 - The existing application core is Rust and uses native macOS APIs.
-- The native menu-bar controller and setup flow are implemented under the
-  completed `mn-075` work.
+- The menu-bar controller and setup flow are native AppKit.
 - The public website is hosted with GitHub Pages. Its static-site tooling is
   delegated to the website implementation workflow.
 
@@ -53,7 +52,7 @@ long that trust lasts.
 - During pairing, one system displays a code and the user enters it on the other.
 - Control-Option-Command-Escape immediately returns control to the system the
   user is at.
-- The current beta is app-first. Terminal commands remain available for
+- Daisy is app-first. Terminal commands remain available for
   diagnostics, automation and advanced networking.
 
 ## Capabilities and Constraints
@@ -64,10 +63,9 @@ long that trust lasts.
   macOS 27, and the recovery chord.
 - Bonjour discovery of paired peers is implemented. Automatic reconnection after sleep, wake and
   network changes is implemented; two-system verification remains. Clipboard sharing of text, rich text and images is implemented;
-  two-system verification remains. Groups of up to eight systems, arranged like Displays, are implemented.
+  two-system verification remains. Groups of up to eight systems, arranged by dragging, are implemented.
 - Capturing trackpad swipes requires macOS 27 on the system whose trackpad is
   used.
-- Shake-to-locate still needs visual verification on macOS 26.
 - Pairing codes are safe only as PAKE input. Never ask people to compare a code
   by eye as a security check.
 - Both systems enforce their own trust policy, so the stricter policy wins. When

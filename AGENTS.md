@@ -81,12 +81,14 @@ version of each system.
   `test`, `style` and `refactor` are hidden. Write subjects for someone
   installing the release. Do not add attribution trailers.
 - Do not put surnames, email addresses or machine names in the repository.
+- Do not put issue IDs in docs, code comments or site copy. Track status in
+  Beads, not in prose.
 - Never call a device a "Mac" in code, comments, UI or CLI text, docs or site
   copy. A remote device is a peer; the local device is this system or the
   local system. Whichever system is in use drives; there are no roles to
   name. Apple platform and product names are fine when that specific thing
-  is meant: "macOS 27", "Apple silicon", "Mission Control". The
-  platform-scope phrase is "Mac-to-Mac".
+  is meant: "macOS 27", "Apple silicon", "Mission Control". Describe the
+  platform scope as "macOS-native" or "Mac-to-Mac".
 - Describe Daisy on its own terms. Public documentation must not mention or
   compare Daisy with other products.
 
