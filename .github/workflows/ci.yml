@@ -27,6 +27,8 @@ jobs:
 
       - name: Lint and test
         run: just check
+      - name: Test Homebrew cask generation
+        run: python3 tools/test_homebrew_cask.py
 
       - name: Bundle the app
         run: just package

@@ -79,6 +79,40 @@ spctl --assess --type execute -vv Daisy.app
 
 Both should report `source=Notarized Developer ID`.
 
+## Homebrew cask
+
+The release workflow generates `daisy.rb` from the final signed and notarized
+DMG and includes it in the release assets. Its version and SHA-256 come from
+that DMG; never substitute an unsigned build's hash. The cask requires Apple
+silicon and macOS 26 or later, installs `Daisy.app`, and leaves device identity,
+peer trust, and settings intact when uninstalled.
+
+To generate it locally after packaging:
+
+```bash
+python3 tools/homebrew-cask.py target/dist/Daisy-0.6.0-macos-arm64.dmg target/dist/daisy.rb
+```
+
+Publish the generated file as `Casks/daisy.rb` in a Homebrew tap. For a tap
+named `misfitdev/homebrew-daisy`, users install and upgrade with:
+
+```bash
+brew install --cask misfitdev/daisy/daisy
+brew update
+brew upgrade --cask misfitdev/daisy/daisy
+```
+
+These commands require the tap to be published. After each stable release,
+update its cask using that release's generated `daisy.rb`. Homebrew's livecheck
+detects new stable releases, but does not update the tap's recipe itself.
+Daisy does not install updates automatically. Quit Daisy before upgrading,
+then reopen it; install the same compatible version on every group member.
+Accessibility and Input Monitoring still require approval in System Settings.
+Users can also install the release's recipe through a local tap; see
+[Homebrew installation](usage.md#homebrew). The generated recipe is release
+metadata; the DMG and ZIP are the assets covered by the existing provenance
+and artifact attestations.
+
 ## Release notes
 
 Release notes come from Conventional Commit subjects through `git cliff`; `just notes` previews them. `feat`, `fix`, `perf` and `docs` commits are listed. `chore`, `ci`, `build`, `test`, `style` and `refactor` commits are omitted.

@@ -77,6 +77,12 @@ jobs:
           just package
           rm -f "$NOTARY_KEY_PATH"
 
+      - name: Generate Homebrew cask
+        run: |
+          python3 tools/test_homebrew_cask.py
+          version="${GITHUB_REF_NAME#v}"
+          python3 tools/homebrew-cask.py "target/dist/Daisy-$version-macos-arm64.dmg" target/dist/daisy.rb
+
       - name: Hash the release files
         id: hashes
         working-directory: target/dist

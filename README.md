@@ -37,6 +37,13 @@ Update every member of the group. Daisy 0.6.0 uses protocol 6 and cannot connect
 
 After pairing, they recognize each other; a new code is needed only when trust ends.
 
+## Homebrew
+
+Releases include a `daisy.rb` Homebrew cask pinned to
+the release DMG's SHA-256. See [Homebrew installation](docs/usage.md#homebrew)
+for local tap setup, installation, upgrades, and removal. Daisy still needs Accessibility and Input Monitoring
+permission after installation.
+
 ## Trust
 
 A new peer is trusted until it goes unused for four days; regular use keeps it active. Click its trust in the **Peers** group to choose a number of hours or days, this session only, or until you forget it; the new choice starts from that moment. When the two sides differ, the shorter one applies. After trust expires, pair again with a new code.

@@ -5,6 +5,9 @@
 # Cargo
 /target/
 
+# Python packaging helpers
+__pycache__/
+
 # Beads keeps its database and runtime state locally. The passive issue export
 # is the only cross-clone source of truth.
 .dolt/
