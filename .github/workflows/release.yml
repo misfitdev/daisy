@@ -142,3 +142,11 @@ jobs:
             --title "Daisy $version" \
             --notes-file notes.md \
             --verify-tag
+
+  site:
+    needs: release
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml # zizmor: ignore[self-repository] actionlint does not accept the $/ form yet
