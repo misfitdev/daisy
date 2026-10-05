@@ -66,6 +66,16 @@ The menu-bar flower uses color only for state:
 
 The window gives the exact state in its title. The system in control is coral with the daisy; each peer's row shows whether its link is running and its round trip, whether its screen is locked, and who introduced it, for example "via Studio · Connected, 12 ms", "Locked" or "Not connected". A round trip is measured from the heartbeat each system sends every second; a single round trip over 50 ms is written to the log. `daisy stats` prints each running link's round trips by percentile.
 
+## Keyboard
+
+Keys and keyboard combinations follow the pointer. Shift, Control, Option,
+Command and Fn retain their modifier state on forwarded key presses, repeats
+and releases. Both left and right modifier keys work independently where the
+keyboard provides them. Caps Lock remains a toggle.
+
+Stopping sharing releases held remote keys and modifiers and closes every group
+link. Control-Option-Command-Escape remains the shortcut to take control back.
+
 ## Clipboard
 
 When control moves, the clipboard goes with it: the system giving up control sends its clipboard, including when control moves because someone started using the other system. Copy on one system, move to the peer and paste there; copy on the peer, come back (through the edge, by using this system, or with Control-Option-Command-Escape) and paste here.

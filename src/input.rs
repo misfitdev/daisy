@@ -263,6 +263,11 @@ impl Driver {
     }
 
     pub fn key(&mut self, code: u16, down: bool, repeat: bool, flags: u64) -> Route {
+        let flags = if self.remote {
+            with_held_modifiers(flags, &self.remote_modifiers)
+        } else {
+            flags
+        };
         let chord = down && code == ESCAPE_KEY && flags & ESCAPE_MODIFIERS == ESCAPE_MODIFIERS;
         if !self.remote {
             if chord && let Some(at) = self.layout.home(self.me) {
@@ -564,6 +569,7 @@ impl Target {
                 } else if !self.keys.remove(&code) {
                     return Vec::new();
                 }
+                let flags = with_held_modifiers(flags, &self.modifiers);
                 self.flags = flags;
                 vec![Action::Key {
                     code,
@@ -573,7 +579,7 @@ impl Target {
                 }]
             }
             InputEvent::Modifiers { code, flags } => {
-                if modifier_mask(code).is_some_and(|mask| flags & mask != 0) {
+                if modifier_mask(code).is_some() && modifier_is_down(code, flags) {
                     self.modifiers.insert(code);
                 } else {
                     self.modifiers.remove(&code);
@@ -645,6 +651,75 @@ impl Target {
     }
 }
 
+/// Modifier transitions remain authoritative when a key event omits a held
+/// modifier from its flags. Forwarded keys must carry the complete chord.
+fn with_held_modifiers(flags: u64, held: &BTreeSet<u16>) -> u64 {
+    held.iter()
+        .fold(flags, |flags, code| flags | modifier_mask(*code).unwrap_or(0))
+}
+
+/// Plain keyboard event fields used by the native injector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyboardEvent {
+    pub code: u16,
+    pub down: bool,
+    pub repeat: bool,
+    pub flags: u64,
+    pub modifier: bool,
+}
+
+impl Action {
+    pub fn keyboard(&self) -> Option<KeyboardEvent> {
+        match *self {
+            Self::Key {
+                code,
+                down,
+                repeat,
+                flags,
+            } => Some(KeyboardEvent {
+                code,
+                down,
+                repeat,
+                flags,
+                modifier: false,
+            }),
+            Self::Modifiers { code, flags } => Some(KeyboardEvent {
+                code,
+                down: modifier_is_down(code, flags),
+                repeat: false,
+                flags,
+                modifier: true,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Whether this modifier is held in a captured flag state. Side-specific bits
+/// distinguish releasing one key while the other key of the same kind stays down.
+pub fn modifier_is_down(code: u16, flags: u64) -> bool {
+    let side = match code {
+        55 => Some((0x0000_0008, 0x0000_0010)),
+        54 => Some((0x0000_0010, 0x0000_0008)),
+        56 => Some((0x0000_0002, 0x0000_0004)),
+        60 => Some((0x0000_0004, 0x0000_0002)),
+        59 => Some((0x0000_0001, 0x0000_2000)),
+        62 => Some((0x0000_2000, 0x0000_0001)),
+        58 => Some((0x0000_0020, 0x0000_0040)),
+        61 => Some((0x0000_0040, 0x0000_0020)),
+        _ => None,
+    };
+    if let Some((own, other)) = side
+        && flags & (own | other) != 0
+    {
+        return flags & own != 0;
+    }
+    if code == 57 {
+        return flags & 0x0001_0000 != 0;
+    }
+    modifier_mask(code).is_some_and(|mask| flags & mask != 0)
+}
+
 /// The modifier flag a modifier key sets, from CGEventTypes.h. Caps Lock is
 /// left out: it toggles, and releasing it would flip it.
 fn modifier_mask(code: u16) -> Option<u64> {
@@ -707,6 +782,230 @@ mod tests {
 
     const COMMAND_KEY: u16 = 55;
     const COMMAND_FLAG: u64 = 0x0010_0000;
+
+    const MODIFIERS: [(u16, u64, u64); 9] = [
+        (56, 0x0002_0000, 0x0002),
+        (60, 0x0002_0000, 0x0004),
+        (59, 0x0004_0000, 0x0001),
+        (62, 0x0004_0000, 0x2000),
+        (58, 0x0008_0000, 0x0020),
+        (61, 0x0008_0000, 0x0040),
+        (55, 0x0010_0000, 0x0008),
+        (54, 0x0010_0000, 0x0010),
+        (63, 0x0080_0000, 0),
+    ];
+
+    #[test]
+    fn reclaim_chord_uses_held_modifiers_when_key_flags_are_missing() {
+        let mut source = entered_driver();
+        let mut flags = 0;
+        for (code, mask) in [(59, 0x0004_0000), (58, 0x0008_0000), (55, 0x0010_0000)] {
+            flags |= mask;
+            assert!(matches!(source.modifiers(code, flags), Route::Forward(_)));
+        }
+        assert!(matches!(source.key(ESCAPE_KEY, true, false, 0), Route::Reclaim { .. }));
+    }
+
+    #[test]
+    fn held_modifiers_survive_missing_flags_on_every_forwarded_key() {
+        let keys = [56, 59, 58, 55, 63];
+        let masks = [0x0002_0000, 0x0004_0000, 0x0008_0000, 0x0010_0000, 0x0080_0000];
+        for subset in 1..32 {
+            let flags = masks.iter().enumerate().fold(0, |flags, (i, mask)| {
+                flags | if subset & (1 << i) != 0 { *mask } else { 0 }
+            });
+            for code in 0..128 {
+                if code == ESCAPE_KEY && flags & ESCAPE_MODIFIERS == ESCAPE_MODIFIERS {
+                    continue;
+                }
+                let mut source = entered_driver();
+                let mut receiver = target(Side::Right);
+                receiver.enter((100.0, 100.0));
+                let mut pressed = 0;
+                for (i, modifier) in keys.iter().enumerate() {
+                    if subset & (1 << i) != 0 {
+                        pressed |= masks[i];
+                        let Route::Forward(event) = source.modifiers(*modifier, pressed) else {
+                            panic!("modifier must forward");
+                        };
+                        receiver.input(event);
+                    }
+                }
+                for (down, repeat) in [(true, false), (true, true), (false, false)] {
+                    let Route::Forward(event) = source.key(code, down, repeat, 0) else {
+                        panic!("chord must forward");
+                    };
+                    assert!(matches!(event, InputEvent::Key { flags: forwarded, .. } if forwarded == flags));
+                    let bytes = postcard::to_stdvec(&event).unwrap();
+                    let event = postcard::from_bytes(&bytes).unwrap();
+                    assert_eq!(receiver.input(event)[0].keyboard().unwrap().flags, flags);
+                }
+                for i in (0..keys.len()).rev() {
+                    if subset & (1 << i) != 0 {
+                        pressed &= !masks[i];
+                        let Route::Forward(event) = source.modifiers(keys[i], pressed) else {
+                            panic!("release must forward");
+                        };
+                        receiver.input(event);
+                    }
+                }
+                assert!(receiver.release_all().is_empty());
+                assert!(matches!(
+                    source.key(code, true, false, 0),
+                    Route::Forward(InputEvent::Key { flags: 0, .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn receiver_keeps_the_chord_when_key_flags_omit_held_modifiers() {
+        for (modifier, mask, side) in MODIFIERS {
+            let mut receiver = target(Side::Right);
+            receiver.enter((100.0, 100.0));
+            receiver.input(InputEvent::Modifiers {
+                code: modifier,
+                flags: mask | side,
+            });
+            let action = receiver
+                .input(InputEvent::Key {
+                    code: 15,
+                    down: true,
+                    repeat: false,
+                    flags: 0,
+                })
+                .remove(0);
+            assert_eq!(action.keyboard().unwrap().flags, mask);
+        }
+    }
+
+    #[test]
+    fn every_modifier_press_and_release_has_the_correct_native_direction() {
+        for (code, mask, side) in MODIFIERS {
+            let mut source = entered_driver();
+            let mut receiver = target(Side::Right);
+            receiver.enter((100.0, 100.0));
+            for (flags, down) in [(mask | side, true), (0, false)] {
+                let Route::Forward(event) = source.modifiers(code, flags) else {
+                    panic!("modifier must forward");
+                };
+                let bytes = postcard::to_stdvec(&event).unwrap();
+                let event = postcard::from_bytes(&bytes).unwrap();
+                let action = receiver.input(event).remove(0);
+                assert_eq!(
+                    action.keyboard(),
+                    Some(KeyboardEvent {
+                        code,
+                        down,
+                        repeat: false,
+                        flags,
+                        modifier: true
+                    })
+                );
+            }
+            assert!(
+                receiver.release_all().is_empty(),
+                "modifier {code} must be fully released"
+            );
+        }
+    }
+
+    #[test]
+    fn every_keyboard_code_preserves_every_modifier_combination_and_repeat() {
+        let masks = [0x0002_0000, 0x0004_0000, 0x0008_0000, 0x0010_0000, 0x0080_0000];
+        for subset in 0..32 {
+            let flags = masks.iter().enumerate().fold(0, |flags, (i, mask)| {
+                flags | if subset & (1 << i) != 0 { *mask } else { 0 }
+            });
+            for code in 0..128 {
+                if code == ESCAPE_KEY && flags & ESCAPE_MODIFIERS == ESCAPE_MODIFIERS {
+                    continue;
+                }
+                let mut source = entered_driver();
+                let mut receiver = target(Side::Right);
+                receiver.enter((100.0, 100.0));
+                for (down, repeat) in [(true, false), (true, true), (false, false)] {
+                    let Route::Forward(event) = source.key(code, down, repeat, flags) else {
+                        panic!("key {code} flags {flags:#x} must forward");
+                    };
+                    let bytes = postcard::to_stdvec(&event).unwrap();
+                    let event = postcard::from_bytes(&bytes).unwrap();
+                    let action = receiver.input(event).remove(0);
+                    assert_eq!(
+                        action.keyboard(),
+                        Some(KeyboardEvent {
+                            code,
+                            down,
+                            repeat,
+                            flags,
+                            modifier: false
+                        })
+                    );
+                }
+                assert!(receiver.release_all().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn releasing_one_side_does_not_leave_it_held_when_the_other_side_stays_down() {
+        for pair in MODIFIERS[..8].as_chunks::<2>().0 {
+            let (left, mask, left_bit) = pair[0];
+            let (right, _, right_bit) = pair[1];
+            let mut receiver = target(Side::Right);
+            receiver.enter((100.0, 100.0));
+            receiver.input(InputEvent::Modifiers {
+                code: left,
+                flags: mask | left_bit,
+            });
+            receiver.input(InputEvent::Modifiers {
+                code: right,
+                flags: mask | left_bit | right_bit,
+            });
+            let release = receiver.input(InputEvent::Modifiers {
+                code: left,
+                flags: mask | right_bit,
+            });
+            assert!(!release[0].keyboard().unwrap().down, "left {left} was released");
+            assert_eq!(
+                receiver.release_all(),
+                vec![Action::Modifiers { code: right, flags: 0 }]
+            );
+        }
+    }
+
+    #[test]
+    fn caps_lock_is_a_toggle_and_is_not_released_on_handoff() {
+        let mut receiver = target(Side::Right);
+        receiver.enter((100.0, 100.0));
+        receiver.input(InputEvent::Modifiers {
+            code: 57,
+            flags: 0x0001_0000,
+        });
+        assert!(receiver.release_all().is_empty());
+    }
+
+    #[test]
+    fn held_keyboard_state_is_released_once_on_disconnect_for_every_modifier() {
+        for (code, mask, side) in MODIFIERS {
+            let mut receiver = target(Side::Right);
+            receiver.enter((100.0, 100.0));
+            receiver.input(InputEvent::Modifiers {
+                code,
+                flags: mask | side,
+            });
+            receiver.input(InputEvent::Key {
+                code: 15,
+                down: true,
+                repeat: false,
+                flags: mask | side,
+            });
+            let released = receiver.reclaim();
+            assert_eq!(released.len(), 2);
+            assert!(released.iter().all(|action| !action.keyboard().unwrap().down));
+            assert!(receiver.release_all().is_empty());
+        }
+    }
 
     #[test]
     fn input_event_variant_tags_are_stable() {
