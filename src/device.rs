@@ -193,7 +193,7 @@ pub(crate) fn test_public(byte: u8) -> PublicKey {
     let mut seed = [0; 32];
     seed[30..].copy_from_slice(&(u16::from(byte) + 1).to_be_bytes());
     let key = p256::ecdsa::SigningKey::from_slice(&seed).unwrap();
-    PublicKey::from_bytes(key.verifying_key().to_encoded_point(true).as_bytes()).unwrap()
+    PublicKey::from_bytes(key.verifying_key().to_sec1_point(true).as_bytes()).unwrap()
 }
 
 // Decision tests use software keys; this backend does not exist in app builds.
@@ -215,7 +215,7 @@ mod backend {
     }
     pub fn public(reference: &[u8]) -> Result<Vec<u8>> {
         let key = SigningKey::from_slice(reference).context("invalid test key")?;
-        Ok(key.verifying_key().to_encoded_point(true).as_bytes().to_vec())
+        Ok(key.verifying_key().to_sec1_point(true).as_bytes().to_vec())
     }
     pub fn sign(reference: &[u8], message: &[u8]) -> Result<Vec<u8>> {
         let key = SigningKey::from_slice(reference).context("invalid test key")?;

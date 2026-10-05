@@ -69,8 +69,8 @@ pub fn public(reference: &[u8]) -> Result<Vec<u8>> {
     let public = load(reference)?.public_key().context("device key has no public key")?;
     let bytes = public.external_representation().context("reading device public key")?;
     let key = p256::PublicKey::from_sec1_bytes(&bytes).context("invalid device public key")?;
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
-    Ok(key.to_encoded_point(true).as_bytes().to_vec())
+    use p256::elliptic_curve::sec1::ToSec1Point;
+    Ok(key.to_sec1_point(true).as_bytes().to_vec())
 }
 
 pub fn sign(reference: &[u8], message: &[u8]) -> Result<Vec<u8>> {
