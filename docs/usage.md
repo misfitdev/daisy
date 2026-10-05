@@ -33,11 +33,11 @@ The system that started sharing later shows a six-digit code in a small Daisy pa
 
 One code pairs both systems. Each trusts the other until it goes unused for four days; change that from the peer's row in **Peers**. A "Connected to" panel follows: **Arrange…** opens the window with the new peer selected, and the panel closes on its own after 15 seconds.
 
-For a network without Bonjour, click **+** beside **Peers**, enter the peer’s local name or IP address, then click **Save and Connect**. Daisy saves the address and starts connecting immediately; the other system must be sharing. A direct connection backs off after an established session drops; Bonjour discovery keeps looking for every trusted member.
+For a network without Bonjour, click **+** beside **Peers**, enter the peer’s local name or IP address, then click **Save and Connect**. Daisy saves the address and starts connecting immediately; the other system must be sharing. Existing group links stay connected, and automatic discovery keeps running. A direct connection backs off after an established session drops; Bonjour discovery keeps looking for every trusted member.
 
 ## Grow a group
 
-To add a system, click **Start Sharing** on it. On any one system already in the group, choose **Add a System** from the menu-bar flower; the group then accepts a new system for 30 seconds, and the panel there counts down and offers **Cancel**. The new system shows the code; type it on the member. If nothing joins in time, the panel says "No new system joined" and offers **Try Again**. **Cancel** on the code prompt also ends Add a System, and Daisy waits 15 seconds before asking again. Sharing keeps running throughout. Add a System is unavailable while Daisy connects to a saved peer address.
+To add a system, click **Start Sharing** on it. On any one system already in the group, choose **Add a System** from the menu-bar flower; the group then accepts a new system for 30 seconds, and the panel there counts down and offers **Cancel**. The new system shows the code; type it on the member. If nothing joins in time, the panel says "No new system joined" and offers **Try Again**. **Cancel** on the code prompt also ends Add a System, and Daisy waits 15 seconds before asking again. Sharing keeps running throughout, including when connecting by address.
 
 That member introduces it to the rest with a signed introduction, so every member trusts it and links to it without another code; see the [security model](security-model.md#groups). A group holds up to eight systems; a ninth is refused. Each member trusts an introduced system for no longer than it trusts the member that introduced it.
 

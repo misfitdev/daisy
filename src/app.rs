@@ -47,7 +47,7 @@ use objc2_foundation::{
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use crate::control::Link;
-use crate::controller::{self, AppSettings, Command, Connection, Event, Handle, SessionSettings, Status};
+use crate::controller::{self, AppSettings, Command, Event, Handle, SessionSettings, Status};
 use crate::peers::Peer;
 use crate::permissions::{self, Access};
 use crate::setup::Step;
@@ -241,8 +241,7 @@ define_class!(
                 }
                 alert.setInformativeText(&NSString::from_str("Enter a local name or IP address before connecting."));
             };
-        self.apply_settings(&settings);
-            self.start();
+        self.connect_address(settings);
         }
 
         #[unsafe(method(addSystem:))]
@@ -943,8 +942,11 @@ impl AppDelegate {
     /// Opens this group to a new system for a short while, from the menu.
     fn add_a_system(&self) {
         let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
-        let nearby = self.ivars().settings.borrow().last_session.connection == Connection::Automatic;
-        if !is_active(&self.ivars().status.borrow()) || always || !nearby {
+        if !crate::setup::can_add_system(
+            is_active(&self.ivars().status.borrow()),
+            always,
+            self.ivars().adding.get(),
+        ) {
             return;
         }
         let _ = self.ivars().controller.send(Command::AddSystem);
@@ -1051,6 +1053,11 @@ impl AppDelegate {
         }
     }
 
+    fn connect_address(&self, settings: SessionSettings) {
+        self.apply_settings(&settings);
+        let _ = self.ivars().controller.send(Command::ConnectByAddress(settings));
+    }
+
     fn start(&self) {
         if self.setup_step() != Step::Done {
             self.open_setup();
@@ -1101,8 +1108,7 @@ impl AppDelegate {
         }
         if let Some(item) = self.ivars().menu_add.get() {
             let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
-            let nearby = self.ivars().settings.borrow().last_session.connection == Connection::Automatic;
-            item.setEnabled(active && nearby && !always && !self.ivars().adding.get());
+            item.setEnabled(crate::setup::can_add_system(active, always, self.ivars().adding.get()));
         }
     }
 

@@ -1,7 +1,7 @@
 //! Native modal-menu regression, executed by the main-thread test harness.
 
 pub(super) fn run() {
-    use objc2::{MainThreadOnly, sel};
+    use objc2::{DefinedClass, MainThreadOnly, sel};
     use objc2_app_kit::{NSApplication, NSMenuItem, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSString};
     let mtm = MainThreadMarker::new().expect("test runs on the main thread");
@@ -9,6 +9,24 @@ pub(super) fn run() {
     let home = tempfile::tempdir().unwrap();
     let controller = crate::controller::spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
     let target = super::AppDelegate::new(mtm, controller);
+    let add = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Add System"),
+            Some(sel!(addSystem:)),
+            &NSString::from_str(""),
+        )
+    };
+    target.ivars().menu_add.set(add.clone()).unwrap();
+    target.ivars().settings.borrow_mut().last_session.connection = crate::controller::Connection::Connect {
+        address: "192.168.1.20".to_owned(),
+        peer: None,
+    };
+    *target.ivars().status.borrow_mut() = crate::controller::Status::Connected { peers: Vec::new() };
+    target.update_action_buttons();
+    assert!(add.isEnabled(), "address connections must still allow adding systems");
+    *target.ivars().status.borrow_mut() = crate::controller::Status::Idle;
+
     let root = super::menu::new("Daisy", mtm);
     let peers = super::menu::new("Paired Peers", mtm);
     let peer = super::menu::new("Peer", mtm);

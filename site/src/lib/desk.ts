@@ -1,4 +1,4 @@
-import { chain, colors, flower, type Point } from "./marks";
+import { chain, colors, flower, type Point } from "./marks.ts";
 
 export type Side = "left" | "right" | "above" | "below";
 export type Kind = "desktop" | "laptop";
@@ -71,6 +71,34 @@ export function adjacentSide(a: Screen, b: Screen): Side | null {
   return null;
 }
 
+/** Native routing reaches across small gaps; GAP is demo frame spacing. */
+const REACH = 40;
+function traversable(a: Screen, b: Screen): boolean {
+  const dx = Math.max(0, b.x - (a.x + a.w), a.x - (b.x + b.w));
+  const dy = Math.max(0, b.y - (a.y + a.h), a.y - (b.y + b.h));
+  return Math.hypot(dx, dy) <= GAP + REACH;
+}
+
+/** Distance to the first rectangle hit along a normalized ray, including corners. */
+function entry(r: ReturnType<typeof interior>, p: Point, direction: Point): number | null {
+  let near = 0;
+  let far = Infinity;
+  for (const [origin, delta, lo, hi] of [
+    [p.x, direction.x, r.x, r.x + r.w],
+    [p.y, direction.y, r.y, r.y + r.h],
+  ]) {
+    if (delta === 0) {
+      if (origin < lo || origin > hi) return null;
+    } else {
+      const a = (lo - origin) / delta;
+      const b = (hi - origin) / delta;
+      near = Math.max(near, Math.min(a, b));
+      far = Math.min(far, Math.max(a, b));
+    }
+  }
+  return near <= far ? near : null;
+}
+
 export function neighbors(state: DeskState, s: Screen, side: Side): Screen[] {
   return state.screens.filter((o) => o !== s && adjacentSide(s, o) === side);
 }
@@ -86,34 +114,38 @@ export type Step =
   | { kind: "blocked"; side: Side }
   | { kind: "crossed"; from: string; to: string };
 
-/**
- * Move the pointer by a delta inside the active screen. Pushing through an
- * edge with a peer beyond it moves control there; a held button never crosses.
- * One neighbor on an edge maps proportionally, as the product does today.
- */
+/** Move along the input ray to the nearest reachable display, including corners. */
 export function step(state: DeskState, dx: number, dy: number, held: boolean): Step {
   const s = byId(state, state.active);
   const r = interior(s);
   const p = state.pointer;
   const nx = p.x + dx;
   const ny = p.y + dy;
-  let side: Side | null = null;
-  if (nx > r.x + r.w) side = "right";
-  else if (nx < r.x) side = "left";
-  else if (ny > r.y + r.h) side = "below";
-  else if (ny < r.y) side = "above";
-
+  const side: Side | null = nx > r.x + r.w ? "right" : nx < r.x ? "left"
+    : ny > r.y + r.h ? "below" : ny < r.y ? "above" : null;
   const clamp = () => {
     p.x = Math.min(r.x + r.w, Math.max(r.x, nx));
     p.y = Math.min(r.y + r.h, Math.max(r.y, ny));
   };
-
-  if (!side) {
+  const length = Math.hypot(dx, dy);
+  if (!side || length === 0) {
     clamp();
     return { kind: "moved" };
   }
-  const beyond = neighbors(state, s, side);
-  if (beyond.length === 0) {
+  const direction = { x: dx / length, y: dy / length };
+  let target: Screen | null = null;
+  let distance = Infinity;
+  for (const other of state.screens) {
+    if (other.id === s.id || !traversable(s, other)) continue;
+    const t = entry(interior(other), p, direction);
+    // Frames and the visual gutter are decoration, not logical display space.
+    const reach = GAP + REACH + BEZEL[s.kind] + BEZEL[other.kind];
+    if (t !== null && t <= length + reach && t < distance) {
+      target = other;
+      distance = t;
+    }
+  }
+  if (!target) {
     clamp();
     return { kind: "moved" };
   }
@@ -121,43 +153,11 @@ export function step(state: DeskState, dx: number, dy: number, held: boolean): S
     clamp();
     return { kind: "blocked", side };
   }
-
-  const horizontal = side === "left" || side === "right";
-  let target: Screen;
-  let along: number;
-  if (beyond.length === 1) {
-    target = beyond[0];
-    const frac = horizontal ? (p.y - r.y) / r.h : (p.x - r.x) / r.w;
-    const t = interior(target);
-    along = horizontal ? t.y + frac * t.h : t.x + frac * t.w;
-  } else {
-    const at = horizontal ? p.y : p.x;
-    const span = (o: Screen) => {
-      const t = interior(o);
-      return horizontal ? [t.y, t.y + t.h] : [t.x, t.x + t.w];
-    };
-    target =
-      beyond.find((o) => {
-        const [a, b] = span(o);
-        return at >= a && at <= b;
-      }) ??
-      beyond.reduce((best, o) => {
-        const dist = (x: Screen) => {
-          const [a, b] = span(x);
-          return Math.min(Math.abs(at - a), Math.abs(at - b));
-        };
-        return dist(o) < dist(best) ? o : best;
-      });
-    const [a, b] = span(target);
-    along = Math.min(b, Math.max(a, at));
-  }
-
   const t = interior(target);
-  const inset = 2;
-  if (side === "right") state.pointer = { x: t.x + inset, y: along };
-  if (side === "left") state.pointer = { x: t.x + t.w - inset, y: along };
-  if (side === "below") state.pointer = { x: along, y: t.y + inset };
-  if (side === "above") state.pointer = { x: along, y: t.y + t.h - inset };
+  state.pointer = {
+    x: clampNum(p.x + direction.x * distance, t.x, t.x + t.w),
+    y: clampNum(p.y + direction.y * distance, t.y, t.y + t.h),
+  };
   const from = state.active;
   state.active = target.id;
   return { kind: "crossed", from, to: target.id };
@@ -184,7 +184,7 @@ function connectedGraph(screens: Screen[]) {
   while (queue.length) {
     const s = queue.shift()!;
     for (const o of screens) {
-      if (!seen.has(o.id) && adjacentSide(s, o)) {
+      if (!seen.has(o.id) && traversable(s, o)) {
         seen.add(o.id);
         queue.push(o);
       }
@@ -208,6 +208,9 @@ function slots(state: DeskState, s: Screen, near: Point) {
     out.push({ x: o.x - GAP - s.w, y: sy });
     out.push({ x: sx, y: o.y + o.h + GAP });
     out.push({ x: sx, y: o.y - GAP - s.h });
+    for (const x of [o.x - GAP - s.w, o.x + o.w + GAP]) {
+      for (const y of [o.y - GAP - s.h, o.y + o.h + GAP]) out.push({ x, y });
+    }
   }
   return out;
 }
@@ -363,12 +366,12 @@ function menuBar(state: DeskState, s: Screen) {
   return `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="14" fill="#EFEEE9"/>${dots}${glyph}`;
 }
 
-/** Pairs of screens that share an edge, as `[a, b]` with a stable key. */
+/** Every reachable edge or corner, with one stable key per pair. */
 export function adjacentPairs(state: DeskState): { key: string; a: Screen; b: Screen }[] {
   const out: { key: string; a: Screen; b: Screen }[] = [];
   state.screens.forEach((s, i) => {
     for (const o of state.screens.slice(i + 1)) {
-      if (adjacentSide(s, o)) out.push({ key: `${s.id}-${o.id}`, a: s, b: o });
+      if (traversable(s, o)) out.push({ key: `${s.id}-${o.id}`, a: s, b: o });
     }
   });
   return out;
@@ -409,14 +412,8 @@ export function renderDesk(state: DeskState, opts: { pointer?: boolean; liveChai
   if (opts.liveChains) {
     parts.push(`<g class="chains-live"></g>`);
   } else {
-    const seen = new Set<string>();
-    for (const s of state.screens) {
-      for (const o of state.screens) {
-        const key = [s.id, o.id].sort().join("-");
-        if (s === o || seen.has(key) || !adjacentSide(s, o)) continue;
-        seen.add(key);
-        parts.push(`<g class="chain" data-chain="${key}" data-from="${s.id}">${chain(center(s), center(o)).join("")}</g>`);
-      }
+    for (const { key, a, b } of adjacentPairs(state)) {
+      parts.push(`<g class="chain" data-chain="${key}" data-from="${a.id}">${chain(center(a), center(b)).join("")}</g>`);
     }
   }
 

@@ -50,6 +50,11 @@ pub fn row(step: Step, permission: Step) -> Row {
     }
 }
 
+/// Every native sharing session discovers and listens, including address connections.
+pub fn can_add_system(active: bool, always: bool, adding: bool) -> bool {
+    active && !always && !adding
+}
+
 /// Address-dialog submission preserves arrangement and trust, and clears any
 /// previously selected peer key because the address names a new attempt.
 pub fn connect_by_address(
@@ -70,6 +75,14 @@ pub fn connect_by_address(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn address_sessions_can_add_another_system() {
+        assert!(can_add_system(true, false, false));
+        assert!(!can_add_system(false, false, false));
+        assert!(!can_add_system(true, true, false));
+        assert!(!can_add_system(true, false, true));
+    }
+
     #[test]
     fn address_submission_trims_and_preserves_session_choices() {
         use crate::controller::{Connection, SessionSettings};

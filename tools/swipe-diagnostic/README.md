@@ -2,8 +2,8 @@
 
 This separate app records numeric scroll and private gesture fields. It does
 not start a Daisy session, change settings, inject input, or record keyboard
-events or clipboard contents. Its event tap is listen-only. Recording and file
-writes happen outside the callback, which uses a fixed-capacity event buffer.
+events or clipboard contents. Its event tap is listen-only. The callback records numeric samples in a fixed-capacity event buffer. Report
+file writes happen outside the callback.
 
 ## Run the prepared app
 

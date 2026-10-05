@@ -97,6 +97,8 @@ pub enum Command {
         /// The screen edge was chosen for this start, rather than left as saved.
         side_chosen: bool,
     },
+    /// Connect one address without replacing a running group.
+    ConnectByAddress(SessionSettings),
     Stop,
     Forget {
         selector: String,
@@ -297,7 +299,34 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     }
 
     let mut session: Option<tokio::task::JoinHandle<()>> = None;
+    let mut addresses: Option<tokio_mpsc::UnboundedSender<(String, Option<PublicKey>)>> = None;
     while let Some(command) = commands.recv().await {
+        let command = match command {
+            Command::ConnectByAddress(settings) => {
+                let active = session.as_ref().is_some_and(|running| !running.is_finished());
+                if address_action(active) == AddressAction::Join {
+                    stored.last_session = settings.clone();
+                    if let Err(error) = save_settings(&home, &stored) {
+                        tracing::error!(error = ?error, "setup could not be saved");
+                        let _ = send_problem(&events, "Setup could not be saved", error.to_string());
+                        continue;
+                    }
+                    if let Some(sender) = &addresses
+                        && let Some(address) = explicit_connection(&settings.connection)
+                        && sender.send(address).is_ok()
+                    {
+                        continue;
+                    }
+                    // The group may have ended between checking its task and sending.
+                    // Start a new one rather than silently losing this address.
+                }
+                Command::Start {
+                    settings,
+                    side_chosen: false,
+                }
+            }
+            other => other,
+        };
         match command {
             Command::Start { settings, side_chosen } => {
                 if let Some(running) = session.take() {
@@ -319,7 +348,14 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 let session_name = name.clone();
                 let session_events = events.clone();
                 listen.send_replace(base_listening(&stored));
+                let (address_sender, address_receiver) = tokio_mpsc::unbounded_channel();
+                let (settings, address) = group_start(settings);
+                if let Some(address) = address {
+                    let _ = address_sender.send(address);
+                }
+                addresses = Some(address_sender);
                 let live = Live {
+                    addresses: address_receiver,
                     clipboard: clipboard.clone(),
                     discoverable: discoverable.clone(),
                     arrangement: arrangement.clone(),
@@ -330,6 +366,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     run_session(session_home, session_name, start, live, session_events).await;
                 }));
             }
+            Command::ConnectByAddress(_) => unreachable!("address command was normalized"),
             Command::Stop => {
                 if let Some(running) = session.take() {
                     running.abort();
@@ -430,6 +467,37 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     }
 }
 
+/// Decide whether an address joins the running group or starts a new one.
+#[derive(Debug, PartialEq, Eq)]
+enum AddressAction {
+    Join,
+    Start,
+}
+
+fn address_action(active: bool) -> AddressAction {
+    if active {
+        AddressAction::Join
+    } else {
+        AddressAction::Start
+    }
+}
+
+type ExplicitAddress = (String, Option<PublicKey>);
+
+/// An address seeds the group; it never switches off listening or discovery.
+fn group_start(mut settings: SessionSettings) -> (SessionSettings, Option<ExplicitAddress>) {
+    let address = explicit_connection(&settings.connection);
+    settings.connection = Connection::Automatic;
+    (settings, address)
+}
+
+fn explicit_connection(connection: &Connection) -> Option<(String, Option<PublicKey>)> {
+    match connection {
+        Connection::Automatic => None,
+        Connection::Connect { address, peer } => Some((address.clone(), peer.as_deref().and_then(PublicKey::from_hex))),
+    }
+}
+
 /// One press of Start, as `Command::Start` carries it.
 struct Start {
     settings: SessionSettings,
@@ -451,6 +519,7 @@ pub const ADD_SYSTEM_WINDOW: std::time::Duration = std::time::Duration::from_sec
 
 /// What may change while a session runs.
 struct Live {
+    addresses: tokio_mpsc::UnboundedReceiver<(String, Option<PublicKey>)>,
     clipboard: watch::Receiver<bool>,
     discoverable: watch::Receiver<bool>,
     arrangement: watch::Receiver<Option<crate::share::Placing>>,
@@ -459,6 +528,7 @@ struct Live {
 
 async fn run_session(home: PathBuf, name: String, start: Start, live: Live, events: Sender<Event>) {
     let Live {
+        addresses,
         clipboard,
         discoverable,
         arrangement,
@@ -496,13 +566,7 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
             listening: Some(&listening),
             signer: &signer,
         };
-        match settings.connection {
-            Connection::Automatic => service::automatic(config, &mut prompt, &mut observer).await,
-            Connection::Connect { address, peer } => {
-                let peer = peer.as_deref().and_then(PublicKey::from_hex);
-                service::connect(config, &address, peer, &mut prompt, &mut observer).await
-            }
-        }
+        service::automatic_with_addresses(config, Some(addresses), &mut prompt, &mut observer).await
     }
     .await;
 
@@ -846,6 +910,31 @@ fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn address_addition_keeps_the_running_group() {
+        assert_eq!(address_action(true), AddressAction::Join);
+        assert_eq!(address_action(false), AddressAction::Start);
+    }
+
+    #[test]
+    fn saved_address_seeds_a_discovering_group() {
+        let key = Identity::generate().unwrap().public_key();
+        let settings = SessionSettings {
+            connection: Connection::Connect {
+                address: "192.168.1.20".to_owned(),
+                peer: Some(key.to_hex()),
+            },
+            side: Side::Left,
+            trust: Policy::Days(30),
+        };
+        let (group, address) = group_start(settings.clone());
+        assert_eq!(group.connection, Connection::Automatic);
+        assert_eq!(address, Some(("192.168.1.20".to_owned(), Some(key))));
+        assert_eq!(group.side, settings.side);
+        assert_eq!(group.trust, settings.trust);
+        assert_eq!(group_start(SessionSettings::default()).1, None);
+    }
 
     #[test]
     fn a_member_stays_connected_until_its_last_link_ends() {
