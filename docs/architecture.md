@@ -41,6 +41,16 @@ Pure decision modules contain no macOS calls and are unit tested directly. The m
 
 The network queues and event-tap queue are bounded. If callback state is contended or the local input queue fills, the callback passes input through locally, reclaims local routing when possible and raises a lock-free overflow signal. The runtime then ends the session. Local control and explicit disconnect win over lagging input.
 
+The connection session owns the lifetime of every background input core. Core
+tasks may hold group handles, but those handles cannot keep the session alive.
+Stopping sharing cancels the cores, drops their transports and releases held
+input through the existing cancellation cleanup.
+
+Keyboard modifier transitions are tracked on both sides. A forwarded key keeps
+held modifier flags even if its own event omits them. Replay distinguishes
+modifier presses from releases, including releasing one side while the other
+side remains held.
+
 ## Session flow
 
 1. The controller starts automatic listening and browsing, or an optional direct connection from saved `SessionSettings`.

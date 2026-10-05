@@ -1134,8 +1134,11 @@ pub const MAX_GROUP: usize = 8;
 /// The one input core every link on this system shares: one event tap, one
 /// injector and one owner of control. It starts with the first link and
 /// stops after the last.
-#[derive(Clone)]
 pub struct Hub {
+    // Only the session's original hub owns the core lifetime. Task clones cannot
+    // keep their own sockets and capture running after that session is stopped.
+    _lifetime: Option<CoreLifetime>,
+    tasks: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
     me: PublicKey,
     peers: PeerStore,
     clipboard: watch::Receiver<bool>,
@@ -1144,6 +1147,34 @@ pub struct Hub {
     reports: std::sync::Arc<watch::Sender<share::Reports>>,
     arranged: std::sync::Arc<watch::Sender<share::Layout>>,
     members: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Owns the background input cores for one connection session.
+struct CoreLifetime(std::sync::Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>);
+
+impl Drop for CoreLifetime {
+    fn drop(&mut self) {
+        for task in self.0.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+            task.abort();
+        }
+    }
+}
+
+impl Clone for Hub {
+    fn clone(&self) -> Self {
+        Self {
+            _lifetime: None,
+            tasks: self.tasks.clone(),
+            me: self.me,
+            peers: self.peers.clone(),
+            clipboard: self.clipboard.clone(),
+            choices: self.choices.clone(),
+            running: self.running.clone(),
+            reports: self.reports.clone(),
+            arranged: self.arranged.clone(),
+            members: self.members.clone(),
+        }
+    }
 }
 
 /// Counts a link as a member of the group while it lives.
@@ -1157,7 +1188,10 @@ impl Drop for Member {
 
 impl Hub {
     pub fn new(config: &SessionConfig<'_>) -> Self {
+        let tasks = std::sync::Arc::default();
         Self {
+            _lifetime: Some(CoreLifetime(std::sync::Arc::clone(&tasks))),
+            tasks,
             me: config.identity.public_key(),
             peers: config.peers.clone(),
             clipboard: config.clipboard.clone(),
@@ -1203,7 +1237,10 @@ impl Hub {
         let (members, membership) = mpsc::unbounded_channel();
         let _ = members.send(share::Membership::Join(joining));
         *running = Some(members);
-        tokio::spawn(run_core(self.clone(), membership));
+        let task = tokio::spawn(run_core(self.clone(), membership));
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task.abort_handle());
         Ok(member)
     }
 
@@ -1429,6 +1466,55 @@ mod tests {
         assert_eq!(explicit_address(&mut addresses).await.unwrap().0, "192.168.1.21");
         drop(sender);
         assert!(explicit_address(&mut addresses).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_the_session_closes_every_socket_held_by_core_tasks() {
+        use tokio::io::AsyncReadExt;
+        let here = system();
+        let clipboard = watch::channel(true).1;
+        let hub = Hub::new(&config(&here, &clipboard));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let mut peers = Vec::new();
+        let mut sockets = Vec::new();
+        for _ in 0..3 {
+            peers.push(TcpStream::connect(listener.local_addr().unwrap()).await.unwrap());
+            sockets.push(listener.accept().await.unwrap().0);
+        }
+        let clone = hub.clone();
+        let (started, start) = tokio::sync::oneshot::channel();
+        let core = tokio::spawn(async move {
+            let _task_hub = clone;
+            let _sockets = sockets;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        hub.tasks.lock().unwrap().push(core.abort_handle());
+        start.await.unwrap();
+        drop(hub);
+        for mut peer in peers {
+            let result = tokio::time::timeout(Duration::from_millis(300), peer.read(&mut [0])).await;
+            assert!(
+                result.is_ok(),
+                "Stop Sharing must close all links without waiting for heartbeats"
+            );
+            assert_eq!(result.unwrap().unwrap(), 0);
+        }
+        assert!(core.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn dropping_a_task_clone_does_not_stop_the_session() {
+        let here = system();
+        let clipboard = watch::channel(true).1;
+        let hub = Hub::new(&config(&here, &clipboard));
+        let core = tokio::spawn(std::future::pending::<()>());
+        hub.tasks.lock().unwrap().push(core.abort_handle());
+        drop(hub.clone());
+        tokio::task::yield_now().await;
+        assert!(!core.is_finished());
+        drop(hub);
+        assert!(core.await.unwrap_err().is_cancelled());
     }
 
     #[test]

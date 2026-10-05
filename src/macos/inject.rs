@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use super::ffi::*;
 use super::pointer::Magnifier;
-use crate::input::{Action, ScrollPhase};
+use crate::input::{Action, KeyboardEvent, ScrollPhase};
 use crate::shake::ShakeDetector;
 use crate::swipe::SwipeDetector;
 
@@ -92,33 +92,10 @@ impl Injector {
                 post(event);
             }
             Action::Scroll { dx, dy, phase } => post(scroll_event(self.source, dx, dy, phase)),
-            Action::Key {
-                code,
-                down,
-                repeat,
-                flags,
-            } => {
-                // SAFETY: plain values
-                let event = unsafe { CGEventCreateKeyboardEvent(self.source, code, down) };
-                if !event.is_null() {
-                    // SAFETY: event was just created
-                    unsafe { CGEventSetFlags(event, flags) };
-                    self.set(event, kCGKeyboardEventAutorepeat, i64::from(repeat));
+            Action::Key { .. } | Action::Modifiers { .. } => {
+                if let Some(key) = action.keyboard() {
+                    post(keyboard_event(self.source, key));
                 }
-                post(event);
-            }
-            Action::Modifiers { code, flags } => {
-                // SAFETY: plain values
-                let event = unsafe { CGEventCreateKeyboardEvent(self.source, code, true) };
-                if !event.is_null() {
-                    // a modifier press is a flags-changed event carrying the new state
-                    // SAFETY: event was just created
-                    unsafe {
-                        CGEventSetType(event, kCGEventFlagsChanged);
-                        CGEventSetFlags(event, flags);
-                    }
-                }
-                post(event);
             }
             // before macOS 27 synthetic swipes cannot open Mission Control and
             // do not animate, so the equivalent shortcuts stand in for them
@@ -212,6 +189,22 @@ fn scroll_event(source: CGEventSourceRef, dx: f64, dy: f64, phase: Option<Scroll
     event
 }
 
+fn keyboard_event(source: CGEventSourceRef, key: KeyboardEvent) -> CGEventRef {
+    // SAFETY: plain values; the caller releases the returned event.
+    let event = unsafe { CGEventCreateKeyboardEvent(source, key.code, key.down) };
+    if !event.is_null() {
+        // SAFETY: event was just created and is still retained.
+        unsafe {
+            if key.modifier {
+                CGEventSetType(event, kCGEventFlagsChanged);
+            }
+            CGEventSetFlags(event, key.flags);
+            CGEventSetIntegerValueField(event, kCGKeyboardEventAutorepeat, i64::from(key.repeat));
+        }
+    }
+    event
+}
+
 fn post(event: CGEventRef) {
     if event.is_null() {
         return;
@@ -239,6 +232,92 @@ mod tests {
     // SAFETY: a CGEventRef is a pointer to the opaque __CGEvent struct
     unsafe impl Encode for Event {
         const ENCODING: Encoding = Encoding::Pointer(&Encoding::Struct("__CGEvent", &[]));
+    }
+
+    #[test]
+    fn appkit_reads_every_keyboard_modifier_combination_and_repeat() {
+        use objc2_app_kit::NSEventType;
+        let source = unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) };
+        let masks = [0x0002_0000, 0x0004_0000, 0x0008_0000, 0x0010_0000, 0x0080_0000];
+        let all_flags = masks.iter().fold(0, |flags, mask| flags | mask);
+        for subset in 0..32 {
+            let flags = masks.iter().enumerate().fold(0, |flags, (i, mask)| {
+                flags | if subset & (1 << i) != 0 { *mask } else { 0 }
+            });
+            for code in 0..128 {
+                // Modifier transitions have their own flags-changed matrix below.
+                if matches!(code, 54..=63) {
+                    continue;
+                }
+                for (down, repeat) in [(true, false), (true, true), (false, false)] {
+                    let key = KeyboardEvent {
+                        code,
+                        down,
+                        repeat,
+                        flags,
+                        modifier: false,
+                    };
+                    let event = keyboard_event(source, key);
+                    assert!(!event.is_null());
+                    let converted: Option<Retained<NSEvent>> =
+                        unsafe { msg_send![NSEvent::class(), eventWithCGEvent: Event(event)] };
+                    unsafe { CFRelease(event.cast_const()) };
+                    let event = converted.expect("AppKit must accept the generated keyboard event");
+                    assert_eq!(
+                        event.r#type(),
+                        if down { NSEventType::KeyDown } else { NSEventType::KeyUp },
+                        "code {code}, flags {flags:#x}",
+                    );
+                    assert_eq!(event.keyCode(), code);
+                    let observed = event.modifierFlags().bits() as u64 & all_flags;
+                    // AppKit adds the secondary-function flag for navigation and
+                    // function key codes, even when the physical Fn key is up.
+                    assert_eq!(
+                        observed & !0x0080_0000,
+                        flags & !0x0080_0000,
+                        "code {code}, subset {subset}"
+                    );
+                    assert_eq!(observed & flags, flags, "requested modifiers must survive");
+                    if down {
+                        assert_eq!(event.isARepeat(), repeat);
+                    }
+                }
+            }
+        }
+        if !source.is_null() {
+            unsafe { CFRelease(source.cast_const()) };
+        }
+    }
+
+    #[test]
+    fn appkit_reads_left_and_right_modifier_transitions() {
+        use objc2_app_kit::NSEventType;
+        for (code, flag) in [
+            (55, 0x0010_0008),
+            (54, 0x0010_0010),
+            (56, 0x0002_0002),
+            (60, 0x0002_0004),
+            (59, 0x0004_0001),
+            (62, 0x0004_2000),
+            (58, 0x0008_0020),
+            (61, 0x0008_0040),
+            (63, 0x0080_0000),
+            (57, 0x0001_0000),
+        ] {
+            for flags in [flag, 0] {
+                let action = Action::Modifiers { code, flags };
+                let event = keyboard_event(std::ptr::null_mut(), action.keyboard().unwrap());
+                assert!(!event.is_null());
+                assert_eq!(unsafe { CGEventGetFlags(event) }, flags);
+                let converted: Option<Retained<NSEvent>> =
+                    unsafe { msg_send![NSEvent::class(), eventWithCGEvent: Event(event)] };
+                unsafe { CFRelease(event.cast_const()) };
+                let event = converted.expect("AppKit must accept the generated modifier event");
+                assert_eq!(event.r#type(), NSEventType::FlagsChanged);
+                assert_eq!(event.keyCode(), code);
+                assert_eq!(event.modifierFlags().bits() as u64 & 0x00ff_0000, flags & 0x00ff_0000);
+            }
+        }
     }
 
     fn appkit_event(phase: Option<ScrollPhase>) -> Retained<NSEvent> {
