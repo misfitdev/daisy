@@ -12,6 +12,7 @@ pub mod app;
 pub mod clipboard;
 pub mod control;
 pub mod controller;
+pub mod device;
 pub mod discovery;
 pub mod identity;
 pub mod input;

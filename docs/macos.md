@@ -2,6 +2,12 @@
 
 What Daisy relies on in macOS, including undocumented parts, and what was measured to establish it. Hardware observations below name the relevant macOS versions; they were not all established by one machine pair.
 
+## Device signing
+
+`src/macos/device.rs` creates non-exportable P-256 Secure Enclave keys in the Data Protection Keychain. The private key uses `AfterFirstUnlockThisDeviceOnly` protection with private-key usage and no user-presence requirement. Daisy stores only a randomly generated Keychain label in `device-identity`, resolves that label within the signed app’s access group, and checks that the returned key belongs to the Secure Enclave. Signatures use ECDSA with SHA-256 and DER encoding; public keys use compressed SEC1 encoding.
+
+The signed app must embed a provisioning profile authorizing its application identifier and certificate. Key creation and rotation require an unlocked system; signing with an existing key works after the first unlock. Rotation replaces the saved reference, retires the old key, and restores the prior reference if retirement fails.
+
 ## Permissions
 
 Reading input needs Input Monitoring; posting input needs Accessibility. macOS grants both to a signed app, keyed to its bundle ID and signing certificate rather than a hash, so grants survive rebuilds and updates signed the same way.

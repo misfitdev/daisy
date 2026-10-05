@@ -37,9 +37,9 @@ update:
 bundle_id := "dev.misfit.daisy"
 app := "target/Daisy.app"
 # DAISY_SIGN_IDENTITY, or the first Apple Development identity
-sign_identity := '''${DAISY_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/"Apple Development/ {print $2; exit}')}'''
+sign_identity := '''${DAISY_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/"Developer ID Application/ {print $2; exit}')}'''
 
-# Build Daisy.app and sign it: Apple Development by default, or the
+# Build Daisy.app and sign it: Developer ID Application by default, or the
 # identity in DAISY_SIGN_IDENTITY ("-" signs ad hoc, as CI does)
 bundle:
     #!/usr/bin/env bash
@@ -47,7 +47,7 @@ bundle:
     cargo build --release
     identity="{{sign_identity}}"
     if [ -z "$identity" ]; then
-        echo "no Apple Development signing identity found; see security find-identity -v -p codesigning" >&2
+        echo "no Developer ID Application signing identity found; see security find-identity -v -p codesigning" >&2
         exit 1
     fi
     version="$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)"
@@ -68,9 +68,18 @@ bundle:
     iconutil -c icns "$icon_work/Daisy.iconset" -o "{{app}}/Contents/Resources/Daisy.icns"
     # notarization requires a secure timestamp on distributed builds
     timestamp=""
-    case "$identity" in "Developer ID"*) timestamp="--timestamp" ;; esac
+    [ "$identity" = "-" ] || timestamp="--timestamp"
     # hardened runtime now, so notarizing later changes nothing at run time
-    codesign --force --options runtime ${timestamp:+"$timestamp"} --sign "$identity" --identifier "{{bundle_id}}" "{{app}}"
+    profile_args=()
+    if [ "$identity" != "-" ]; then
+        if [ -z "${DAISY_PROVISIONING_PROFILE:-}" ]; then
+            echo "set DAISY_PROVISIONING_PROFILE to a macOS profile authorizing this signing certificate and {{bundle_id}}" >&2
+            exit 1
+        fi
+        python3 macos/prepare-profile.py "$DAISY_PROVISIONING_PROFILE" "{{bundle_id}}" "$identity" "{{app}}" "$icon_work/entitlements.plist"
+        profile_args=(--entitlements "$icon_work/entitlements.plist")
+    fi
+    codesign --force --options runtime ${timestamp:+"$timestamp"} "${profile_args[@]}" --sign "$identity" --identifier "{{bundle_id}}" "{{app}}"
     codesign --verify --strict "{{app}}"
     echo "signed {{app}} with $identity"
 
@@ -125,7 +134,7 @@ package: bundle
     # ad hoc signatures do not apply to disk images
     if [ "$identity" != "-" ]; then
         timestamp=""
-        case "$identity" in "Developer ID"*) timestamp="--timestamp" ;; esac
+        [ "$identity" = "-" ] || timestamp="--timestamp"
         codesign --sign "$identity" ${timestamp:+"$timestamp"} "$dmg"
     fi
     if [ -n "${NOTARY_KEY_ID:-}" ]; then

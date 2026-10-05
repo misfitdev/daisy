@@ -65,12 +65,15 @@ jobs:
       - name: Build, sign and notarize
         env:
           DAISY_SIGN_IDENTITY: Developer ID Application
+          DEVELOPER_ID_PROFILE_BASE64: ${{ secrets.DEVELOPER_ID_PROFILE_BASE64 }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
           NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
         run: |
           export NOTARY_KEY_PATH="$RUNNER_TEMP/notary.p8"
           printf '%s' "$NOTARY_KEY" > "$NOTARY_KEY_PATH"
+          export DAISY_PROVISIONING_PROFILE="$RUNNER_TEMP/daisy.provisionprofile"
+          printf '%s' "$DEVELOPER_ID_PROFILE_BASE64" | base64 --decode > "$DAISY_PROVISIONING_PROFILE"
           just package
           rm -f "$NOTARY_KEY_PATH"
 

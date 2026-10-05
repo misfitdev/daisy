@@ -16,13 +16,15 @@ In scope:
 Out of scope:
 
 - A system that was deliberately paired, and what it does as a member: trusted input is the capability pairing grants. A member can also introduce a new system to the group, or revoke one (see [Groups](#groups)), so a compromised member can admit or remove systems.
-- Someone with the user's account or root on either system. They can read the key or grant themselves the same permissions.
+- Someone controlling the user’s account or root on a paired system. They can request signatures from that system’s Secure Enclave while running there.
 
 ## Connections
 
 Every connection uses a Noise `XX` handshake with X25519, ChaCha20-Poly1305 and BLAKE2s, through a library and without a network extension or root.
 
 After the handshake, every message is encrypted and authenticated with a per-direction nonce. Altered, replayed or reordered frames fail authentication. Each side's protocol version travels inside the handshake, so it is authenticated before either side acts on it.
+
+Before trust negotiation, each side signs the completed Noise handshake hash and its connection role with its Secure Enclave P-256 key. Signatures use ECDSA with SHA-256 and DER encoding. Daisy checks the signature, then requires the device public key to match the key pinned with that peer’s Noise identity. The role prevents reflection and the handshake hash prevents replay on another session. Possession of the Noise private key alone does not authorize a connection.
 
 ## Pairing
 
@@ -32,7 +34,7 @@ The handshake tells each side the other's long-term public key, but not whether 
 2. The connecting system types the code; the listening system shows a random six-digit code. A group member always opens the connection to a system with no peers, so the code appears on the newcomer. Between two systems with no peers, the one open to pairing longer opens; when they opened within two seconds of each other, their random advertisement nonces decide.
 3. Both run SPAKE2 over the Ed25519 group, keyed by that code.
 4. Each proves it derived the same key with HMAC-SHA256 over the Noise handshake hash, labelled by role. The role label stops reflection; the handshake hash binds the proof to this connection.
-5. Only after both proofs verify does each side pin the other's public key.
+5. Only after both proofs verify does each side pin both the other’s Noise key and device public key.
 
 An attacker in the middle has a different handshake with each side and does not know the code, so it gets one guess per attempt: a one-in-a-million chance. Comparing a short code by eye would not be safe because an attacker could grind keys until screens matched; the code is only ever PAKE input.
 
@@ -55,12 +57,12 @@ Expired trust is removed from the peer file. The menu-bar app can forget a peer 
 
 A group is every system a member trusts, up to eight, each holding an encrypted session with every other. A new system joins by pairing with any one member; that member introduces it to the rest.
 
-- **Signing keys.** Each system has an Ed25519 key used only to sign introductions and revocations, `signing` beside its identity. It sends the public half over each authenticated session, and the other side pins it to that system's Noise key; a key once pinned cannot change.
+- **Device keys.** The same non-exportable Secure Enclave P-256 key signs session proofs, introductions and revocations. Pairing pins its public key beside the Noise identity. A pinned device key cannot change without forgetting the peer and pairing again.
 - **Introductions.** An introduction names the introducer, the newcomer's Noise and signing keys, its name, the introducer's trust policy for it, and when the introducer began trusting it. It is signed by the introducer. A system accepts an introduction only from the member it names as introducer, with that member's pinned signing key, and not dated more than five minutes ahead of its own clock. It trusts the newcomer under whichever policy ends sooner: its own for the introducer, or the introducer's for the newcomer. Trust in an introduced system ends when trust in its introducer ends.
-- **Revocations.** Forgetting one system signs a revocation naming it. Every member that trusts the signer removes that system and every system it introduced, keeps the revocation, and passes it on. An introduction dated before a known revocation of its newcomer is refused, so a member that has not yet heard cannot bring a revoked system back; pairing it again directly does. A system ignores a revocation of itself. `daisy forget --all` only leaves the group; it revokes nothing.
+- **Revocations.** Forgetting one system signs a revocation naming it. Every member that trusts the signer removes that system and every system it introduced, keeps the revocation, and passes it on. An introduction dated before a known revocation of its newcomer is refused, so a member that has not yet heard cannot bring a revoked system back; pairing it again directly does. A system ignores a revocation of itself. Revocations are signed and saved before local peer removal; signing or persistence failure preserves the peer record for retry. `daisy forget --all` only leaves the group; it revokes nothing.
 - **Catching up.** Whenever a session starts, each side sends the other an introduction of every system it trusts and every revocation it knows, so a member that was away catches up.
 
-Introductions widen trust beyond the pairing a person performed: pairing A with B, and A with C, makes B and C trust each other. A member that is compromised, or whose key is stolen, can introduce a system of the attacker's choosing to every member, and can revoke members. Forgetting that member on any one system removes it, and everything it introduced, from the whole group.
+Introductions widen trust beyond the pairing a person performed: pairing A with B, and A with C, makes B and C trust each other. A member that is compromised, or with malware able to request its device signatures, can introduce a system of the attacker's choosing to every member, and can revoke members. Forgetting that member on any one system removes it, and everything it introduced, from the whole group.
 
 ## Discovery
 
@@ -68,7 +70,7 @@ Each system advertises `_daisy._tcp` with Bonjour under a random instance and ho
 
 ## Reconnecting
 
-Nearby paired peers find each other again with Bonjour after a drop, sleep or network change, and the elected opener connects; with a direct address, the system that connects keeps trying. Every attempt runs the full Noise handshake and trust check, so an expired or forgotten peer is refused exactly as on first contact. A reconnect is never allowed to pair: pairing is offered only until the first session starts. If the key that answers is not the key of the peer it was connected to, Daisy stops instead of retrying. Only network failures are retried (refused, unreachable, reset, silent or timed out); trust, key, protocol and setup failures stop.
+Nearby paired peers find each other again with Bonjour after a drop, sleep or network change, and the elected opener connects; with a direct address, the system that connects keeps trying. Every attempt runs the full Noise handshake, device proof and trust check, so an expired or forgotten peer is refused exactly as on first contact. A reconnect is never allowed to pair: pairing is offered only until the first session starts. If the key that answers is not the key of the peer it was connected to, Daisy stops instead of retrying. Only network failures are retried (refused, unreachable, reset, silent or timed out); trust, key, protocol and setup failures stop.
 
 ## Failure containment
 
@@ -88,9 +90,11 @@ that use the standard macOS markers.
 
 ## Keys at rest
 
-Each system's long-term private key is `~/Library/Application Support/daisy/identity`, readable only by the user (`0600` in a `0700` directory). Daisy refuses to load a key file readable by other users. Its signing key is `signing` beside it, also `0600`; `daisy rotate-key` replaces both.
+Each system’s P-256 device private key stays in its Secure Enclave. The Data Protection Keychain persists it with `AfterFirstUnlockThisDeviceOnly` protection and private-key usage access control. It is non-exportable, does not synchronize, and cannot be restored onto another system. Signing does not require Touch ID or password prompts, so reconnects remain unattended. Malware running under the user’s account on the paired system can request signatures there.
 
-Paired public keys, their signing keys, who introduced them, and trust policies live in `peers.toml` beside it; revocations live in `revocations.toml`. Every update locks, rereads and rewrites the only copy, preventing a running process from resurrecting a peer forgotten by another command.
+The `device-identity` file holds a Keychain lookup reference, not private key material. The separate X25519 Noise key remains in `identity`. Both files are user-only (`0600`, under a `0700` directory). Copying the Noise key and the Keychain reference to another system does not supply the pinned device key. `daisy rotate-key` replaces both identities, retires the previous device key, and requires fresh pairing. A failed retirement restores the prior reference and reports an error. Unlock this system before creating or rotating a device key.
+
+Protocol 5 starts with fresh pairing state in `trust-v5/`. Earlier peer records are not accepted or converted; existing groups pair again. Pinned public keys, introducers and trust policies live in `trust-v5/peers.toml`; signed revocations live in `trust-v5/revocations.toml`. Each update locks, rereads and rewrites the store, preventing a running process from restoring a peer another process forgot.
 
 ## Release integrity
 

@@ -13,6 +13,12 @@ mise install      # Rust, project commands, release notes and security scanners
 just              # list the tasks
 ```
 
+## Signing a local app
+
+Running the app or CLI with a persistent device identity requires a signed `Daisy.app` with an embedded provisioning profile for `dev.misfit.daisy`. Set `DAISY_PROVISIONING_PROFILE` to the profile’s path. `just app` defaults to a Developer ID Application certificate; set `DAISY_SIGN_IDENTITY` to select another certificate authorized by the profile. See [release setup](docs/releasing.md#one-time-setup) for the profile requirements. Unlock this system before creating or rotating its device key.
+
+`just check` uses software signing keys in unit tests and needs no signing credentials. An ad hoc bundle can exercise the interface, but cannot create the persistent Keychain device identity.
+
 ## The gate
 
 `just check` runs clippy with warnings as errors, `rustfmt --check` and the tests. It must pass before a change is committed, and CI runs the same gate on macOS 26.
@@ -35,7 +41,7 @@ mise exec -- actionlint
 
 Tests cover decisions: crossing edges, releasing held keys, recognizing swipes, pairing and encryption. They cannot prove that macOS acts on captured or posted events, so changes to input, the pointer or swipes need a run on two systems:
 
-1. Run `just app permissions --request` on each system, then grant Daisy Accessibility and Input Monitoring in System Settings. `just app` signs with your Apple Development certificate, which keeps permissions across rebuilds.
+1. Run `just app permissions --request` on each system, then grant Daisy Accessibility and Input Monitoring in System Settings. `just app` uses the certificate and provisioning profile configured above; keeping the signed app identity stable preserves permissions across rebuilds.
 2. On one system, run `just app listen --pair`.
 3. On the peer, build the same commit and run `just app connect <first-system>.local --pair --side right`, using the side where the first system's screen sits, then type the displayed code.
 4. Prefix either command with `RUST_LOG=daisy=debug` to see each side's decisions.

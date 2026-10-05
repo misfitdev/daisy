@@ -2,13 +2,18 @@
 
 For maintainers. Official release artifacts are built, signed, notarized and published by `.github/workflows/release.yml` from a version tag.
 
+Signed app builds require a macOS provisioning profile for `dev.misfit.daisy` that authorizes the selected signing certificate. Set `DAISY_PROVISIONING_PROFILE` to its local path. The bundle recipe validates the profile, embeds it, and derives the application identifier and team entitlements for Daisy’s default Keychain access group. The default signing identity is Developer ID Application; `DAISY_SIGN_IDENTITY` can select another certificate authorized by the profile.
+
+Release CI reads the profile from the `DEVELOPER_ID_PROFILE_BASE64` repository secret. Ad hoc CI bundles exercise build and interface checks; they cannot create a Keychain device identity.
+
 ## One-time setup
 
-The workflow needs five repository secrets:
+The workflow needs six repository secrets:
 
 | Secret | What it contains |
 |---|---|
 | `DEVELOPER_ID_P12` | Developer ID Application certificate and private key, as a base64-encoded `.p12` |
+| `DEVELOPER_ID_PROFILE_BASE64` | Base64-encoded Developer ID provisioning profile for `dev.misfit.daisy`, authorizing the signing certificate |
 | `DEVELOPER_ID_P12_PASSWORD` | Password used when exporting the `.p12` |
 | `NOTARY_KEY_ID` | App Store Connect API key ID |
 | `NOTARY_ISSUER_ID` | Issuer ID shown with that key |
@@ -17,11 +22,13 @@ The workflow needs five repository secrets:
 Create them:
 
 1. In Xcode, open Settings → Accounts → Manage Certificates → **+** → Developer ID Application. Export it from Keychain Access under My Certificates so the private key is included, as a password-protected `.p12`.
-2. In App Store Connect, open Users and Access → Integrations → Team Keys → **+**, with the Developer role. Download the `.p8`; it can only be downloaded once.
-3. From a terminal authenticated to GitHub as a repository administrator:
+2. In Apple Developer Certificates, Identifiers & Profiles, create a Developer ID provisioning profile for `dev.misfit.daisy` and the signing certificate. Daisy uses the app’s default Keychain access group; no separate Keychain Sharing capability or user-presence requirement is needed. Download the profile.
+3. In App Store Connect, open Users and Access → Integrations → Team Keys → **+**, with the Developer role. Download the `.p8`; it can only be downloaded once.
+4. From a terminal authenticated to GitHub as a repository administrator:
 
 ```bash
 base64 -i DeveloperID.p12 | gh secret set DEVELOPER_ID_P12 -R misfitdev/daisy
+base64 -i Daisy.provisionprofile | gh secret set DEVELOPER_ID_PROFILE_BASE64 -R misfitdev/daisy
 gh secret set DEVELOPER_ID_P12_PASSWORD -R misfitdev/daisy
 gh secret set NOTARY_KEY_ID -R misfitdev/daisy
 gh secret set NOTARY_ISSUER_ID -R misfitdev/daisy

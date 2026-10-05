@@ -143,14 +143,16 @@ The default data directory is:
 It contains:
 
 - `identity`: this system's long-term private identity key.
-- `signing`: the key it signs introductions and revocations with.
-- `peers.toml`: trusted public keys, names, trust policies, timestamps, signing keys and who introduced each.
-- `revocations.toml`: signed revocations to pass on to members.
-- `arrangement.toml`: where every member's displays were last placed.
+- `device-identity`: a reference to its Secure Enclave device signing key in the Keychain.
+- `trust-v5/peers.toml`: trusted public keys, names, trust policies, timestamps, signing keys and who introduced each.
+- `trust-v5/revocations.toml`: signed revocations to pass on to members.
+- `trust-v5/arrangement.toml`: where every member's displays were last placed.
 - `stats.toml`: each running link's round trips, for `daisy stats`.
 - `settings.toml`: the last menu-bar setup, stored with mode `0600`.
 
-`--name` changes the name shown to the peer. `--home <directory>`, or `DAISY_HOME`, moves identity, peers and settings storage; this is useful when running two test identities on one system. Backing up or copying `identity` copies the system's identity, so protect it accordingly.
+`--name` changes the name shown to the peer. `--home <directory>`, or `DAISY_HOME`, moves identity, peers and settings storage; this is useful when running two test identities on one system. The device private key stays in this system’s Secure Enclave. Copying these files to another system does not copy that identity; reset the identity and pair again.
+
+Unlock this system before creating or rotating its device key. Existing keys can sign after the first unlock without a Touch ID or password prompt.
 
 `rotate-key` replaces this system's identity and signing key and requires every peer to pair again.
 

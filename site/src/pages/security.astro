@@ -19,8 +19,11 @@ const controls = [
     id: "identity",
     title: "Device identity",
     rows: [
-      ["Identity key", "Long-term X25519 key pair per system"],
-      ["Storage", "Owner-only file (0600 in a 0700 directory); refused if readable by other users"],
+      ["Device key", "Non-exportable Secure Enclave P-256 signing key per system"],
+      ["Session authentication", "ECDSA-SHA256 proof over each Noise handshake hash and connection role, checked against the pinned device key"],
+      ["Noise key", "Separate long-term X25519 key; possession alone does not authorize a session"],
+      ["Storage", "Device key in the Data Protection Keychain with AfterFirstUnlockThisDeviceOnly protection; identity files contain the Noise key and a Keychain reference"],
+      ["Reconnect", "Device signing requires no Touch ID or password prompt"],
       ["Rotation", "Supported; invalidates every existing pairing"],
     ],
   },
@@ -30,7 +33,7 @@ const controls = [
     rows: [
       ["Authentication", "SPAKE2 password-authenticated key exchange over the Ed25519 group, keyed by a one-time six-digit code"],
       ["Key confirmation", "HMAC-SHA256 over the Noise handshake hash, role-labelled against reflection"],
-      ["Result", "Peer public key pinned after mutual confirmation"],
+      ["Result", "Peer Noise and device public keys pinned together after mutual confirmation"],
       ["Guessing resistance", "One guess per code; at most five unknown-key attempts per ten minutes; one pairing at a time"],
       ["Consent", "A sharing system accepts a new one only while it has no peers, for 30 seconds after Add a System, or with Always discoverable on; unknown keys are refused otherwise"],
       ["Timeouts", "Handshake 15 seconds; pairing two minutes"],

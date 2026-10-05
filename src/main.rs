@@ -141,8 +141,15 @@ fn main() -> Result<()> {
 }
 
 async fn run_cli(command: Command, home: PathBuf, name: String) -> Result<()> {
+    if let Command::Screenshot { path } = &command {
+        return daisy::app::screenshot::save(path);
+    }
     let identity = Identity::load_or_create(&home.join("identity"))?;
-    let signer = daisy::introduce::Signer::load_or_create(&home.join("signing"))?;
+    let signer = if matches!(command, Command::RotateKey) {
+        daisy::introduce::Signer::rotate(&home.join("device-identity"))?
+    } else {
+        daisy::introduce::Signer::load_or_create(&home.join("device-identity"))?
+    };
     let peers = PeerStore::open(&home)?;
     let keys = Keys {
         identity: &identity,
@@ -288,8 +295,7 @@ async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStor
             let (removed, unmatched) = if all {
                 (peers.forget_all(now)?, Vec::new())
             } else {
-                let forgotten = peers.forget(&selectors, now)?;
-                peers.record_revocations(signer, identity.public_key(), &forgotten.keys, now)?;
+                let forgotten = peers.forget_revoking(&selectors, signer, identity.public_key(), now)?;
                 (forgotten.removed, forgotten.unmatched)
             };
             if removed > 0 {
@@ -304,7 +310,6 @@ async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStor
         }
         Command::RotateKey => {
             let rotated = Identity::rotate(&home.join("identity"))?;
-            daisy::introduce::Signer::generate().save(&home.join("signing"))?;
             println!(
                 "This system's key changed from {} to {}.\nEvery peer must pair again. Restart Daisy if it is running.",
                 identity.public_key(),

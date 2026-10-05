@@ -24,7 +24,7 @@ const PROLOGUE: &[u8] = b"daisy";
 
 /// Session protocol version. Raise it for any change that would make two
 /// versions misread each other; sessions need the same version on both sides.
-pub const PROTOCOL: u16 = 4;
+pub const PROTOCOL: u16 = 5;
 
 /// Longest app version carried in a handshake payload.
 const MAX_APP_VERSION: usize = 64;
@@ -119,6 +119,8 @@ pub enum SessionError {
     TooLarge(usize),
     #[error("malformed message: {0}")]
     Malformed(#[from] postcard::Error),
+    #[error("device authentication failed: {0}")]
+    Device(#[from] anyhow::Error),
     #[error("peer did not present a key")]
     NoRemoteKey,
     /// The peer predates version reporting, or the handshake was altered.
@@ -139,6 +141,7 @@ pub struct Channel<S> {
     role: Role,
     remote_key: PublicKey,
     handshake_hash: Vec<u8>,
+    remote_device: Option<crate::device::PublicKey>,
     buffer: Vec<u8>,
 }
 
@@ -241,6 +244,7 @@ where
             role,
             remote_key,
             handshake_hash,
+            remote_device: None,
             buffer,
         })
     }
@@ -258,6 +262,40 @@ where
     /// computed over it cannot be replayed on another connection.
     pub fn handshake_hash(&self) -> &[u8] {
         &self.handshake_hash
+    }
+
+    /// Prove possession of the device key over this session, before trust or input.
+    pub async fn authenticate_device(&mut self, signer: &crate::device::Signer) -> Result<(), SessionError> {
+        let signature = signer.sign_bytes(&self.device_challenge(self.role))?;
+        self.send(&Message::DeviceProof {
+            key: signer.public(),
+            signature,
+        })
+        .await?;
+        let Message::DeviceProof { key, signature } = self.recv().await? else {
+            return Err(anyhow::anyhow!("the peer did not provide a device signature").into());
+        };
+        let peer_role = match self.role {
+            Role::Initiator => Role::Responder,
+            Role::Responder => Role::Initiator,
+        };
+        key.verify(&self.device_challenge(peer_role), &signature)?;
+        self.remote_device = Some(key);
+        Ok(())
+    }
+
+    fn device_challenge(&self, role: Role) -> Vec<u8> {
+        let mut bytes = b"daisy device session v1".to_vec();
+        bytes.push(match role {
+            Role::Initiator => 0,
+            Role::Responder => 1,
+        });
+        bytes.extend_from_slice(&self.handshake_hash);
+        bytes
+    }
+
+    pub fn remote_device(&self) -> Option<crate::device::PublicKey> {
+        self.remote_device
     }
 
     pub async fn send(&mut self, message: &Message) -> Result<(), SessionError> {
@@ -383,6 +421,66 @@ mod tests {
         let responder = Identity::generate().unwrap();
         let (left, right) = tokio::join!(Channel::initiate(a, &initiator), Channel::respond(b, &responder));
         (left.unwrap(), right.unwrap(), initiator, responder)
+    }
+
+    #[tokio::test]
+    async fn device_proofs_authenticate_both_roles() {
+        let (mut left, mut right, _, _) = connected_pair().await;
+        let a = crate::device::Signer::generate().unwrap();
+        let b = crate::device::Signer::generate().unwrap();
+        let (first, second) = tokio::join!(left.authenticate_device(&a), right.authenticate_device(&b));
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(left.remote_device(), Some(b.public()));
+        assert_eq!(right.remote_device(), Some(a.public()));
+    }
+
+    #[tokio::test]
+    async fn missing_device_proof_is_rejected() {
+        let (mut left, mut right, _, _) = connected_pair().await;
+        let signer = crate::device::Signer::generate().unwrap();
+        let peer = async {
+            let _ = right.recv().await.unwrap();
+            right.send(&Message::Ping { nonce: 1 }).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(left.authenticate_device(&signer), peer);
+        assert!(result.is_err());
+        assert_eq!(left.remote_device(), None);
+    }
+
+    #[tokio::test]
+    async fn reflected_device_proof_is_rejected() {
+        let (mut left, mut right, _, _) = connected_pair().await;
+        let signer = crate::device::Signer::generate().unwrap();
+        let peer = async {
+            let proof = right.recv().await.unwrap();
+            right.send(&proof).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(left.authenticate_device(&signer), peer);
+        assert!(result.is_err());
+        assert_eq!(left.remote_device(), None);
+    }
+
+    #[tokio::test]
+    async fn device_proof_cannot_be_replayed_on_another_session() {
+        let (_, old, _, _) = connected_pair().await;
+        let signer = crate::device::Signer::generate().unwrap();
+        let signature = signer.sign_bytes(&old.device_challenge(Role::Responder)).unwrap();
+        let (mut left, mut right, _, _) = connected_pair().await;
+        let peer = async {
+            let _ = right.recv().await.unwrap();
+            right
+                .send(&Message::DeviceProof {
+                    key: signer.public(),
+                    signature,
+                })
+                .await
+                .unwrap();
+        };
+        let local = crate::device::Signer::generate().unwrap();
+        let (result, ()) = tokio::join!(left.authenticate_device(&local), peer);
+        assert!(result.is_err());
+        assert_eq!(left.remote_device(), None);
     }
 
     #[tokio::test]

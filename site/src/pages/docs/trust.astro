@@ -6,6 +6,7 @@ import { href } from "../../config";
 <Docs title="Trust and pairing" slug="trust" lede="Your systems trust each other directly. You decide for how long." description="How Daisy pairing works, how long trust lasts, and how to forget a peer.">
   <h2>Pairing</h2>
   <p>Each new system pairs once. The system being added shows a six-digit code, and you type it on a system already sharing. When two systems with no peers pair, that is the one you started last. The code proves, cryptographically, that both systems are the ones you meant. From then on, they recognize each other without a code, and a system that joins a group is introduced to every member.</p>
+  <p>Pairing records both the peer’s network key and its Secure Enclave device key. Every connection requires a signature from that device key over the connection’s encrypted handshake. The private device key cannot be exported, so copying Daisy’s data files to another system does not let it connect as the paired peer.</p>
   <p>A system accepts a new one only while it is sharing and:</p>
   <ul>
     <li>it has no peers yet,</li>
@@ -34,7 +35,7 @@ import { href } from "../../config";
   <h2>Advanced</h2>
   <p><strong>Always discoverable</strong>, under <strong>Advanced…</strong>, lets a group accept a new system at any time without Add a System. Turning it on asks for Touch ID or the login password.</p>
   <p>The command line can also set a fixed term: a number of days after pairing, however often the two connect. See the <a href={href("/docs/user-guide/")}>User guide</a>.</p>
-  <p>Each system has its own key. Replacing it means every peer paired with it must pair again. Do this only if you think a system's key has been copied.</p>
+  <p>Each system has a network key and a device signing key. Resetting its identity replaces both, retires the previous device key, and requires every peer to pair again. A device identity copied from another system cannot be loaded; reset it on this system and pair again.</p>
 
   <p>The <a href={href("/docs/security-model/")}>security model</a> explains the cryptography, and <a href={href("/docs/user-guide/")}>User guide</a> covers the app and the optional command line.</p>
 </Docs>

@@ -106,6 +106,11 @@ pub enum Message {
     Revoke {
         revocation: crate::introduce::Signed<crate::introduce::Revocation>,
     },
+    /// Secure Enclave proof over the completed Noise handshake and sender role.
+    DeviceProof {
+        key: crate::device::PublicKey,
+        signature: Vec<u8>,
+    },
 }
 
 /// A clipboard snapshot is its items, each a `Begin`, its `Chunk`s and an
@@ -358,7 +363,7 @@ mod tests {
                 body: crate::introduce::Introduction {
                     introducer: key,
                     newcomer: key,
-                    newcomer_signing: [0; 32],
+                    newcomer_signing: crate::device::test_public(0),
                     name: String::new(),
                     policy: crate::trust::Policy::Forever,
                     trusted_since: 0,
