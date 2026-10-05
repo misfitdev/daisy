@@ -9,6 +9,23 @@ use crate::input::Side;
 
 pub const SETTLE: Duration = Duration::from_millis(150);
 
+/// Tracks new physical input without treating heartbeats or ownership changes
+/// as activity. Input seen while locked or following is never replayed later.
+pub struct Activity {
+    last: Option<Duration>,
+}
+
+impl Activity {
+    pub fn new(last: Option<Duration>) -> Self {
+        Self { last }
+    }
+
+    pub fn take(&mut self, physical: Option<Duration>, owns: bool, locked: bool) -> bool {
+        let previous = std::mem::replace(&mut self.last, physical);
+        physical.is_some() && physical != previous && owns && !locked
+    }
+}
+
 /// What a person sees of one peer's link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Link {
@@ -72,6 +89,14 @@ impl SharedControl {
         let at = self.activity.load(Ordering::Acquire);
         at != 0 && self.now().saturating_sub(Duration::from_nanos(at - 1)) < SETTLE
     }
+
+    /// Last physical input, for sending activity only when it changes.
+    pub fn physical_activity(&self) -> Option<Duration> {
+        self.activity
+            .load(Ordering::Acquire)
+            .checked_sub(1)
+            .map(Duration::from_nanos)
+    }
 }
 
 /// Who has control across a group. Every claim names its claimant and a
@@ -134,6 +159,17 @@ impl Control {
     /// Whether input `from` a peer, stamped `generation`, is played here.
     pub fn receives(&self, generation: u64, from: PublicKey, now: Duration) -> bool {
         self.owner == from && from != self.me && generation == self.generation && now >= self.local_until
+    }
+
+    pub fn receives_activity(
+        &self,
+        generation: u64,
+        from: PublicKey,
+        now: Duration,
+        locked: bool,
+        locally_busy: bool,
+    ) -> bool {
+        self.receives(generation, from, now) && !locked && !locally_busy
     }
 
     pub fn owns(&self) -> bool {
@@ -264,5 +300,46 @@ mod tests {
         assert_eq!(responder_chose_later, (Side::Below, 9));
         let responder = agreed_side(false, (Side::Above, 9), (Side::Right, 5));
         assert_eq!(responder, (Side::Above, 9));
+    }
+
+    #[test]
+    fn activity_requires_new_physical_input() {
+        let mut activity = Activity::new(None);
+        assert!(!activity.take(None, true, false));
+        let first = Some(Duration::from_secs(1));
+        assert!(activity.take(first, true, false));
+        assert!(!activity.take(first, true, false), "heartbeats cannot extend idle time");
+        assert!(activity.take(Some(Duration::from_secs(2)), true, false));
+    }
+
+    #[test]
+    fn activity_seen_while_locked_or_following_is_not_replayed() {
+        let first = Some(Duration::from_secs(1));
+        let mut activity = Activity::new(None);
+        assert!(!activity.take(first, true, true));
+        assert!(!activity.take(first, true, false), "unlocking is not new input");
+        let second = Some(Duration::from_secs(2));
+        assert!(!activity.take(second, false, false));
+        assert!(!activity.take(second, true, false), "ownership alone is not new input");
+        assert!(activity.take(Some(Duration::from_secs(3)), true, false));
+        let mut existing = Activity::new(first);
+        assert!(
+            !existing.take(first, true, false),
+            "starting a session is not new input"
+        );
+    }
+
+    #[test]
+    fn activity_is_accepted_only_from_the_unlocked_idle_current_owner() {
+        let (me, owner, other) = (key(1), key(2), key(3));
+        let mut control = Control::new(me, me);
+        control.claim(4, owner);
+        let now = Duration::from_secs(1);
+        assert!(control.receives_activity(4, owner, now, false, false));
+        assert!(!control.receives_activity(3, owner, now, false, false));
+        assert!(!control.receives_activity(4, other, now, false, false));
+        assert!(!control.receives_activity(4, me, now, false, false));
+        assert!(!control.receives_activity(4, owner, now, true, false));
+        assert!(!control.receives_activity(4, owner, now, false, true));
     }
 }

@@ -231,6 +231,7 @@ where
     // the peer the pointer crossed onto, while this system drives it
     let mut crossed: Option<PublicKey> = None;
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
+    let mut activity = crate::control::Activity::new(control.physical_activity());
     let mut ended: Vec<(PublicKey, Result<()>)> = Vec::new();
     // a crossing the system this one drives handed on, and whether the
     // arrangement changed, both acted on after the message that caused them
@@ -432,6 +433,13 @@ where
                             }
                         }
                         Message::Locked { locked } => link.locked = locked,
+                        Message::Activity { generation } => {
+                            let accepted = control.state.lock().unwrap_or_else(|e| e.into_inner())
+                                .receives_activity(generation, peer, control.now(), *locked.borrow(), control.local_busy());
+                            if accepted {
+                                release.injector.arrived();
+                            }
+                        }
                         message @ (Message::Introduce { .. } | Message::Revoke { .. }) => {
                             let _ = group.trust.send((peer, message));
                         }
@@ -561,6 +569,14 @@ where
             }
             error = &mut until => return Err(error),
             _ = heartbeat.tick() => {
+                let message = {
+                    let state = control.state.lock().unwrap_or_else(|e| e.into_inner());
+                    activity.take(control.physical_activity(), state.owns(), *locked.borrow())
+                        .then(|| Message::Activity { generation: state.generation() })
+                };
+                if let Some(message) = message {
+                    broadcast(&links, message, &mut ended);
+                }
                 for (key, link) in links.iter_mut() {
                     if link.last_heard.elapsed() > SILENCE_LIMIT {
                         ended.push((*key, Err(Silent.into())));
@@ -677,7 +693,7 @@ fn publish(
 /// Carries out the peer's input on this system.
 pub trait Inject {
     fn execute(&mut self, action: &Action);
-    /// Control just arrived here, so the display should wake.
+    /// Control arrived or its owner received new physical input.
     fn arrived(&mut self) {}
 }
 
@@ -3007,5 +3023,112 @@ mod tests {
         assert!(closed_after(Duration::from_millis(200)).is_ok());
         let lost = closed_after(SILENCE_LIMIT + Duration::from_millis(1)).unwrap_err();
         assert!(connection_lost(&lost));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activity_reaches_every_member_and_stops_when_input_stops() {
+        let (control, _members, mut membership, mut far, _ended, _keys) = group_of(2, None).await;
+        let (_capture, input) = mpsc::channel(16);
+        let (mut pointer, mut injector, mut board) = (Returned::default(), Recorded::default(), no_clipboard());
+        let running = run(
+            group(&control),
+            VecDeque::new(),
+            &mut membership,
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let script = async {
+            for peer in &mut far {
+                settle(peer, 100).await;
+            }
+            control.note_physical();
+            for peer in &mut far {
+                loop {
+                    let message = peer.recv().await.unwrap();
+                    if message == (Message::Activity { generation: 0 }) {
+                        break;
+                    }
+                    if let Message::Ping { nonce } = message {
+                        peer.send(&Message::Pong { nonce }).await.unwrap();
+                    } else {
+                        assert!(chatter(&message), "unexpected {message:?}");
+                    }
+                }
+            }
+            // Several live heartbeats without input must not refresh idle time.
+            for peer in &mut far {
+                let mut ticks = 0;
+                while ticks < 2 {
+                    let message = peer.recv().await.unwrap();
+                    assert!(
+                        !matches!(message, Message::Activity { .. }),
+                        "idle heartbeats sent activity"
+                    );
+                    if let Message::Ping { nonce } = message {
+                        peer.send(&Message::Pong { nonce }).await.unwrap();
+                        ticks += 1;
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(8), async {
+            tokio::select! { () = script => {}, result = running => panic!("group ended: {result:?}") }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn activity_messages_obey_owner_generation_and_lock_state() {
+        let (control, _members, mut membership, mut far, _ended, _keys) = group_of(2, Some(0)).await;
+        let (_capture, input) = mpsc::channel(16);
+        let woken = Arc::new(Mutex::new(0));
+        let (mut pointer, mut injector, mut board) = (Returned::default(), Woken(woken.clone()), no_clipboard());
+        let (lock, locked) = watch::channel(false);
+        let group = Group {
+            locked,
+            ..group(&control)
+        };
+        let running = run(
+            group,
+            VecDeque::new(),
+            &mut membership,
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let script = async {
+            for peer in &mut far {
+                settle(peer, 100).await;
+            }
+            far[0].send(&Message::Activity { generation: 0 }).await.unwrap();
+            settle(&mut far[0], 101).await;
+            assert_eq!(
+                *woken.lock().unwrap(),
+                1,
+                "activity must wake a member without an Enter"
+            );
+            far[1].send(&Message::Activity { generation: 0 }).await.unwrap();
+            settle(&mut far[1], 102).await;
+            assert_eq!(*woken.lock().unwrap(), 1, "a follower cannot refresh activity");
+            far[0].send(&Message::Activity { generation: 1 }).await.unwrap();
+            settle(&mut far[0], 103).await;
+            assert_eq!(*woken.lock().unwrap(), 1, "wrong generations cannot refresh activity");
+            lock.send_replace(true);
+            while far[0].recv().await.unwrap() != (Message::Locked { locked: true }) {}
+            far[0].send(&Message::Activity { generation: 0 }).await.unwrap();
+            settle(&mut far[0], 104).await;
+            assert_eq!(*woken.lock().unwrap(), 1, "locked members must stay locked");
+        };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! { () = script => {}, result = running => panic!("group ended: {result:?}") }
+        })
+        .await
+        .unwrap();
     }
 }

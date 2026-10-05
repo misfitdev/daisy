@@ -24,7 +24,7 @@ const PROLOGUE: &[u8] = b"daisy";
 
 /// Session protocol version. Raise it for any change that would make two
 /// versions misread each other; sessions need the same version on both sides.
-pub const PROTOCOL: u16 = 5;
+pub const PROTOCOL: u16 = 6;
 
 /// Longest app version carried in a handshake payload.
 const MAX_APP_VERSION: usize = 64;

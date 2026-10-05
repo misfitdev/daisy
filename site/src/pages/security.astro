@@ -55,6 +55,7 @@ const controls = [
       ["Local override", "Control-Option-Command-Escape returns control to the local system"],
       ["Liveness", "Sessions terminate after three seconds without traffic"],
       ["Input release", "All held keys and buttons released whenever a session ends"],
+      ["Display activity", "Only the current control owner at the current generation can refresh an unlocked, locally idle peer’s display timeout"],
       ["Fail-safe", "Capture never blocks; on overload, input stays local and the session terminates"],
     ],
   },
@@ -63,7 +64,7 @@ const controls = [
     title: "Network and data",
     rows: [
       ["Connections", "Direct TCP between paired peers only (default port 24850, configurable bind address)"],
-      ["Data sent", "System name, public key, pairing and liveness messages, input events, control handoffs, and the clipboard when control crosses (switchable)"],
+      ["Data sent", "System name, public key, pairing and liveness messages, display activity updates, input events, control handoffs, and the clipboard when control crosses (switchable)"],
       ["Data not sent", "No screen or file content"],
       ["Third parties", "Nothing. No accounts, telemetry, analytics, update checks, relays or cloud services"],
     ],

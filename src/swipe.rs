@@ -48,6 +48,11 @@ impl SwipeDirection {
 }
 
 pub const MOTION_HORIZONTAL: i64 = 1;
+
+/// Native DockControl captures on macOS 26 and 27 share the decoded fields.
+pub fn supports_capture(major_version: u32) -> bool {
+    major_version >= 26
+}
 pub const MOTION_VERTICAL: i64 = 2;
 
 pub const PHASE_BEGAN: i64 = 1;
@@ -491,6 +496,63 @@ mod tests {
                 MOTION_VERTICAL
             };
             assert_eq!(super::direction(motion, direction.sign()), Some(direction));
+        }
+    }
+
+    #[test]
+    fn capture_support_includes_macos_26_and_27() {
+        assert!(!supports_capture(25));
+        assert!(supports_capture(26));
+        assert!(supports_capture(27));
+    }
+
+    #[test]
+    fn native_macos_26_samples_decode_without_changing_progress() {
+        // Numeric samples from native macOS 26.6.1 captures, 2026-10-05.
+        let samples = [
+            (
+                1,
+                4,
+                -0.53753662109375,
+                -4.97979736328125,
+                SwipeAxis::Horizontal,
+                SwipePhase::Ended,
+            ),
+            (2, 1, -0.006439208984375, 0.0, SwipeAxis::Vertical, SwipePhase::Began),
+            (
+                2,
+                4,
+                -0.5270233154296875,
+                -4.0068511962890625,
+                SwipeAxis::Vertical,
+                SwipePhase::Ended,
+            ),
+            (
+                2,
+                4,
+                0.6871337890625,
+                13.849761962890625,
+                SwipeAxis::Vertical,
+                SwipePhase::Ended,
+            ),
+        ];
+        for (motion, phase, progress, velocity, axis, expected_phase) in samples {
+            let native = DockEvent {
+                motion,
+                phase,
+                progress,
+                velocity_x: velocity,
+                velocity_y: velocity,
+            };
+            assert_eq!(
+                SwipeStep::from_dock(&native),
+                Some(SwipeStep {
+                    axis,
+                    phase: expected_phase,
+                    progress,
+                    velocity
+                })
+            );
         }
     }
 }

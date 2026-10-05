@@ -238,6 +238,20 @@ struct Heard {
     address: SocketAddr,
 }
 
+impl Heard {
+    fn resolved(service: &mdns_sd::ResolvedService) -> Option<Self> {
+        let address = pick_address(
+            service.get_addresses().iter().map(|ip| ip.to_ip_addr()),
+            service.get_port(),
+        )?;
+        let txt = ["v", "n", "t", "p", "s"]
+            .into_iter()
+            .filter_map(|key| Some((key.to_owned(), service.get_property_val_str(key)?.to_owned())))
+            .collect();
+        Some(Self { txt, address })
+    }
+}
+
 /// What the heard advertisements are, given the keys this system trusts now.
 /// A peer no longer trusted is dropped, or offered anonymously if it is open
 /// to pairing.
@@ -288,18 +302,10 @@ impl Browser {
             };
             match event {
                 ServiceEvent::ServiceResolved(service) => {
-                    let Some(address) = pick_address(
-                        service.get_addresses().iter().map(|ip| ip.to_ip_addr()),
-                        service.get_port(),
-                    ) else {
+                    let Some(heard) = Heard::resolved(&service) else {
                         continue;
                     };
-                    let txt = ["v", "n", "t", "p"]
-                        .into_iter()
-                        .filter_map(|key| Some((key.to_owned(), service.get_property_val_str(key)?.to_owned())))
-                        .collect();
-                    self.heard
-                        .insert(service.get_fullname().to_owned(), Heard { txt, address });
+                    self.heard.insert(service.get_fullname().to_owned(), heard);
                 }
                 ServiceEvent::ServiceRemoved(_, fullname) => {
                     if self.heard.remove(&fullname).is_none() {
@@ -550,5 +556,34 @@ mod tests {
         assert_eq!(forgotten.len(), 1);
         assert!(matches!(forgotten[0].seen, Seen::Pairing { .. }));
         assert_eq!(forgotten[0].address, advertised[1].address);
+    }
+
+    #[test]
+    fn resolved_pairing_advertisements_keep_the_timestamp() {
+        let mine = key();
+        for member in [false, true] {
+            let props = properties(&mine, &[7; NONCE_LEN], Offer::Open { member, since: 1_000 });
+            let info = ServiceInfo::new(
+                SERVICE,
+                "Daisy fixture",
+                "fixture.local.",
+                "192.168.1.20",
+                24850,
+                &props[..],
+            )
+            .unwrap();
+            let service = info.as_resolved_service();
+            let heard = Heard::resolved(&service).unwrap();
+            let found = classify([&heard], &[]);
+            assert_eq!(
+                found.len(),
+                1,
+                "an unpaired advertisement must survive browser ingestion"
+            );
+            assert!(
+                matches!(found[0].seen, Seen::Pairing { member: found_member, since: 1_000 } if found_member == member)
+            );
+            assert_eq!(found[0].address, "192.168.1.20:24850".parse().unwrap());
+        }
     }
 }

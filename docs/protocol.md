@@ -10,7 +10,7 @@ A TCP connection, to port 24850 by default. Every frame is a big-endian `u16` le
 
 Every connection starts a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake in which both sides send their long-term keys. The prologue is `daisy` and never changes.
 
-Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 5. Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
+Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 6. Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
 
 The handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
 
@@ -40,12 +40,15 @@ Messages are encoded with [postcard](https://github.com/jamesmunns/postcard), wh
 | 13 | `Displays { displays }` | both | The sender's displays in its own coordinates; sent at start and whenever one is added, removed or moved |
 | 14 | `Arrangement { version, author, offsets }` | any | Where every member's displays sit in the group; the greatest `(version, author)` wins everywhere |
 | 15 | `Locked { locked }` | both | Whether the sender's screen is locked; sent at start and on change |
-| 16 | `SigningKey { key }` | reserved | Earlier signing-key message; not sent or accepted by protocol 5 |
+| 16 | `SigningKey { key }` | reserved | Earlier signing-key message; not sent or accepted by the current protocol |
 | 17 | `Introduce { introduction }` | any | A system the sender trusts, signed by the sender; see the security model |
 | 18 | `Revoke { revocation }` | any | A system a member no longer trusts, signed by that member, passed on |
 | 19 | `DeviceProof { key, signature }` | both, before Hello | Secure Enclave P-256 proof over the Noise handshake hash and connection role |
+| 20 | `Activity { generation }` | system in control | New physical input; refreshes display activity on every unlocked member, at most once per second |
 
 `generation` is the sender's latest claim. Every member orders claims by `(generation, claimant key)` and keeps the greatest, so all agree on one owner whatever order claims arrive in. A system plays input only from the owner at the current generation, so input queued before a handoff never lands after it.
+
+`Activity` is accepted only from the current owner at the current generation, while the receiving system is unlocked and not handling local input. It carries no input event and is not forwarded. Ordinary heartbeats do not count as user activity. When physical input stops, activity updates stop and each system’s normal display sleep and lock settings apply. Protocol 6 requires every connected member to use protocol 6; the existing device identity and trust store are unchanged.
 
 Points are in a system's own coordinates: macOS global coordinates, origin at the top left of its main display, y growing downward. `Arrangement` places each system's displays by an offset into one shared space; displays of different systems never overlap there.
 

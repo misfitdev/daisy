@@ -33,7 +33,7 @@ export const features: Feature[] = [
   },
   {
     title: "Peer auto-discovery",
-    detail: "Daisy finds trusted peers on your network without an address.",
+    detail: "Find peers automatically, or add an address with + beside Peers.",
     status: "available",
   },
   {
@@ -41,6 +41,12 @@ export const features: Feature[] = [
     detail: "Reconnect after sleep, wake and network changes.",
     status: "available",
   },
+  {
+    title: "Displays stay awake while you work",
+    detail: "Activity on the system in control keeps unlocked peer displays awake. Normal idle timers resume when you stop.",
+    status: "available",
+  },
+
   {
     title: "Shared clipboard",
     detail: "Copy on one system and paste on another.",

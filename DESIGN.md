@@ -388,11 +388,14 @@ its yellow brand center. Connection-state color changes belong to the menu-bar
 glyph; the header mark does not turn gray when disconnected.
 
 The main window holds only the screen arrangement, the status title and detail,
-the Peers group, **Advanced…** and one primary **Start Sharing** / **Stop
+the Peers group with a **+** button to add a peer by address, **Advanced…** and one primary **Start Sharing** / **Stop
 Sharing** button. Systems pair by both sharing; there is no pairing button,
 role or connection-direction choice. Advanced holds clipboard sharing, Open at
-login, Always discoverable, Permissions and an optional address for networks
-Bonjour does not reach.
+login, Always discoverable and Permissions. The Peers **+** opens a dialog
+for networks Bonjour does not reach; **Save and Connect** saves the address
+and starts connecting immediately. The address dialog trims the entry, keeps existing arrangement and trust choices, and rejects empty input.
+
+Display activity follows real input on the system in control. No mouse movement or keystroke is injected to keep displays awake. When input stops, each system follows its normal idle timers; locked systems stay locked.
 
 Pairing uses one small floating panel that never takes the keyboard unless this
 system asked: a waiting state with a countdown and Cancel, the code in large

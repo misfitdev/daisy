@@ -50,8 +50,53 @@ pub fn row(step: Step, permission: Step) -> Row {
     }
 }
 
+/// Address-dialog submission preserves arrangement and trust, and clears any
+/// previously selected peer key because the address names a new attempt.
+pub fn connect_by_address(
+    current: &crate::controller::SessionSettings,
+    address: &str,
+) -> Option<crate::controller::SessionSettings> {
+    let address = address.trim();
+    if address.is_empty() {
+        return None;
+    }
+    let mut settings = current.clone();
+    settings.connection = crate::controller::Connection::Connect {
+        address: address.to_owned(),
+        peer: None,
+    };
+    Some(settings)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn address_submission_trims_and_preserves_session_choices() {
+        use crate::controller::{Connection, SessionSettings};
+        let current = SessionSettings {
+            connection: Connection::Connect {
+                address: "old.local".to_owned(),
+                peer: Some("old-key".to_owned()),
+            },
+            side: crate::input::Side::Left,
+            trust: crate::trust::Policy::Days(30),
+        };
+        let expected = SessionSettings {
+            connection: Connection::Connect {
+                address: "192.168.1.20:24850".to_owned(),
+                peer: None,
+            },
+            side: current.side,
+            trust: current.trust,
+        };
+        assert_eq!(
+            super::connect_by_address(&current, " 192.168.1.20:24850 "),
+            Some(expected)
+        );
+        assert_eq!(super::connect_by_address(&current, "   "), None);
+        assert_eq!(super::connect_by_address(&current, ""), None);
+    }
+
     use super::*;
     use Access::*;
 

@@ -26,7 +26,7 @@ Each member shares its displays and one agreed arrangement: an offset per member
 | Sharing | `share` | One input core for the group, with a link per member: claims, routing, arrangement, bounded queues, heartbeat and cleanup |
 | Latency | `latency` | Round trips per link from heartbeat pings and pongs: a recent average and percentiles |
 | Clipboard | `clipboard` | What to send when control crosses, echo prevention, chunking and reassembly; `macos::pasteboard` reads and writes the pasteboard |
-| Decisions | `input`, `swipe`, `shake`, `trust`, `install`, `setup` | Routing, edge crossing, held-input release, swipe pacing, pointer-shake recognition, trust duration, moving to Applications and the permission walkthrough |
+| Decisions | `input`, `swipe`, `shake`, `control`, `trust`, `install`, `setup` | Routing, edge crossing, held-input release, swipe pacing, pointer-shake recognition, trust duration, moving to Applications and the permission walkthrough |
 | macOS | `macos::*` | Event tap, event posting, pointer pinning, swipe synthesis, Mission Control shortcuts, permissions and moving the app |
 
 Pure decision modules contain no macOS calls and are unit tested directly. The macOS modules carry those decisions out; they do not decide them. See [macos.md](macos.md).
@@ -54,7 +54,7 @@ The network queues and event-tap queue are bounded. If callback state is contend
 9. Whenever control moves, whether across displays or because someone started using another member, the system giving it up reads its clipboard on a blocking thread and sends it behind input and heartbeats. Chunks are acknowledged and at most four are in flight, so a large image never holds up input. The receiver accepts one snapshot per crossing and writes it once the whole snapshot has arrived.
 10. Control-Option-Command-Escape returns control to the system it was pressed on. Explicit stop, trust revocation, a dropped link with the member in control, three seconds of silence or queue overload takes control back immediately.
 
-Whatever ends replay of remote input releases every key and button that system still considers held. While any link runs, the system holds off idle sleep; control arriving wakes its display.
+Whatever ends replay of remote input releases every key and button that system still considers held. While any link runs, the system holds off idle sleep; control arriving wakes its display. The event tap records physical input in an atomic timestamp. Once per second, the system in control broadcasts `Activity` only if that timestamp changed. Each unlocked member accepts it only from the current owner at the current generation and refreshes a timed macOS user-activity assertion. Heartbeats do not refresh display activity; when input stops, normal display sleep and lock timers apply.
 
 ## Reconnecting
 

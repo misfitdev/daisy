@@ -39,10 +39,198 @@ pub fn can_synthesize() -> bool {
     super::major_version() >= 27
 }
 
-/// Whether real swipes can be recognized here. Only macOS 27's event stream
-/// has been verified.
+/// Whether real swipes can be recognized here. Native DockControl fields from
+/// macOS 26.6.1 captures match the decoder used on macOS 27.
 pub fn can_recognize() -> bool {
-    super::major_version() >= 27
+    crate::swipe::supports_capture(super::major_version())
+}
+
+/// Records native swipe fields without forwarding, suppressing or injecting input.
+/// Run from a terminal so each capture can be labelled before the gesture starts.
+pub fn diagnose(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let mut report = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(report, "Daisy swipe diagnostic; macOS major={}", super::major_version())?;
+    let version = std::process::Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()?;
+    writeln!(
+        report,
+        "macOS version={}",
+        String::from_utf8_lossy(&version.stdout).trim()
+    )?;
+    let mut capture = Box::new(DiagnosticCapture {
+        events: Vec::with_capacity(DIAGNOSTIC_LIMIT),
+        tap: std::ptr::null_mut(),
+        dropped: 0,
+        disabled: 0,
+    });
+    // SAFETY: capture remains on this thread until the tap and source are removed.
+    let tap = unsafe {
+        CGEventTapCreate(
+            kCGHIDEventTap,
+            kCGHeadInsertEventTap,
+            kCGEventTapOptionListenOnly,
+            u64::MAX,
+            diagnostic_event,
+            (&mut *capture as *mut DiagnosticCapture).cast(),
+        )
+    };
+    if tap.is_null() {
+        anyhow::bail!(
+            "Allow Daisy Swipe Diagnostic in System Settings → Privacy & Security → Input Monitoring and Accessibility, then run it again."
+        );
+    }
+    capture.tap = tap;
+    // SAFETY: the tap is live; source is retained until capture finishes.
+    let source = unsafe { CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0) };
+    if source.is_null() {
+        unsafe {
+            CFMachPortInvalidate(tap);
+            CFRelease(tap.cast_const());
+        }
+        anyhow::bail!("could not create the diagnostic run-loop source");
+    }
+    let result = (|| -> anyhow::Result<()> {
+        // SAFETY: all objects live on this thread through the run-loop calls.
+        unsafe {
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
+        }
+        println!(
+            "Report: {}\nKeep gestures on this system's own display. Each capture lasts 12 seconds.",
+            path.display()
+        );
+        for direction in ["left", "right", "up", "down"] {
+            print!("\nPress Return to capture three-finger {direction} swipes: ");
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line)? == 0 {
+                anyhow::bail!("diagnostic needs an interactive terminal");
+            }
+            capture.events.clear();
+            capture.dropped = 0;
+            capture.disabled = 0;
+            println!("Swipe {direction} now. Repeat a few times, including a slow partial swipe.");
+            let until = Instant::now() + std::time::Duration::from_secs(12);
+            unsafe {
+                CGEventTapEnable(tap, true);
+            }
+            while Instant::now() < until {
+                // SAFETY: callbacks execute synchronously on this thread. No
+                // reference to capture is used while the run loop is executing.
+                unsafe {
+                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
+                }
+            }
+            unsafe {
+                CGEventTapEnable(tap, false);
+            }
+            writeln!(
+                report,
+                "capture={direction} events={} dropped={} disabled={}",
+                capture.events.len(),
+                capture.dropped,
+                capture.disabled
+            )?;
+            for sample in &capture.events {
+                write!(report, "type={} timestamp={} fields:", sample.kind, sample.timestamp)?;
+                for (index, (&integer, &double)) in sample.integers.iter().zip(&sample.doubles).enumerate() {
+                    if integer != 0 || (double != 0.0 && double.is_finite()) {
+                        let field = if index == 0 {
+                            kFieldCGSEventType
+                        } else {
+                            109 + index as u32
+                        };
+                        write!(report, " {field}=({integer},{double:?})")?;
+                    }
+                }
+                writeln!(report)?;
+            }
+            report.flush()?;
+            println!("Captured {} events.", capture.events.len());
+        }
+        println!("\nFinished. Send the report file back.");
+        Ok(())
+    })();
+    // SAFETY: removing the source and invalidating the tap prevents callbacks
+    // before capture is dropped. Each owned CoreFoundation object is released.
+    unsafe {
+        CGEventTapEnable(tap, false);
+        CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
+        CFMachPortInvalidate(tap);
+        CFRelease(source.cast_const());
+        CFRelease(tap.cast_const());
+    }
+    result
+}
+
+const DIAGNOSTIC_LIMIT: usize = 4096;
+const DIAGNOSTIC_FIELDS: usize = 32;
+
+struct DiagnosticSample {
+    kind: u32,
+    timestamp: u64,
+    integers: [i64; DIAGNOSTIC_FIELDS],
+    doubles: [f64; DIAGNOSTIC_FIELDS],
+}
+
+struct DiagnosticCapture {
+    events: Vec<DiagnosticSample>,
+    tap: CFMachPortRef,
+    dropped: usize,
+    disabled: usize,
+}
+
+extern "C" fn diagnostic_event(_proxy: *mut c_void, kind: u32, event: CGEventRef, context: *mut c_void) -> CGEventRef {
+    if context.is_null() {
+        return event;
+    }
+    // SAFETY: context is owned by diagnose and callbacks run on its thread.
+    let capture = unsafe { &mut *context.cast::<DiagnosticCapture>() };
+    if matches!(kind, kCGEventTapDisabledByTimeout | kCGEventTapDisabledByUserInput) {
+        capture.disabled = capture.disabled.saturating_add(1);
+        unsafe {
+            CGEventTapEnable(capture.tap, true);
+        }
+        return event;
+    }
+    // Keyboard, pointer movement and button events are never recorded.
+    if event.is_null() || !(kind == kCGEventScrollWheel || (29..64).contains(&kind)) {
+        return event;
+    }
+    if capture.events.len() >= DIAGNOSTIC_LIMIT {
+        capture.dropped = capture.dropped.saturating_add(1);
+        return event;
+    }
+    let mut sample = DiagnosticSample {
+        kind,
+        timestamp: unsafe { CGEventGetTimestamp(event) },
+        integers: [0; DIAGNOSTIC_FIELDS],
+        doubles: [0.0; DIAGNOSTIC_FIELDS],
+    };
+    for index in 0..DIAGNOSTIC_FIELDS {
+        let field = if index == 0 {
+            kFieldCGSEventType
+        } else {
+            109 + index as u32
+        };
+        // SAFETY: event is live for this callback; fields contain numeric data.
+        unsafe {
+            sample.integers[index] = CGEventGetIntegerValueField(event, field);
+            sample.doubles[index] = CGEventGetDoubleValueField(event, field);
+        }
+    }
+    // Capacity was reserved before the tap started; this never allocates or waits.
+    capture.events.push(sample);
+    event
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    static kCFRunLoopDefaultMode: *const c_void;
+    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source_handled: bool) -> i32;
+    fn CFRunLoopRemoveSource(run_loop: CFRunLoopRef, source: CFRunLoopSourceRef, mode: *const c_void);
 }
 
 /// Whether `event` is a DockControl or companion gesture event.

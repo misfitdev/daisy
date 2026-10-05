@@ -111,6 +111,10 @@ pub enum Message {
         key: crate::device::PublicKey,
         signature: Vec<u8>,
     },
+    /// New physical input on the system in control, not a session heartbeat.
+    Activity {
+        generation: u64,
+    },
 }
 
 /// A clipboard snapshot is its items, each a `Begin`, its `Chunk`s and an
@@ -389,5 +393,13 @@ mod tests {
     fn rejects_garbage() {
         assert!(Message::decode(&[0xff, 0xff]).is_err());
         assert!(Message::decode(&[]).is_err());
+    }
+
+    #[test]
+    fn activity_message_round_trips_at_its_appended_tag() {
+        let message = Message::Activity { generation: u64::MAX };
+        let encoded = message.encode().unwrap();
+        assert_eq!(encoded[0], 20);
+        assert_eq!(Message::decode(&encoded).unwrap(), message);
     }
 }

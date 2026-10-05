@@ -14,6 +14,7 @@ use crate::swipe::SwipeDetector;
 /// Posts input events as if they came from this system's own hardware.
 pub struct Injector {
     source: CGEventSourceRef,
+    activity: super::power::UserActivity,
     // macOS 27 ignores synthetic clicks and drags without an event number
     numbered_clicks: bool,
     click_number: i64,
@@ -34,6 +35,7 @@ impl Injector {
         let source = unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) };
         Self {
             source,
+            activity: super::power::UserActivity::default(),
             numbered_clicks: super::major_version() >= 27,
             click_number: 0,
             shake: ShakeDetector::default(),
@@ -164,7 +166,7 @@ impl crate::share::Inject for Injector {
     }
 
     fn arrived(&mut self) {
-        super::power::declare_activity();
+        self.activity.note();
     }
 }
 
