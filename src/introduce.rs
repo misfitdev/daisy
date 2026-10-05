@@ -7,10 +7,7 @@
 //! A compromised member can therefore admit a new system or remove one;
 //! `docs/security-model.md` says so.
 
-use std::path::Path;
-
-use anyhow::{Context, Result, bail};
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::identity::PublicKey;
@@ -21,67 +18,14 @@ const REVOCATION: &[u8] = b"daisy revocation v1";
 /// How far ahead of this system's clock a signed statement may be dated.
 const CLOCK_SKEW: u64 = 5 * 60;
 
-/// A system's long-term Ed25519 key, used only to sign introductions and
-/// revocations. Its public half is sent over the authenticated session, so
-/// peers pin it to the system's Noise key.
-pub struct Signer(SigningKey);
-
-impl Signer {
-    pub fn generate() -> Self {
-        Self(SigningKey::generate(&mut rand_core::UnwrapErr(getrandom::SysRng)))
-    }
-
-    /// Reads the key at `path`, or creates it there readable only by this user.
-    pub fn load_or_create(path: &Path) -> Result<Self> {
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                let seed: [u8; 32] = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("{} is not a signing key", path.display()))?;
-                Ok(Self(SigningKey::from_bytes(&seed)))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let signer = Self::generate();
-                signer.save(path)?;
-                Ok(signer)
-            }
-            Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
-        }
-    }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let temporary = path.with_extension("tmp");
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)
-            .with_context(|| format!("creating {}", temporary.display()))?;
-        file.write_all(&self.0.to_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, path).with_context(|| format!("saving {}", path.display()))
-    }
-
-    pub fn public(&self) -> [u8; 32] {
-        self.0.verifying_key().to_bytes()
-    }
-
-    fn sign(&self, context: &[u8], body: &impl Serialize) -> Result<Vec<u8>> {
-        use ed25519_dalek::Signer as _;
-        Ok(self.0.sign(&signed_bytes(context, body)?).to_bytes().to_vec())
-    }
-}
+pub use crate::device::Signer;
 
 /// "`introducer` trusts `newcomer`; trust it for no longer than `policy`."
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Introduction {
     pub introducer: PublicKey,
     pub newcomer: PublicKey,
-    pub newcomer_signing: [u8; 32],
+    pub newcomer_signing: crate::device::PublicKey,
     pub name: String,
     pub policy: Policy,
     /// When the introducer began trusting the newcomer. A revocation dated
@@ -105,7 +49,7 @@ pub struct Signed<T> {
 
 impl Signed<Introduction> {
     pub fn new(signer: &Signer, introduction: Introduction) -> Result<Self> {
-        let signature = signer.sign(INTRODUCTION, &introduction)?;
+        let signature = signer.sign_bytes(&signed_bytes(INTRODUCTION, &introduction)?)?;
         Ok(Self {
             body: introduction,
             signature,
@@ -114,7 +58,7 @@ impl Signed<Introduction> {
 
     /// The introduction, if `introducer_signing` signed it and it is not
     /// dated in the future.
-    pub fn verify(&self, introducer_signing: &[u8; 32], now: Timestamp) -> Result<&Introduction> {
+    pub fn verify(&self, introducer_signing: &crate::device::PublicKey, now: Timestamp) -> Result<&Introduction> {
         verify(INTRODUCTION, &self.body, &self.signature, introducer_signing)?;
         if self.body.trusted_since > now + CLOCK_SKEW {
             bail!("the introduction is dated in the future");
@@ -125,14 +69,14 @@ impl Signed<Introduction> {
 
 impl Signed<Revocation> {
     pub fn new(signer: &Signer, revocation: Revocation) -> Result<Self> {
-        let signature = signer.sign(REVOCATION, &revocation)?;
+        let signature = signer.sign_bytes(&signed_bytes(REVOCATION, &revocation)?)?;
         Ok(Self {
             body: revocation,
             signature,
         })
     }
 
-    pub fn verify(&self, by_signing: &[u8; 32], now: Timestamp) -> Result<&Revocation> {
+    pub fn verify(&self, by_signing: &crate::device::PublicKey, now: Timestamp) -> Result<&Revocation> {
         verify(REVOCATION, &self.body, &self.signature, by_signing)?;
         if self.body.at > now + CLOCK_SKEW {
             bail!("the revocation is dated in the future");
@@ -147,11 +91,8 @@ fn signed_bytes(context: &[u8], body: &impl Serialize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn verify(context: &[u8], body: &impl Serialize, signature: &[u8], key: &[u8; 32]) -> Result<()> {
-    let key = VerifyingKey::from_bytes(key).context("the signing key is not valid")?;
-    let signature = Signature::from_slice(signature).context("the signature is malformed")?;
-    key.verify_strict(&signed_bytes(context, body)?, &signature)
-        .context("the signature does not match")
+fn verify(context: &[u8], body: &impl Serialize, signature: &[u8], key: &crate::device::PublicKey) -> Result<()> {
+    key.verify(&signed_bytes(context, body)?, signature)
 }
 
 /// The policy for a system introduced under `introduced`, by an introducer
@@ -179,7 +120,7 @@ mod tests {
         Introduction {
             introducer: key(1),
             newcomer: key(2),
-            newcomer_signing: Signer::generate().public(),
+            newcomer_signing: Signer::generate().unwrap().public(),
             name: "Studio".to_owned(),
             policy: Policy::IDLE,
             trusted_since: 1000,
@@ -188,19 +129,19 @@ mod tests {
 
     #[test]
     fn an_introduction_verifies_only_with_the_introducers_key() {
-        let introducer = Signer::generate();
+        let introducer = Signer::generate().unwrap();
         let signed = Signed::<Introduction>::new(&introducer, introduction()).unwrap();
         assert_eq!(signed.verify(&introducer.public(), 1000).unwrap(), &signed.body);
-        assert!(signed.verify(&Signer::generate().public(), 1000).is_err());
+        assert!(signed.verify(&Signer::generate().unwrap().public(), 1000).is_err());
     }
 
     #[test]
     fn a_tampered_introduction_is_refused() {
-        let introducer = Signer::generate();
+        let introducer = Signer::generate().unwrap();
         let signed = Signed::<Introduction>::new(&introducer, introduction()).unwrap();
         for tamper in [
             |i: &mut Introduction| i.newcomer = key(9),
-            |i: &mut Introduction| i.newcomer_signing = [9; 32],
+            |i: &mut Introduction| i.newcomer_signing = crate::device::test_public(9),
             |i: &mut Introduction| i.policy = Policy::Forever,
             |i: &mut Introduction| i.trusted_since = 999,
             |i: &mut Introduction| i.name = "Other".to_owned(),
@@ -216,7 +157,7 @@ mod tests {
 
     #[test]
     fn a_statement_dated_in_the_future_is_refused() {
-        let introducer = Signer::generate();
+        let introducer = Signer::generate().unwrap();
         let signed = Signed::<Introduction>::new(&introducer, introduction()).unwrap();
         assert!(signed.verify(&introducer.public(), 1000 - CLOCK_SKEW).is_ok());
         assert!(signed.verify(&introducer.public(), 999 - CLOCK_SKEW).is_err());
@@ -235,7 +176,7 @@ mod tests {
 
     #[test]
     fn an_introduction_cannot_pass_as_a_revocation() {
-        let signer = Signer::generate();
+        let signer = Signer::generate().unwrap();
         let revocation = Revocation {
             by: key(1),
             revoked: key(2),

@@ -469,7 +469,7 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
     let Start { settings, side_chosen } = start;
     let result = async {
         let identity = Identity::load_or_create(&home.join("identity"))?;
-        let signer = crate::introduce::Signer::load_or_create(&home.join("signing"))?;
+        let signer = crate::introduce::Signer::load_or_create(&home.join("device-identity"))?;
         let peers = PeerStore::open(&home)?;
         let choose_side = AtomicBool::new(side_chosen);
         let mut prompt = ControllerPrompt { events: events.clone() };
@@ -715,13 +715,12 @@ fn list_peers(home: &Path) -> Result<Vec<Peer>> {
 fn forget_peer(home: &Path, selector: &str) -> Result<Vec<Peer>> {
     let store = PeerStore::open(home)?;
     let now = trust::now();
-    let forgotten = store.forget(&[selector.to_owned()], now)?;
+    let me = Identity::load_or_create(&home.join("identity"))?.public_key();
+    let signer = crate::introduce::Signer::load_or_create(&home.join("device-identity"))?;
+    let forgotten = store.forget_revoking(&[selector.to_owned()], &signer, me, now)?;
     if forgotten.removed == 0 {
         bail!("no paired peer matches {selector:?}");
     }
-    let me = Identity::load_or_create(&home.join("identity"))?.public_key();
-    let signer = crate::introduce::Signer::load_or_create(&home.join("signing"))?;
-    store.record_revocations(&signer, me, &forgotten.keys, now)?;
     store.list(now)
 }
 

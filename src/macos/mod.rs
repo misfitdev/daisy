@@ -2,6 +2,7 @@
 //! and replaying it on the other.
 
 pub mod capture;
+pub mod device;
 mod ffi;
 pub mod inject;
 pub mod install;

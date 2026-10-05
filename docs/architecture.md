@@ -17,7 +17,7 @@ Each member shares its displays and one agreed arrangement: an offset per member
 | Controller | `controller` | Owns the background Tokio runtime, saved setup and typed command/event channels |
 | Connection service | `service` | Shared listen/connect, pairing, trust and input-sharing orchestration used by both UI and CLI |
 | Launcher | `launcher` | Relaunches a bundled CLI invocation as `Daisy.app` so macOS applies the app's permissions; stops it when its terminal goes away |
-| Identity | `identity`, `peers`, `trust`, `introduce` | This system's long-term keys, trusted peers, how long each stays trusted, and signed introductions and revocations |
+| Identity | `identity`, `device`, `peers`, `trust`, `introduce` | This system's long-term keys, trusted peers, how long each stays trusted, and signed introductions and revocations |
 | Session | `session` | Noise handshake, encrypted framing and split send/receive halves |
 | Trust | `pairing` | Pinned keys and pairing through a one-time code |
 | Wire | `protocol` | Messages; see [protocol.md](protocol.md) |
@@ -44,7 +44,7 @@ The network queues and event-tap queue are bounded. If callback state is contend
 ## Session flow
 
 1. The controller starts automatic listening and browsing, or an optional direct connection from saved `SessionSettings`.
-2. Noise `XX` establishes an encrypted channel and exposes the remote static key.
+2. Noise `XX` establishes an encrypted channel and exposes the remote static key. Both sides sign its handshake hash with their Secure Enclave device keys before settling trust.
 3. The trust layer accepts an already-pinned key or, only while both peers explicitly allow pairing, runs SPAKE2 using the six-digit code as input.
 4. Both sides exchange `Layout` and `SigningKey`, then catch each other up on introductions and revocations, and the link joins the input core. The first link starts the core: one event tap, one injector and one owner of control for every link; the last link to end stops it.
 5. The event tap on the system in use observes local input. While control is local, events pass through untouched.
@@ -65,14 +65,14 @@ Nearby paired peers reconnect automatically: after a session ends, both return t
 `~/Library/Application Support/daisy/` holds:
 
 - `identity`: this system's long-term private key pair.
-- `signing`: the Ed25519 key it signs introductions and revocations with.
-- `peers.toml`: one entry per trusted peer, including key, name, trust policy, pairing time, last-seen time, its signing key and who introduced it.
-- `revocations.toml`: signed revocations this system knows, to pass on.
-- `arrangement.toml`: the newest group arrangement it saw.
+- `device-identity`: a reference to the non-exportable Secure Enclave P-256 key in the Data Protection Keychain.
+- `trust-v5/peers.toml`: one entry per trusted peer, including key, name, trust policy, pairing time, last-seen time, its signing key and who introduced it.
+- `trust-v5/revocations.toml`: signed revocations this system knows, to pass on.
+- `trust-v5/arrangement.toml`: the newest group arrangement it saw.
 - `stats.toml`: each running link's round trips, for `daisy stats`.
 - `settings.toml`: the menu-bar app's last connection, control and trust choices, written atomically with mode `0600`.
 
-`peers.toml` is the trust authority. Every change locks it, rereads it and writes it atomically. An active session watches the paired key, so a change from the menu-bar app or another process revokes control promptly. The UI aborts its current task immediately when its **Forget** action is used; the file watcher remains the external-edit backstop.
+`trust-v5/peers.toml` is the trust authority. Every change locks it, rereads it and writes it atomically. An active session watches the paired key, so a change from the menu-bar app or another process revokes control promptly. The UI aborts its current task immediately when its **Forget** action is used; the file watcher remains the external-edit backstop.
 
 `--home` or `DAISY_HOME` points all of these somewhere else and can be used to run two identities on one system for testing.
 

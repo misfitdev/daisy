@@ -763,6 +763,9 @@ where
             }
             .into());
         }
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, channel.authenticate_device(config.signer))
+            .await
+            .context("device authentication timed out")??;
         let (peer, trust_status) = tokio::time::timeout(
             TRUST_TIMEOUT,
             settle_trust(
@@ -820,6 +823,9 @@ where
     let mut channel = tokio::time::timeout(HANDSHAKE_TIMEOUT, Channel::respond(stream, config.identity))
         .await
         .context("the Noise handshake timed out")??;
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, channel.authenticate_device(config.signer))
+        .await
+        .context("device authentication timed out")??;
     let key = channel.remote_key();
     let known = config.peers.trusted(&key, trust::now())?.is_some();
     let policy = gate().for_peer(known);
@@ -912,18 +918,6 @@ where
     };
     let (side, chosen) = crate::control::agreed_side(initiator, local, remote);
     peers.agree_side(&key, side, chosen)?;
-    channel
-        .send(&crate::protocol::Message::SigningKey {
-            key: config.signer.public(),
-        })
-        .await?;
-    match tokio::time::timeout(Duration::from_secs(5), channel.recv())
-        .await
-        .context("the peer did not send its signing key")??
-    {
-        crate::protocol::Message::SigningKey { key: signing } => peers.set_signing(&key, signing)?,
-        _ => anyhow::bail!("the peer runs a different version of Daisy; update Daisy on both systems"),
-    }
     for message in catch_up(config, key)? {
         channel.send(&message).await?;
     }
@@ -1504,6 +1498,7 @@ mod tests {
     struct System {
         _home: tempfile::TempDir,
         identity: Identity,
+        signer: crate::device::Signer,
         peers: PeerStore,
     }
 
@@ -1512,6 +1507,7 @@ mod tests {
         let peers = PeerStore::open(home.path()).unwrap();
         System {
             identity: Identity::generate().unwrap(),
+            signer: crate::device::Signer::generate().unwrap(),
             peers,
             _home: home,
         }
@@ -1530,7 +1526,7 @@ mod tests {
             discoverable,
             arrangement: None,
             listening: None,
-            signer: Box::leak(Box::new(crate::introduce::Signer::generate())),
+            signer: &system.signer,
         }
     }
 
@@ -1643,11 +1639,23 @@ mod tests {
         let (here, there) = (system(), system());
         let now = trust::now();
         here.peers
-            .pin(there.identity.public_key(), "Studio", Policy::IDLE, now)
+            .pin_device(
+                there.identity.public_key(),
+                there.signer.public(),
+                "Studio",
+                Policy::IDLE,
+                now,
+            )
             .unwrap();
         there
             .peers
-            .pin(here.identity.public_key(), "Laptop", Policy::IDLE, now)
+            .pin_device(
+                here.identity.public_key(),
+                here.signer.public(),
+                "Laptop",
+                Policy::IDLE,
+                now,
+            )
             .unwrap();
         let clipboard = watch::channel(true).1;
         let mut observer = Recorded::default();
@@ -1657,6 +1665,7 @@ mod tests {
             while sessions < 2 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut channel = Channel::respond(stream, &there.identity).await.unwrap();
+                channel.authenticate_device(&there.signer).await.unwrap();
                 establish_trust(&mut channel, &there.peers, "Studio", false, Policy::IDLE, &mut NoCodes)
                     .await
                     .unwrap();
@@ -1692,16 +1701,29 @@ mod tests {
         let (here, there) = (system(), system());
         let now = trust::now();
         here.peers
-            .pin(there.identity.public_key(), "Studio", Policy::IDLE, now)
+            .pin_device(
+                there.identity.public_key(),
+                there.signer.public(),
+                "Studio",
+                Policy::IDLE,
+                now,
+            )
             .unwrap();
         there
             .peers
-            .pin(here.identity.public_key(), "Laptop", Policy::IDLE, now)
+            .pin_device(
+                here.identity.public_key(),
+                here.signer.public(),
+                "Laptop",
+                Policy::IDLE,
+                now,
+            )
             .unwrap();
         let _advertiser = Advertiser::start(&there.identity.public_key(), port, discovery::Offer::Closed).unwrap();
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
             let mut channel = Channel::respond(stream, &there.identity).await.unwrap();
+            channel.authenticate_device(&there.signer).await.unwrap();
             establish_trust(&mut channel, &there.peers, "Studio", false, Policy::IDLE, &mut NoCodes)
                 .await
                 .unwrap()
@@ -1734,6 +1756,7 @@ mod tests {
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
             let mut channel = Channel::respond(stream, &there.identity).await.unwrap();
+            channel.authenticate_device(&there.signer).await.unwrap();
             let _ = establish_trust(&mut channel, &there.peers, "Studio", false, Policy::IDLE, &mut NoCodes).await;
         };
         let here = system();
@@ -1782,7 +1805,7 @@ mod tests {
     /// A member this system trusts, with the key it signs with.
     fn member(here: &System, name: &str) -> (PublicKey, crate::introduce::Signer) {
         let key = Identity::generate().unwrap().public_key();
-        let signer = crate::introduce::Signer::generate();
+        let signer = crate::introduce::Signer::generate().unwrap();
         here.peers.pin(key, name, Policy::Forever, trust::now()).unwrap();
         here.peers.set_signing(&key, signer.public()).unwrap();
         (key, signer)
@@ -1796,7 +1819,7 @@ mod tests {
         let introduction = crate::introduce::Introduction {
             introducer,
             newcomer,
-            newcomer_signing: crate::introduce::Signer::generate().public(),
+            newcomer_signing: crate::introduce::Signer::generate().unwrap().public(),
             name: "Studio".to_owned(),
             policy: Policy::Forever,
             trusted_since: trust::now(),
@@ -1829,7 +1852,7 @@ mod tests {
         let trusted = |key| here.peers.trusted(&key, trust::now()).unwrap().is_some();
 
         // signed by someone else
-        let forged = introduce(&crate::introduce::Signer::generate(), laptop, studio);
+        let forged = introduce(&crate::introduce::Signer::generate().unwrap(), laptop, studio);
         assert!(act_on_trust(&hub, laptop, forged).is_err());
         // signed by the desk, but in the laptop's name
         assert!(act_on_trust(&hub, desk, introduce(&desk_signs, laptop, studio)).is_err());
@@ -1853,7 +1876,7 @@ mod tests {
         let trusted = |key| here.peers.trusted(&key, trust::now()).unwrap().is_some();
 
         // the laptop passes on the desk's revocation, but forged
-        let forged = revoke(&crate::introduce::Signer::generate(), desk, studio);
+        let forged = revoke(&crate::introduce::Signer::generate().unwrap(), desk, studio);
         assert!(act_on_trust(&hub, laptop, forged).is_err());
         assert!(trusted(studio));
         // revoking this system is ignored here
@@ -1907,7 +1930,7 @@ mod tests {
 
     #[test]
     fn every_new_revocation_is_sent_once_even_when_the_list_is_full() {
-        let signer = crate::introduce::Signer::generate();
+        let signer = crate::introduce::Signer::generate().unwrap();
         let by = Identity::generate().unwrap().public_key();
         let revocation = |at| {
             let crate::protocol::Message::Revoke { mut revocation } =

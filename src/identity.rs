@@ -152,7 +152,7 @@ impl Identity {
     }
 }
 
-fn lock(path: &Path) -> Result<File> {
+pub(crate) fn lock(path: &Path) -> Result<File> {
     if let Some(parent) = path.parent() {
         DirBuilder::new()
             .recursive(true)

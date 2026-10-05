@@ -37,7 +37,7 @@ pub struct Peer {
     /// When `side` was chosen; the later choice wins when two systems disagree.
     pub side_chosen: Timestamp,
     /// The key it signs introductions and revocations with, once known.
-    pub signing: Option<[u8; 32]>,
+    pub signing: Option<crate::device::PublicKey>,
     /// The member that introduced it, for a peer this system never paired
     /// with itself. Trust in it ends with trust in that member.
     pub introduced_by: Option<PublicKey>,
@@ -109,6 +109,9 @@ struct Placed {
 impl PeerStore {
     /// The peers and their screen relations in `home`.
     pub fn open(home: &Path) -> Result<Self> {
+        let home = home.join("trust-v5");
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&home)?;
         Ok(Self {
             path: home.join("peers.toml"),
             lock: home.join("peers.lock"),
@@ -119,7 +122,7 @@ impl PeerStore {
 
     /// Records the signing key `key` presented over an authenticated session.
     /// A key already recorded must not change.
-    pub fn set_signing(&self, key: &PublicKey, signing: [u8; 32]) -> Result<()> {
+    pub fn set_signing(&self, key: &PublicKey, signing: crate::device::PublicKey) -> Result<()> {
         self.update(trust::now(), |peers| {
             match peers.iter_mut().find(|peer| peer.key == *key) {
                 Some(peer) if peer.signing.is_some_and(|known| known != signing) => {
@@ -171,27 +174,43 @@ impl PeerStore {
         })
     }
 
-    /// Signs a revocation of each of `keys`, as forgotten here, and keeps it
-    /// to send every member.
-    pub fn record_revocations(
+    /// Signs and saves group revocations before committing local removal.
+    pub fn forget_revoking(
         &self,
+        selectors: &[String],
         signer: &crate::introduce::Signer,
         me: PublicKey,
-        keys: &[PublicKey],
         now: Timestamp,
-    ) -> Result<()> {
-        for revoked in keys {
-            let revocation = crate::introduce::Revocation {
-                by: me,
-                revoked: *revoked,
-                at: now,
-            };
-            self.revoke(
-                crate::introduce::Signed::<crate::introduce::Revocation>::new(signer, revocation)?,
-                now,
-            )?;
-        }
-        Ok(())
+    ) -> Result<Forgotten> {
+        self.forget_with(selectors, now, |keys| {
+            let signed = keys
+                .iter()
+                .map(|revoked| {
+                    crate::introduce::Signed::<crate::introduce::Revocation>::new(
+                        signer,
+                        crate::introduce::Revocation {
+                            by: me,
+                            revoked: *revoked,
+                            at: now,
+                        },
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if signed.is_empty() {
+                return Ok(());
+            }
+            let mut known = self.revocations();
+            for revocation in signed {
+                if !known.iter().any(|previous| {
+                    previous.body.by == revocation.body.by
+                        && previous.body.revoked == revocation.body.revoked
+                        && previous.body.at >= revocation.body.at
+                }) {
+                    known.push(revocation);
+                }
+            }
+            self.write_revocations(&known)
+        })
     }
 
     /// Every revocation this system knows, oldest first.
@@ -226,18 +245,7 @@ impl PeerStore {
         }
         let (revoked, at) = (revocation.body.revoked, revocation.body.at);
         known.push(revocation);
-        if known.len() > MAX_REVOCATIONS {
-            known.drain(..known.len() - MAX_REVOCATIONS);
-        }
-        let file = RevocationFile {
-            revocation: known
-                .iter()
-                .map(|signed| postcard::to_stdvec(signed).map(|bytes| to_hex(&bytes)))
-                .collect::<std::result::Result<_, _>>()?,
-        };
-        let temporary = self.revocations.with_extension("tmp");
-        fs::write(&temporary, toml::to_string(&file)?).with_context(|| format!("creating {}", temporary.display()))?;
-        fs::rename(&temporary, &self.revocations).with_context(|| format!("saving {}", self.revocations.display()))?;
+        self.write_revocations(&known)?;
         let before: Vec<PublicKey> = self.read()?.iter().map(|peer| peer.key).collect();
         // trust given after the revocation, by pairing again, stands
         let after = self.change_locked(now, |peers| {
@@ -249,6 +257,20 @@ impl PeerStore {
                 .filter(|key| !after.iter().any(|peer| peer.key == *key))
                 .collect(),
         ))
+    }
+
+    fn write_revocations(&self, known: &[crate::introduce::Signed<crate::introduce::Revocation>]) -> Result<()> {
+        let known = &known[known.len().saturating_sub(MAX_REVOCATIONS)..];
+        let file = RevocationFile {
+            revocation: known
+                .iter()
+                .map(|signed| postcard::to_stdvec(signed).map(|bytes| to_hex(&bytes)))
+                .collect::<std::result::Result<_, _>>()?,
+        };
+        let temporary = self.revocations.with_extension("tmp");
+        fs::write(&temporary, toml::to_string(&file)?).with_context(|| format!("creating {}", temporary.display()))?;
+        fs::rename(&temporary, &self.revocations).with_context(|| format!("saving {}", self.revocations.display()))?;
+        Ok(())
     }
 
     /// The arrangement last saved, if any can be read.
@@ -317,6 +339,31 @@ impl PeerStore {
 
     /// Record a session with `key` at `now`. Never adds a peer: returns
     /// whether it is still trusted.
+    pub fn pin_device(
+        &self,
+        key: PublicKey,
+        device: crate::device::PublicKey,
+        name: &str,
+        policy: Policy,
+        now: Timestamp,
+    ) -> Result<()> {
+        let name = name.lines().next().unwrap_or("").trim().to_owned();
+        self.update(now, |peers| {
+            peers.retain(|peer| peer.key != key);
+            peers.push(Peer {
+                name,
+                key,
+                policy,
+                paired_at: now,
+                last_seen: now,
+                side: crate::input::Side::Right,
+                side_chosen: 0,
+                signing: Some(device),
+                introduced_by: None,
+            });
+        })
+    }
+
     pub fn renew(&self, key: &PublicKey, now: Timestamp) -> Result<bool> {
         self.update(now, |peers| match peers.iter_mut().find(|peer| peer.key == *key) {
             Some(peer) => {
@@ -375,8 +422,19 @@ impl PeerStore {
     /// Stop trusting every peer matching any of `selectors`, by name or
     /// fingerprint. A running session with one ends within `CHECK_EVERY`.
     pub fn forget(&self, selectors: &[String], now: Timestamp) -> Result<Forgotten> {
-        let before: Vec<PublicKey> = self.list(now)?.iter().map(|peer| peer.key).collect();
-        let (removed, unmatched) = self.update(now, |peers| {
+        self.forget_with(selectors, now, |_| Ok(()))
+    }
+
+    fn forget_with(
+        &self,
+        selectors: &[String],
+        now: Timestamp,
+        before_commit: impl FnOnce(&[PublicKey]) -> Result<()>,
+    ) -> Result<Forgotten> {
+        let _lock = self.lock()?;
+        let mut result = None;
+        self.change_locked_checked(now, |peers| {
+            let before: Vec<PublicKey> = peers.iter().map(|peer| peer.key).collect();
             let count = peers.len();
             let unmatched = selectors
                 .iter()
@@ -384,17 +442,21 @@ impl PeerStore {
                 .cloned()
                 .collect();
             peers.retain(|peer| !selectors.iter().any(|selector| peer.matches(selector)));
-            (count - peers.len(), unmatched)
-        })?;
-        let after = self.list(now)?;
-        Ok(Forgotten {
-            removed,
-            keys: before
+            let removed = count - peers.len();
+            Self::prune(peers, now);
+            let keys: Vec<PublicKey> = before
                 .into_iter()
-                .filter(|key| !after.iter().any(|peer| peer.key == *key))
-                .collect(),
-            unmatched,
-        })
+                .filter(|key| !peers.iter().any(|peer| peer.key == *key))
+                .collect();
+            before_commit(&keys)?;
+            result = Some(Forgotten {
+                removed,
+                keys,
+                unmatched,
+            });
+            Ok(())
+        })?;
+        Ok(result.expect("the change ran"))
     }
 
     /// Stop trusting every peer. Returns how many there were.
@@ -457,25 +519,35 @@ impl PeerStore {
     /// Reads, changes and writes the peers while the caller holds the lock.
     /// Returns the peers as written.
     fn change_locked(&self, now: Timestamp, change: impl FnOnce(&mut Vec<Peer>)) -> Result<Vec<Peer>> {
-        let before = self.read()?;
-        // no session counts as live here: a running one keeps its own peer
-        // fresh by renewing it well within the shortest window
-        let prune = |peers: &mut Vec<Peer>| {
-            peers.retain(|peer| !peer.is_expired(false, now));
-            // trust in an introduced system ends with trust in its introducer
-            loop {
-                let count = peers.len();
-                let present: Vec<PublicKey> = peers.iter().map(|peer| peer.key).collect();
-                peers.retain(|peer| peer.introduced_by.is_none_or(|by| present.contains(&by)));
-                if peers.len() == count {
-                    break;
-                }
+        self.change_locked_checked(now, |peers| {
+            change(peers);
+            Ok(())
+        })
+    }
+
+    fn prune(peers: &mut Vec<Peer>, now: Timestamp) {
+        peers.retain(|peer| !peer.is_expired(false, now));
+        // trust in an introduced system ends with trust in its introducer
+        loop {
+            let count = peers.len();
+            let present: Vec<PublicKey> = peers.iter().map(|peer| peer.key).collect();
+            peers.retain(|peer| peer.introduced_by.is_none_or(|by| present.contains(&by)));
+            if peers.len() == count {
+                break;
             }
-        };
+        }
+    }
+
+    fn change_locked_checked(
+        &self,
+        now: Timestamp,
+        change: impl FnOnce(&mut Vec<Peer>) -> Result<()>,
+    ) -> Result<Vec<Peer>> {
+        let before = self.read()?;
         let mut peers = before.clone();
-        prune(&mut peers);
-        change(&mut peers);
-        prune(&mut peers);
+        Self::prune(&mut peers, now);
+        change(&mut peers)?;
+        Self::prune(&mut peers, now);
         if peers != before {
             self.write(&peers)?;
         }
@@ -519,7 +591,7 @@ impl PeerStore {
                         .signing
                         .as_deref()
                         .and_then(from_hex)
-                        .and_then(|bytes| bytes.try_into().ok()),
+                        .and_then(|bytes| crate::device::PublicKey::from_bytes(&bytes).ok()),
                     introduced_by: entry.introduced_by.as_deref().and_then(PublicKey::from_hex),
                 })
             })
@@ -538,7 +610,7 @@ impl PeerStore {
                     last_seen: peer.last_seen,
                     side: peer.side,
                     side_chosen: peer.side_chosen,
-                    signing: peer.signing.map(|signing| to_hex(&signing)),
+                    signing: peer.signing.map(|signing| to_hex(&signing.to_bytes())),
                     introduced_by: peer.introduced_by.map(|key| key.to_hex()),
                 })
                 .collect(),
@@ -656,7 +728,7 @@ mod tests {
         crate::introduce::Introduction {
             introducer: key(by),
             newcomer: key(newcomer),
-            newcomer_signing: [newcomer; 32],
+            newcomer_signing: crate::device::test_public(newcomer),
             name: format!("system {newcomer}"),
             policy: Policy::Forever,
             trusted_since,
@@ -681,7 +753,7 @@ mod tests {
         assert!(store.introduce(&introduction(1, 2, NOW), NOW).unwrap());
         let studio = store.trusted(&key(2), NOW).unwrap().unwrap();
         assert_eq!((studio.policy, studio.introduced_by), (Policy::Idle(5), Some(key(1))));
-        assert_eq!(studio.signing, Some([2; 32]));
+        assert_eq!(studio.signing, Some(crate::device::test_public(2)));
         // introduced again: nothing changes
         assert!(!store.introduce(&introduction(1, 2, NOW), NOW).unwrap());
         // trust in the introducer ends, and with it trust in what it introduced
@@ -774,16 +846,19 @@ mod tests {
     fn a_signing_key_once_known_cannot_change() {
         let (store, _dir) = store();
         store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
-        store.set_signing(&key(1), [1; 32]).unwrap();
-        store.set_signing(&key(1), [1; 32]).unwrap();
-        assert!(store.set_signing(&key(1), [2; 32]).is_err());
+        store.set_signing(&key(1), crate::device::test_public(1)).unwrap();
+        store.set_signing(&key(1), crate::device::test_public(1)).unwrap();
+        assert!(store.set_signing(&key(1), crate::device::test_public(2)).is_err());
         // pairing again keeps it
         store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
-        assert_eq!(store.trusted(&key(1), NOW).unwrap().unwrap().signing, Some([1; 32]));
+        assert_eq!(
+            store.trusted(&key(1), NOW).unwrap().unwrap().signing,
+            Some(crate::device::test_public(1))
+        );
     }
 
     #[test]
-    fn older_peer_files_load() {
+    fn old_trust_files_are_ignored() {
         let (store, dir) = store();
         std::fs::write(
             dir.path().join("peers.toml"),
@@ -793,8 +868,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let peer = store.trusted(&key(1), NOW).unwrap().unwrap();
-        assert_eq!((peer.signing, peer.introduced_by), (None, None));
+        assert!(store.trusted(&key(1), NOW).unwrap().is_none());
     }
 
     #[test]
@@ -947,6 +1021,40 @@ mod tests {
     }
 
     #[test]
+    fn failed_revocation_signing_keeps_peer_for_retry() {
+        let (store, _dir) = store();
+        store.pin(key(1), "peer", Policy::Forever, NOW).unwrap();
+        let selectors = ["peer".to_owned()];
+        let error = store
+            .forget_with(&selectors, NOW, |_| bail!("injected signing failure"))
+            .unwrap_err();
+        assert!(error.to_string().contains("injected signing failure"));
+        assert!(store.trusted(&key(1), NOW).unwrap().is_some());
+        assert_eq!(store.forget(&selectors, NOW).unwrap().removed, 1);
+    }
+
+    #[test]
+    fn failed_revocation_write_keeps_peer_for_retry() {
+        let (store, _dir) = store();
+        let signer = crate::introduce::Signer::generate().unwrap();
+        store.pin(key(1), "peer", Policy::Forever, NOW).unwrap();
+        fs::create_dir(&store.revocations).unwrap();
+        let selectors = ["peer".to_owned()];
+        assert!(store.forget_revoking(&selectors, &signer, key(2), NOW).is_err());
+        assert!(store.trusted(&key(1), NOW).unwrap().is_some());
+        fs::remove_dir(&store.revocations).unwrap();
+        assert_eq!(
+            store.forget_revoking(&selectors, &signer, key(2), NOW).unwrap().removed,
+            1
+        );
+        let revocations = store.revocations();
+        assert_eq!(revocations.len(), 1);
+        assert_eq!(revocations[0].body.revoked, key(1));
+        revocations[0].verify(&signer.public(), NOW).unwrap();
+        assert!(store.trusted(&key(1), NOW).unwrap().is_none());
+    }
+
+    #[test]
     fn forget_removes_one_many_or_all() {
         let (store, _dir) = store();
         for (byte, name) in [(1, "studio"), (2, "laptop"), (3, "mini"), (4, "spare")] {
@@ -999,8 +1107,8 @@ mod tests {
 
     #[test]
     fn rejects_a_malformed_file() {
-        let (store, dir) = store();
-        fs::write(dir.path().join("peers.toml"), "[[peer]]\nkey = \"nope\"\n").unwrap();
+        let (store, _dir) = store();
+        fs::write(&store.path, "[[peer]]\nkey = \"nope\"\n").unwrap();
         assert!(store.list(NOW).is_err());
     }
 }

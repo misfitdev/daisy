@@ -117,7 +117,18 @@ where
     P: PairingPrompt,
 {
     let remote_key = channel.remote_key();
-    let known = peers.trusted(&remote_key, trust::now())?.is_some();
+    let device = channel
+        .remote_device()
+        .context("the peer has not proved its device identity")?;
+    let trusted = peers.trusted(&remote_key, trust::now())?;
+    if trusted
+        .as_ref()
+        .and_then(|peer| peer.signing)
+        .is_some_and(|key| key != device)
+    {
+        bail!("the peer presented a different device identity; forget it and pair again");
+    }
+    let known = trusted.as_ref().is_some_and(|peer| peer.signing == Some(device));
 
     channel
         .send(&Message::Hello {
@@ -155,7 +166,7 @@ where
     let key = exchange_pairing_key(channel, &code).await?;
     confirm(channel, &key).await?;
 
-    peers.pin(remote_key, &peer_name, policy, trust::now())?;
+    peers.pin_device(remote_key, device, &peer_name, policy, trust::now())?;
     Ok((peer_name, Trust::NewlyPaired))
 }
 
@@ -311,6 +322,7 @@ mod tests {
     /// A party under test: its key, its paired peers, and the person at it.
     struct Party {
         identity: Identity,
+        signer: crate::device::Signer,
         peers: PeerStore,
         _dir: tempfile::TempDir,
     }
@@ -320,6 +332,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             Self {
                 identity: Identity::generate().unwrap(),
+                signer: crate::device::Signer::generate().unwrap(),
                 peers: PeerStore::open(dir.path()).unwrap(),
                 _dir: dir,
             }
@@ -332,7 +345,69 @@ mod tests {
             Channel::initiate(a, &connecting.identity),
             Channel::respond(b, &accepting.identity)
         );
-        (left.unwrap(), right.unwrap())
+        let (mut left, mut right) = (left.unwrap(), right.unwrap());
+        let (a, b) = tokio::join!(
+            left.authenticate_device(&connecting.signer),
+            right.authenticate_device(&accepting.signer)
+        );
+        a.unwrap();
+        b.unwrap();
+        (left, right)
+    }
+
+    #[tokio::test]
+    async fn copied_noise_identity_with_another_device_key_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let original = Party::new();
+        let mut impostor = Party::new();
+        let receiver = Party::new();
+        let path = impostor._dir.path().join("identity");
+        let mut bytes = original.identity.private_key().to_vec();
+        bytes.extend_from_slice(original.identity.public_key().as_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        impostor.identity = Identity::load_or_create(&path).unwrap();
+        assert_eq!(impostor.identity.public_key(), original.identity.public_key());
+        receiver
+            .peers
+            .pin_device(
+                original.identity.public_key(),
+                original.signer.public(),
+                "Peer",
+                Policy::IDLE,
+                trust::now(),
+            )
+            .unwrap();
+        let (mut remote, mut local) = sessions(&impostor, &receiver).await;
+        let mut prompt = TestPrompt::default();
+        let hello = Message::Hello {
+            name: "Peer".into(),
+            trusts_you: true,
+            will_pair: true,
+        };
+        let (result, sent) = tokio::join!(
+            establish_trust(
+                &mut local,
+                &receiver.peers,
+                "This system",
+                true,
+                Policy::IDLE,
+                &mut prompt
+            ),
+            remote.send(&hello)
+        );
+        sent.unwrap();
+        assert!(format!("{:#}", result.unwrap_err()).contains("different device identity"));
+        assert_eq!(prompt.calls, 0);
+        assert_eq!(
+            receiver
+                .peers
+                .trusted(&original.identity.public_key(), trust::now())
+                .unwrap()
+                .unwrap()
+                .signing,
+            Some(original.signer.public())
+        );
     }
 
     /// Run trust negotiation on both parties at once, with the typed code

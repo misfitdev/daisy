@@ -14,6 +14,12 @@ just screenshot   # redraw the website's window screenshot after UI changes
 just package      # create the release zip and DMG; notarize when credentials are set
 ```
 
+Running the app or CLI with a persistent device identity requires an embedded
+provisioning profile for `dev.misfit.daisy`. Set `DAISY_PROVISIONING_PROFILE` to
+its path and use a certificate it authorizes; `just app` defaults to Developer ID
+Application. Unit tests use software keys and require no profile. Ad hoc bundles
+cannot create a persistent Keychain device identity. See `docs/releasing.md`.
+
 `just check` is the gate. It must exit 0 before anything is committed, and
 its own exit status counts. Never pipe it through a command that can hide a
 failure.
@@ -42,6 +48,12 @@ version of each system.
 
 - `src/protocol.rs` is the only wire-message definition.
   `docs/protocol.md` explains it; code wins if they disagree.
+- `src/device.rs` defines device public keys, signature verification and Keychain
+  reference persistence. `src/macos/device.rs` performs Secure Enclave operations.
+  Production signing keys must remain non-exportable; software signing is only
+  for unit tests. Both connection paths must verify a device proof over the Noise
+  handshake hash and sender role before trust negotiation. Pairing pins both the
+  Noise key and device key; a matching Noise key never overrides a device mismatch.
 - Pure decision modules contain no macOS calls and are unit tested directly:
   `input`, `swipe`, `shake`, `pairing`, `trust`, `session`, `control`,
   `latency`, `share`, `layout`, `install` and `setup`. Keep new decisions

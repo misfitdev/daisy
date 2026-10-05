@@ -10,11 +10,13 @@ A TCP connection, to port 24850 by default. Every frame is a big-endian `u16` le
 
 Every connection starts a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake in which both sides send their long-term keys. The prologue is `daisy` and never changes.
 
-Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 4. Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
+Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 5. Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
 
 The handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
 
 After the handshake the session splits into a sending half and a receiving half, so input can go out while messages arrive. Each direction keeps its own nonce, counting up from zero, so a replayed or reordered frame fails to authenticate.
+
+After the Noise handshake, each side sends `DeviceProof { key, signature }` inside the encrypted transport. The key is a compressed SEC1 P-256 public key represented on the wire as a 32-byte x coordinate and an odd-y boolean. The DER-encoded ECDSA-SHA256 signature covers `daisy device session v1`, a role byte (0 initiator, 1 responder), then the completed Noise handshake hash. A missing or invalid proof closes the connection. Trust negotiation then requires a known peer’s device key to match its pairing pin, or authenticates both keys through new pairing.
 
 ## Messages
 
@@ -38,9 +40,10 @@ Messages are encoded with [postcard](https://github.com/jamesmunns/postcard), wh
 | 13 | `Displays { displays }` | both | The sender's displays in its own coordinates; sent at start and whenever one is added, removed or moved |
 | 14 | `Arrangement { version, author, offsets }` | any | Where every member's displays sit in the group; the greatest `(version, author)` wins everywhere |
 | 15 | `Locked { locked }` | both | Whether the sender's screen is locked; sent at start and on change |
-| 16 | `SigningKey { key }` | both, at start | The Ed25519 key the sender signs introductions and revocations with |
+| 16 | `SigningKey { key }` | reserved | Earlier signing-key message; not sent or accepted by protocol 5 |
 | 17 | `Introduce { introduction }` | any | A system the sender trusts, signed by the sender; see the security model |
 | 18 | `Revoke { revocation }` | any | A system a member no longer trusts, signed by that member, passed on |
+| 19 | `DeviceProof { key, signature }` | both, before Hello | Secure Enclave P-256 proof over the Noise handshake hash and connection role |
 
 `generation` is the sender's latest claim. Every member orders claims by `(generation, claimant key)` and keeps the greatest, so all agree on one owner whatever order claims arrive in. A system plays input only from the owner at the current generation, so input queued before a handoff never lands after it.
 
@@ -80,7 +83,7 @@ Each system holds one session with every other member, up to eight systems. Sess
 
 1. The connecting peer and the listening peer complete the Noise handshake.
 2. Both send `Hello`. If each already trusts the other's key, the session begins. Otherwise, if both are willing, they pair; if either is not, both drop the connection.
-3. Both peers exchange `Layout` within five seconds, then `SigningKey`. Each pins the other's signing key, sends an introduction of every other system it trusts whose signing key it knows, and every revocation it knows, and joins the session to its group.
+3. Both peers exchange `Layout` within five seconds. Their device keys have already been authenticated and pinned during trust negotiation. Each sends its signed introductions and revocations, then joins the session group.
 4. Each sends `ControlState`, `Displays`, its `Arrangement` and `Locked`. A member with displays but no position is placed on the side `Layout` agreed, clear of every other member, as a new arrangement.
 5. The system in control routes the pointer by geometry: leaving one of its own displays in a direction that reaches another member's display within 40 points sends `Enter` to that member, then `Input`. The member being driven does the same when the pointer leaves its displays, with `Leave` naming the next system; the system in control then sends `Enter` to it, or takes the pointer home. A locked member is never entered.
 6. Whenever control crosses, the peer giving it up sends its clipboard as `Clipboard` parts: the driver after `Enter`, the receiver after `Leave` or `Reclaim`, and a driver that receives a newer `ControlClaim`. A peer with clipboard sharing turned off sends nothing and does not write what arrives. A peer accepts one snapshot per crossing toward it and ignores clipboard parts at any other time. The receiver acknowledges every `Chunk` with `Ack`, even when it discards it, and the sender keeps at most four chunks unacknowledged, so no more than 64 KB of clipboard data sits ahead of input and heartbeats.
