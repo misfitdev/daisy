@@ -90,6 +90,7 @@ pub struct MainViews {
     pub title: Retained<NSTextField>,
     pub detail: Retained<NSTextField>,
     peers_heading: Retained<NSTextField>,
+    add_peer: Retained<NSButton>,
     peers: Retained<Panel>,
     buttons: Retained<Panel>,
     pub start: Retained<NSButton>,
@@ -150,6 +151,10 @@ impl MainViews {
 
         let peers_heading = label("Peers", 13.0, true, mtm);
         root.addSubview(&peers_heading);
+        let add_peer = button("+", sel!(addPeerByAddress:), target, mtm);
+        add_peer.setAccessibilityLabel(Some(&NSString::from_str("Add peer by address")));
+        add_peer.setToolTip(Some(&NSString::from_str("Add peer by address")));
+        root.addSubview(&add_peer);
         let peers = Panel::group(mtm);
         root.addSubview(&peers);
 
@@ -173,6 +178,7 @@ impl MainViews {
             title,
             detail,
             peers_heading,
+            add_peer,
             peers,
             buttons,
             start,
@@ -189,7 +195,7 @@ impl MainViews {
         let mtm = self.window.mtm();
         self.peers.clear();
         if peers.is_empty() {
-            let empty = label("Click Start Sharing here and on the other system.", 13.0, false, mtm);
+            let empty = label("Paired systems appear here.", 13.0, false, mtm);
             empty.setTextColor(Some(&NSColor::secondaryLabelColor()));
             empty.setFrame(rect(16.0, (ROW - 18.0) / 2.0, GROUP_WIDTH - 32.0, 18.0));
             self.peers.addSubview(&empty);
@@ -248,10 +254,16 @@ impl MainViews {
             }
             y += height + after;
         };
-        place(&self.peers_heading, 18.0, 6.0);
+        place(&self.peers_heading, 24.0, 6.0);
+        self.add_peer.setFrame(rect(
+            MARGIN + GROUP_WIDTH - 28.0,
+            self.peers_heading.frame().origin.y - 2.0,
+            28.0,
+            28.0,
+        ));
         place(&self.peers, self.peers.frame().size.height, MARGIN);
         place(&self.buttons, 32.0, MARGIN);
-        self.peers_heading.setFrameSize(NSSize::new(GROUP_WIDTH, 18.0));
+        self.peers_heading.setFrameSize(NSSize::new(GROUP_WIDTH - 40.0, 24.0));
 
         let content = self.window.contentRectForFrameRect(self.window.frame());
         let top = content.origin.y + content.size.height;
@@ -264,7 +276,6 @@ impl MainViews {
 
 pub struct AdvancedViews {
     pub window: Retained<NSWindow>,
-    pub address: Retained<NSTextField>,
     pub always: Retained<Switch>,
     pub clipboard: Retained<Switch>,
     pub login: Retained<Switch>,
@@ -356,33 +367,6 @@ impl AdvancedViews {
         let permission_rows = permission_rows.map(|(_, allowed, set_up)| (allowed, set_up));
         y += permissions.frame().size.height + MARGIN;
 
-        let connect = Panel::new(
-            mtm,
-            rect(MARGIN, y, width, 84.0),
-            Some(NSColor::quaternarySystemFillColor()),
-            10.0,
-        );
-        root.addSubview(&connect);
-        let title = label("Connect to an address", 13.0, false, mtm);
-        title.setFrame(rect(16.0, 12.0, width - 32.0, 18.0));
-        connect.addSubview(&title);
-        let address = NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
-        address.setPlaceholderString(Some(&NSString::from_str("Name or IP address")));
-        address.setAccessibilityLabel(Some(&NSString::from_str("Peer address")));
-        address.setFrame(rect(16.0, 40.0, width - 32.0, 26.0));
-        connect.addSubview(&address);
-        y += 84.0 + 6.0;
-        let note = label(
-            "Leave empty to find systems on this network automatically.",
-            11.0,
-            false,
-            mtm,
-        );
-        note.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        note.setFrame(rect(MARGIN + 4.0, y, width, 16.0));
-        root.addSubview(&note);
-        y += 16.0 + MARGIN;
-
         let done = button("Done", sel!(closeAdvanced:), target, mtm);
         done.setKeyEquivalent(&NSString::from_str("\r"));
         done.setBezelColor(Some(&coral_color()));
@@ -396,7 +380,6 @@ impl AdvancedViews {
 
         Self {
             window,
-            address,
             always,
             clipboard,
             login,

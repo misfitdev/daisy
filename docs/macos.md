@@ -32,9 +32,26 @@ Daisy therefore hides the pointer and warps it back to the crossing point whenev
 
 macOS 27 ignores synthetic clicks and drags without an event number. The system replaying input numbers them starting just above the event count macOS keeps. Click count comes from the system sending input, so double-click timing follows its settings.
 
+## Display activity
+
+While a group has connected members, `PreventUserIdleSystemSleep` holds off
+idle system sleep. It does not keep displays awake permanently.
+
+New physical input on the system in control sends a generation-stamped
+`Activity` message to every connected member, at most once per second. An
+unlocked member accepts it only from the current owner while no local input
+is taking precedence. The injector refreshes `IOPMAssertionDeclareUserActivity`
+and retains the returned assertion ID for the next refresh. IOKit expires it
+using the user's display sleep timeout; the injector releases it when the
+session ends. Heartbeats and clipboard traffic do not refresh this assertion.
+No input event is synthesized to report display activity, and locked systems
+remain locked.
+
 ## Swipes
 
 Trackpad swipes that switch Spaces or open Mission Control arrive as private `DockControl` events (type 30), each followed by a companion gesture event (type 29), not as public gesture events. The field layout is confined to `src/macos/swipe.rs`.
+
+Native captures on macOS 26.6.1 (2026-10-05) use the same DockControl subtype (23), horizontal/vertical motion values (1/2), phases (1/2/4/8), progress and velocity fields as the macOS 27 decoder. Swipe capture is enabled on both versions.
 
 The system in use forwards each swipe step: beginning, progress, ending velocity or cancellation. A swipe stays with the system that had control when it began.
 

@@ -35,7 +35,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionKey, NSAboutPanelOptionVersion, NSAlert,
+    NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionKey, NSAboutPanelOptionVersion, NSAccessibility, NSAlert,
     NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
     NSButton, NSColor, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar,
     NSStatusItem, NSWindow, NSWindowDelegate, NSWorkspace,
@@ -47,7 +47,7 @@ use objc2_foundation::{
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use crate::control::Link;
-use crate::controller::{self, AppSettings, Command, Connection, Event, Handle, SessionSettings, Status};
+use crate::controller::{self, AppSettings, Command, Event, Handle, SessionSettings, Status};
 use crate::peers::Peer;
 use crate::permissions::{self, Access};
 use crate::setup::Step;
@@ -82,9 +82,6 @@ struct AppDelegateIvars {
     status_item: OnceCell<Retained<NSStatusItem>>,
     menu_start_stop: OnceCell<Retained<NSMenuItem>>,
     menu_add: OnceCell<Retained<NSMenuItem>>,
-    /// The saved address and the key of the peer at it; the key is used
-    /// only while the address field still shows that address.
-    nearby_choice: RefCell<Option<(String, String)>>,
     pairing: OnceCell<panel::Panel>,
     /// Where a typed code goes, while one is asked for.
     code_reply: RefCell<Option<tokio::sync::oneshot::Sender<String>>>,
@@ -218,6 +215,33 @@ define_class!(
         #[unsafe(method(startSession:))]
         fn start_session(&self, _sender: Option<&AnyObject>) {
             self.start();
+        }
+
+        #[unsafe(method(addPeerByAddress:))]
+        fn add_peer_by_address(&self, _sender: Option<&AnyObject>) {
+            let alert = NSAlert::new(self.mtm());
+            alert.setMessageText(&NSString::from_str("Add peer by address"));
+            alert.setInformativeText(&NSString::from_str("Enter the peer's local name or IP address."));
+            let field = objc2_app_kit::NSTextField::textFieldWithString(&NSString::from_str(""), self.mtm());
+            field.setPlaceholderString(Some(&NSString::from_str("Name or IP address")));
+            field.setAccessibilityLabel(Some(&NSString::from_str("Peer address")));
+            field.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(300.0, 26.0)));
+            alert.setAccessoryView(Some(&field));
+            alert.window().setInitialFirstResponder(Some(&field));
+            alert.addButtonWithTitle(&NSString::from_str("Save and Connect"));
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        let settings = loop {
+                if alert.runModal() != NSAlertFirstButtonReturn {
+                    return;
+                }
+            let address = field.stringValue().to_string();
+            let current = self.ivars().settings.borrow().last_session.clone();
+            if let Some(settings) = crate::setup::connect_by_address(&current, &address) {
+                break settings;
+                }
+                alert.setInformativeText(&NSString::from_str("Enter a local name or IP address before connecting."));
+            };
+        self.connect_address(settings);
         }
 
         #[unsafe(method(addSystem:))]
@@ -551,7 +575,6 @@ impl AppDelegate {
             connected_at: Cell::new(None),
             owner_confirmed: std::sync::Arc::new(std::sync::Mutex::new(None)),
             always_allowed: Cell::new(true),
-            nearby_choice: RefCell::new(None),
             timer: OnceCell::new(),
             walkthrough: OnceCell::new(),
             setup_step: Cell::new(None),
@@ -858,6 +881,7 @@ impl AppDelegate {
     }
 
     fn apply_status(&self, status: Status) {
+        let problem = matches!(status, Status::Problem { .. });
         match &status {
             Status::Connected { peers } => self
                 .ivars()
@@ -872,7 +896,6 @@ impl AppDelegate {
         if !matches!(status, Status::Connected { .. }) {
             self.ivars().adding.set(false);
         }
-        let problem = matches!(status, Status::Problem { .. });
         *self.ivars().status.borrow_mut() = status;
         self.render_status();
         self.update_action_buttons();
@@ -919,8 +942,11 @@ impl AppDelegate {
     /// Opens this group to a new system for a short while, from the menu.
     fn add_a_system(&self) {
         let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
-        let nearby = self.ivars().settings.borrow().last_session.connection == Connection::Automatic;
-        if !is_active(&self.ivars().status.borrow()) || always || !nearby {
+        if !crate::setup::can_add_system(
+            is_active(&self.ivars().status.borrow()),
+            always,
+            self.ivars().adding.get(),
+        ) {
             return;
         }
         let _ = self.ivars().controller.send(Command::AddSystem);
@@ -1027,61 +1053,25 @@ impl AppDelegate {
         }
     }
 
+    fn connect_address(&self, settings: SessionSettings) {
+        self.apply_settings(&settings);
+        let _ = self.ivars().controller.send(Command::ConnectByAddress(settings));
+    }
+
     fn start(&self) {
         if self.setup_step() != Step::Done {
             self.open_setup();
             return;
         }
-        let Some(settings) = self.settings_from_controls() else {
-            return;
-        };
+        let settings = self.ivars().settings.borrow().last_session.clone();
         let _ = self.ivars().controller.send(Command::Start {
             settings,
             side_chosen: false,
         });
     }
 
-    fn settings_from_controls(&self) -> Option<SessionSettings> {
-        let address = self
-            .ivars()
-            .advanced
-            .get()?
-            .address
-            .stringValue()
-            .to_string()
-            .trim()
-            .to_owned();
-        let connection = if address.is_empty() {
-            Connection::Automatic
-        } else {
-            let peer = self
-                .ivars()
-                .nearby_choice
-                .borrow()
-                .as_ref()
-                .filter(|(chosen, _)| *chosen == address)
-                .map(|(_, key)| key.clone());
-            Connection::Connect { address, peer }
-        };
-        let last = self.ivars().settings.borrow().last_session.clone();
-        Some(SessionSettings {
-            connection,
-            side: last.side,
-            trust: last.trust,
-        })
-    }
-
     fn apply_settings(&self, settings: &SessionSettings) {
-        let address = match &settings.connection {
-            Connection::Connect { address, peer } => {
-                *self.ivars().nearby_choice.borrow_mut() = peer.clone().map(|key| (address.clone(), key));
-                address.as_str()
-            }
-            Connection::Automatic => "",
-        };
-        if let Some(views) = self.ivars().advanced.get() {
-            views.address.setStringValue(&NSString::from_str(address));
-        }
+        self.ivars().settings.borrow_mut().last_session = settings.clone();
     }
 
     fn refresh_permissions(&self) {
@@ -1118,8 +1108,7 @@ impl AppDelegate {
         }
         if let Some(item) = self.ivars().menu_add.get() {
             let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
-            let nearby = self.ivars().settings.borrow().last_session.connection == Connection::Automatic;
-            item.setEnabled(active && nearby && !always && !self.ivars().adding.get());
+            item.setEnabled(crate::setup::can_add_system(active, always, self.ivars().adding.get()));
         }
     }
 

@@ -12,13 +12,18 @@ Daisy supports:
 - Every screen of every system arranged by dragging
 - Scrolling, with trackpad momentum, and swipes for Spaces, Mission Control and app windows
 - Clipboard sharing for text, rich text and images
+- Activity on the system in control keeps unlocked peer displays awake; normal display sleep and lock timers resume when input stops
 - Automatic reconnection after sleep or a network change
 - Connection status that names each member and shows its round-trip latency, plus `daisy stats` percentiles
 - Finding paired peers on the local network with Bonjour
 - Pairing with a one-time code; a system paired with any member joins the whole group
 - Control-Option-Command-Escape returns control and brings the pointer to the middle of the main display
 
-Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes through requires macOS 27 on the system whose trackpad you use.
+Daisy requires Apple silicon and macOS 26 or later. Trackpad swipes work from macOS 26 and later.
+
+## Updating to 0.6.0
+
+Update every member of the group. Daisy 0.6.0 uses protocol 6 and cannot connect to 0.5.0 peers. Existing device identities and peer trust are retained.
 
 ## Getting Started
 
@@ -27,7 +32,7 @@ Daisy requires Apple silicon and macOS 26 or later. Passing trackpad swipes thro
 3. Click **Start Sharing** on both systems. They find each other automatically, and one shows a six-digit code. Type it on the other and click **Connect**.
    - Once connected, drag each system's screens to where they sit. Every member keeps the same arrangement.
    - To add another system, click **Start Sharing** on it, then choose **Add a System** from the menu bar flower on any member and type the code the new system shows.
-   - For networks without Bonjour, click **Advanced…** and enter the peer's address on one system, leaving it empty on the other.
+   - For networks without Bonjour, click **+** beside **Peers**, enter the peer’s local name or IP address, then click **Save and Connect**. The other system must be sharing.
 4. Move the pointer off a screen toward another system's. The menu bar flower shows a yellow center while connected.
 
 After pairing, they recognize each other; a new code is needed only when trust ends.
@@ -45,7 +50,7 @@ The [security model](docs/security-model.md) describes the design in detail. Rep
 Releases are built by GitHub Actions from tagged commits, signed with a Developer ID certificate and notarized by Apple. To confirm a download came from this repository:
 
 ```bash
-gh attestation verify Daisy-0.5.0-macos-arm64.dmg --repo misfitdev/daisy
+gh attestation verify Daisy-0.6.0-macos-arm64.dmg --repo misfitdev/daisy
 ```
 
 ## Documentation

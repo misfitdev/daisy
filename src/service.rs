@@ -46,6 +46,20 @@ where
     P: PairingPrompt + Clone + Send,
     O: ServiceObserver + Send,
 {
+    automatic_with_addresses(config, None, prompt, observer).await
+}
+
+/// Explicit address attempts share the listening and discovering group's input core.
+pub async fn automatic_with_addresses<P, O>(
+    config: SessionConfig<'_>,
+    mut addresses: Option<mpsc::UnboundedReceiver<(String, Option<PublicKey>)>>,
+    prompt: &mut P,
+    observer: &mut O,
+) -> Result<()>
+where
+    P: PairingPrompt + Clone + Send,
+    O: ServiceObserver + Send,
+{
     let listener = TcpListener::bind(("0.0.0.0", DEFAULT_PORT)).await?;
     let mut browser = discovery::Browser::start()?;
     let hub = Hub::new(&config);
@@ -59,6 +73,7 @@ where
     let mut first_seen: HashMap<[u8; discovery::NONCE_LEN], tokio::time::Instant> = HashMap::new();
     // peers with a link running or being opened
     let busy = std::sync::Mutex::new(std::collections::HashSet::<PublicKey>::new());
+    let mut explicit = std::collections::HashSet::new();
     let mut running: Running<'_, Option<Opened>> = Running::default();
     loop {
         if hub.members() == 0 {
@@ -73,6 +88,20 @@ where
         let mut scan = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
+                Some((address, peer)) = explicit_address(&mut addresses) => {
+                    if !explicit.insert(address.clone()) { continue; }
+                    if !hub.has_room() {
+                        explicit.remove(&address);
+                        Shared(&observer).connection_failed(&address, &anyhow::anyhow!("this group is full"));
+                        continue;
+                    }
+                    let (hub, observer) = (&hub, &observer);
+                    let mut prompt = prompt.clone();
+                    running.push(async move {
+                        let result = connect_in_group(config, hub, &address, peer, &mut prompt, &mut Shared(observer)).await;
+                        Some(Opened { address, key: None, pairing: false, paired: false, result })
+                    });
+                }
                 result = listener.accept() => {
                     let (stream, address) = result?;
                     stream.set_nodelay(true)?;
@@ -90,6 +119,7 @@ where
                 finished = running.next() => {
                     if let Some(opened) = finished {
                         if opened.pairing && !opened.paired { gate().exchanged(false); }
+                        explicit.remove(&opened.address);
                         if let Err(error) = opened.result { Shared(&observer).connection_failed(&opened.address, &error); }
                         if let Some(key) = opened.key { busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&key); }
                     }
@@ -157,6 +187,15 @@ where
                 }
             }
         }
+    }
+}
+
+async fn explicit_address(
+    addresses: &mut Option<mpsc::UnboundedReceiver<(String, Option<PublicKey>)>>,
+) -> Option<(String, Option<PublicKey>)> {
+    match addresses {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -637,6 +676,21 @@ where
     O: ServiceObserver + Send,
 {
     let hub = Hub::new(&config);
+    connect_in_group(config, &hub, address, peer, prompt, observer).await
+}
+
+async fn connect_in_group<P, O>(
+    config: SessionConfig<'_>,
+    hub: &Hub,
+    address: &str,
+    peer: Option<PublicKey>,
+    prompt: &mut P,
+    observer: &mut O,
+) -> Result<()>
+where
+    P: PairingPrompt + Send,
+    O: ServiceObserver + Send,
+{
     // a peer chosen from those found on the network is already paired: check its key from the start
     let mut expected = peer;
     let mut started = false;
@@ -652,7 +706,7 @@ where
             Ok(address) => {
                 observer.connecting(&address, peer_name(config.peers, expected).as_deref());
                 last_reached.clone_from(&address);
-                let (lasted, result) = connect_once(attempt, &hub, &address, &mut expected, prompt, observer).await;
+                let (lasted, result) = connect_once(attempt, hub, &address, &mut expected, prompt, observer).await;
                 started |= lasted.is_some();
                 if lasted.is_some_and(|lasted| lasted >= reconnect::STABLE) {
                     waits = reconnect::waits();
@@ -1364,6 +1418,18 @@ pub fn connect_address(address: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn explicit_addresses_arrive_without_replacing_the_session() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let mut addresses = Some(receiver);
+        sender.send(("192.168.1.20".to_owned(), None)).unwrap();
+        sender.send(("192.168.1.21".to_owned(), None)).unwrap();
+        assert_eq!(explicit_address(&mut addresses).await.unwrap().0, "192.168.1.20");
+        assert_eq!(explicit_address(&mut addresses).await.unwrap().0, "192.168.1.21");
+        drop(sender);
+        assert!(explicit_address(&mut addresses).await.is_none());
+    }
 
     #[test]
     fn addresses_get_default_port_only_when_needed() {

@@ -76,6 +76,8 @@ Nearby paired peers find each other again with Bonjour after a drop, sleep or ne
 
 Input capture runs in the macOS event-tap callback, where blocking would lag the entire system. Its handoff queue is bounded and uses nonblocking sends. If the queue fills or callback state is contended, Daisy passes the current event through locally, reclaims local routing when possible, signals overload without taking another blocking lock and terminates the session.
 
+Display activity updates are accepted only from the current control owner at the current generation, while the receiving system is unlocked and not handling local input. They refresh macOS’s display idle timeout without injecting input or unlocking a system. The owner sends updates only when it sees new physical input; session heartbeats do not postpone display sleep or locking.
+
 Network reads and writes run in dedicated tasks behind bounded queues. Trust revocation, local overload and the three-second silence deadline remain selectable even when a peer stops reading. When the outgoing input channel closes, accepted messages have at most one second to flush; a blocked flush returns an error instead of reporting clean shutdown.
 
 A system replaying its peer's input releases every held key and button whenever replay ends. A system sending input reclaims local control when its capture path overloads or the session ends.
@@ -94,7 +96,7 @@ Each system’s P-256 device private key stays in its Secure Enclave. The Data P
 
 The `device-identity` file holds a Keychain lookup reference, not private key material. The separate X25519 Noise key remains in `identity`. Both files are user-only (`0600`, under a `0700` directory). Copying the Noise key and the Keychain reference to another system does not supply the pinned device key. `daisy rotate-key` replaces both identities, retires the previous device key, and requires fresh pairing. A failed retirement restores the prior reference and reports an error. Unlock this system before creating or rotating a device key.
 
-Protocol 5 starts with fresh pairing state in `trust-v5/`. Earlier peer records are not accepted or converted; existing groups pair again. Pinned public keys, introducers and trust policies live in `trust-v5/peers.toml`; signed revocations live in `trust-v5/revocations.toml`. Each update locks, rereads and rewrites the store, preventing a running process from restoring a peer another process forgot.
+Device-bound peer trust is stored in `trust-v5/`. Peer records from before device-bound identity are not accepted or converted; those groups must pair again. Updating from 0.5.0 to 0.6.0 retains the existing device-bound records. Pinned public keys, introducers and trust policies live in `trust-v5/peers.toml`; signed revocations live in `trust-v5/revocations.toml`. Each update locks, rereads and rewrites the store, preventing a running process from restoring a peer another process forgot.
 
 ## Release integrity
 

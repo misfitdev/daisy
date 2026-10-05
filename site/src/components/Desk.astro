@@ -199,7 +199,7 @@ const svg = renderDesk(initialState(), { pointer: false });
 
   function updateHint() {
     if (state.arranging) {
-      hint.textContent = "Drag a display to any edge of another. It snaps into place.";
+      hint.textContent = "Drag a display to any edge or corner of another. It snaps into place.";
       return;
     }
     const sides = homeSides(state);

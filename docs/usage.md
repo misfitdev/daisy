@@ -2,12 +2,16 @@
 
 Daisy shares one keyboard, mouse and supported trackpad gestures across a group of up to eight systems on the same network. It does not use an account or cloud service.
 
+## Update the group
+
+Daisy 0.6.0 uses protocol 6. Update every member before sharing; 0.5.0 cannot connect to 0.6.0. Existing device identities and paired trust settings are retained.
+
 ## Requirements
 
 - Apple silicon systems running macOS 26 or later.
 - Accessibility and Input Monitoring granted to the signed `Daisy.app` on every system.
 - TCP reachability between the systems. Daisy listens on port 24850 by default.
-- macOS 27 on the system whose trackpad swipes should cross. Keyboard and mouse sharing works on macOS 26.
+- Trackpad swipes work from macOS 26 and later.
 
 Open the release DMG and drag Daisy to Applications. Opened from anywhere else after downloading, Daisy offers to move itself to Applications, replacing an older copy there and keeping its settings and paired peers, then reopens from there.
 
@@ -29,15 +33,15 @@ The system that started sharing later shows a six-digit code in a small Daisy pa
 
 One code pairs both systems. Each trusts the other until it goes unused for four days; change that from the peer's row in **Peers**. A "Connected to" panel follows: **Arrange…** opens the window with the new peer selected, and the panel closes on its own after 15 seconds.
 
-For a network without Bonjour, click **Advanced…** and enter the peer's local name or IP address under **Connect to an address** on one system, leaving it empty on the other. A direct connection backs off after an established session drops; Bonjour discovery keeps looking for every trusted member.
+For a network without Bonjour, click **+** beside **Peers**, enter the peer’s local name or IP address, then click **Save and Connect**. Daisy saves the address and starts connecting immediately; the other system must be sharing. Existing group links stay connected, and automatic discovery keeps running. A direct connection backs off after an established session drops; Bonjour discovery keeps looking for every trusted member.
 
 ## Grow a group
 
-To add a system, click **Start Sharing** on it. On any one system already in the group, choose **Add a System** from the menu-bar flower; the group then accepts a new system for 30 seconds, and the panel there counts down and offers **Cancel**. The new system shows the code; type it on the member. If nothing joins in time, the panel says "No new system joined" and offers **Try Again**. **Cancel** on the code prompt also ends Add a System, and Daisy waits 15 seconds before asking again. Sharing keeps running throughout. Add a System is unavailable while Daisy connects to an address typed under **Advanced…**.
+To add a system, click **Start Sharing** on it. On any one system already in the group, choose **Add a System** from the menu-bar flower; the group then accepts a new system for 30 seconds, and the panel there counts down and offers **Cancel**. The new system shows the code; type it on the member. If nothing joins in time, the panel says "No new system joined" and offers **Try Again**. **Cancel** on the code prompt also ends Add a System, and Daisy waits 15 seconds before asking again. Sharing keeps running throughout, including when connecting by address.
 
 That member introduces it to the rest with a signed introduction, so every member trusts it and links to it without another code; see the [security model](security-model.md#groups). A group holds up to eight systems; a ninth is refused. Each member trusts an introduced system for no longer than it trusts the member that introduced it.
 
-Every member links directly with every other. A system that sleeps or leaves the network drops out; the rest keep working, and it rejoins on its own once it is awake, unlocked and still trusted. While a group runs, each member holds off idle sleep, though its display may still sleep; control arriving on a system wakes its display.
+Every member links directly with every other. A system that sleeps or leaves the network drops out; the rest keep working, and it rejoins on its own once it is awake, unlocked and still trusted. While a group runs, each member holds off idle system sleep. New physical input on the system in control refreshes every unlocked member’s display idle timeout. Control arriving on a system also wakes its display. When input stops, each system’s normal display sleep and lock settings apply; Daisy does not unlock a locked system.
 
 To let the group accept a new system at any time without **Add a System**, turn on **Always discoverable** under **Advanced…**. Daisy asks you to confirm, then asks for Touch ID or the login password. While it is on, **Add a System** is unavailable. Turning it off needs nothing. Each system keeps its own setting, and it applies only while sharing. An organization can turn it off with a configuration profile; see [administration](administration.md).
 
@@ -158,10 +162,29 @@ Unlock this system before creating or rotating its device key. Existing keys can
 
 ## Trackpad behavior
 
-- A system needs macOS 27 to capture three- and four-finger swipes from its trackpad.
+- Daisy captures three- and four-finger trackpad swipes on macOS 26 and later.
 - A macOS 27 peer replays live progress, including pullback cancellation.
 
 ## Troubleshooting
+
+### Repeated clipboard banners or competing input sharing
+
+macOS Universal Clipboard can fetch an image from another system when Daisy
+reads the clipboard to share it. This can show a repeated "Pasting from…"
+banner, especially when the source clipboard contains a screenshot.
+
+When Daisy handles input and clipboard sharing, turn off the overlapping Apple
+features on each system:
+
+- In **System Settings → Displays → Advanced…**, turn off Universal Control
+  (the option allowing your pointer and keyboard to move between nearby devices).
+- In **System Settings → General → AirDrop & Handoff**, turn off **Allow
+  Handoff**. This disables Universal
+  Clipboard too; AirDrop file transfers are a separate feature.
+
+Copy plain text to replace an image already on the clipboard, or run
+`pbcopy </dev/null` in Terminal to empty it. Daisy's clipboard sharing remains
+available with Handoff off.
 
 ### A permission remains denied
 

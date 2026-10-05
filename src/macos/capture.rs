@@ -556,8 +556,7 @@ fn handle_gesture(context: &Context, event: CGEventRef) -> bool {
         context.stop_for_contention();
         return true;
     };
-    // before macOS 27 swipes cannot be read, so while the peer has
-    // control they are only kept from acting here
+    // Native DockControl steps share the same fields on macOS 26 and 27.
     let step = swipe::can_recognize()
         .then(|| swipe::dock_event(event))
         .flatten()

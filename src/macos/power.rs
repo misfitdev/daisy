@@ -53,16 +53,29 @@ fn held(id: u32) -> bool {
     }
 }
 
-/// Wakes the display, as a person touching this system would, when control
-/// arrives here. Does not change any setting.
-pub fn declare_activity() {
-    let name = CfString::new(c"Daisy control arrived");
-    let mut id = 0;
-    // SAFETY: the string lives until the call returns; id is a valid out-pointer
-    let result = unsafe { IOPMAssertionDeclareUserActivity(name.0, USER_ACTIVE_LOCAL, &mut id) };
-    if result == 0 {
-        // SAFETY: the id came from the call above and is released once
-        unsafe { IOPMAssertionRelease(id) };
+/// Refreshes the user's display idle timeout without keeping it awake forever.
+/// IOKit expires the assertion using the system's display sleep setting.
+#[derive(Default)]
+pub struct UserActivity(u32);
+
+impl UserActivity {
+    pub fn note(&mut self) {
+        let name = CfString::new(c"Daisy shared user activity");
+        // SAFETY: the string lives until the call returns. IOKit accepts the
+        // previous ID and may replace it when its idle timeout has expired.
+        let result = unsafe { IOPMAssertionDeclareUserActivity(name.0, USER_ACTIVE_LOCAL, &mut self.0) };
+        if result != 0 {
+            tracing::warn!(result, "could not refresh display activity");
+        }
+    }
+}
+
+impl Drop for UserActivity {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            // SAFETY: the ID came from IOKit and is released once here.
+            unsafe { IOPMAssertionRelease(self.0) };
+        }
     }
 }
 
@@ -142,5 +155,17 @@ mod tests {
     fn the_lock_state_is_read_without_crashing() {
         // whether this system is locked while tests run is not known
         let _ = screen_locked();
+    }
+    #[test]
+    fn user_activity_keeps_its_timed_assertion_until_drop() {
+        let mut activity = UserActivity::default();
+        activity.note();
+        assert_ne!(activity.0, 0);
+        assert!(held(activity.0), "activity must not release its assertion immediately");
+        activity.note();
+        let id = activity.0;
+        assert!(held(id), "refresh must retain the current assertion");
+        drop(activity);
+        assert!(!held(id), "ending the session must release its assertion");
     }
 }

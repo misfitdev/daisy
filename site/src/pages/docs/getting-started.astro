@@ -8,7 +8,6 @@ import { downloadUrl, href, version } from "../../config";
   <ul>
     <li>Two systems with Apple silicon, running macOS 26 or later.</li>
     <li>Both on the same network, wired or Wi-Fi.</li>
-    <li>macOS 27 on the system whose trackpad you use, if you want Multi-Touch gestures for Spaces, Mission Control and App Exposé to pass through.</li>
   </ul>
 
   <h2>Set up</h2>
@@ -37,13 +36,14 @@ import { downloadUrl, href, version } from "../../config";
       <div>
         <h3>Pair the two systems</h3>
         <p>Keep both systems within reach. Click <strong>Start Sharing</strong> on both. They find each other automatically, and the system you started last shows a six-digit code. Type that code on the other system and click <strong>Connect</strong>. The code works once, and only for this pairing.</p>
+            <p>If the systems do not find each other, click <strong>+</strong> beside <strong>Peers</strong> on one system, enter the other system’s local name or IP address, then click <strong>Save and Connect</strong>. Keep sharing on the other system. Existing connections stay active, and automatic discovery continues.</p>
       </div>
     </li>
     <li>
       <div>
         <h3>Arrange the screens</h3>
         <p>At the top of the Daisy window, drag the other system's screens to where they sit. Both systems keep one arrangement; the most recent change wins.</p>
-        <img class="setup-shot" src={href("/screenshots/daisy-window.png")} width="1120" height="824" loading="lazy" decoding="async" alt="The Daisy window: Laptop in control beside Studio's two displays, connected in 4 ms, with Studio listed under Peers." />
+        <img class="setup-shot" src={href("/screenshots/daisy-window.png")} width="1120" height="836" loading="lazy" decoding="async" alt="The Daisy window: Laptop in control beside Studio's two displays, connected in 4 ms, with Studio listed under Peers." />
       </div>
     </li>
     <li>

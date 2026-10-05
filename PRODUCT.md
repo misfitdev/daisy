@@ -64,7 +64,8 @@ long that trust lasts.
 - Bonjour discovery of paired peers is implemented. Automatic reconnection after sleep, wake and
   network changes is implemented; two-system verification remains. Clipboard sharing of text, rich text and images is implemented;
   two-system verification remains. Groups of up to eight systems, arranged by dragging, are implemented.
-- Capturing trackpad swipes requires macOS 27 on the system whose trackpad is
+- Activity on the system in control refreshes every unlocked member’s display idle timeout. With no new input, normal display sleep and lock settings apply.
+- Capturing trackpad swipes requires macOS 26 or later on the system whose trackpad is
   used.
 - Pairing codes are safe only as PAKE input. Never ask people to compare a code
   by eye as a security check.
@@ -72,8 +73,8 @@ long that trust lasts.
   trust ends, the systems must pair again.
 - Systems pair by sharing: a system with no peers accepts one while sharing,
   and a group accepts a new system only during Add a System or with Always
-  discoverable on. The new system shows the code. An optional address remains
-  for networks without Bonjour. There is no input-role selector.
+  discoverable on. The new system shows the code. The **+** beside **Peers** adds an address for networks without Bonjour
+  and starts connecting immediately. There is no input-role selector.
 - Product terminology: **this system** for the local computer and **peer** for
   another computer. Input ownership follows physical use and is not a permanent device identity.
   Pair, trust, forget and recovery chord remain the user-facing action terms.
