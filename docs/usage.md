@@ -13,7 +13,44 @@ Daisy 0.6.0 uses protocol 6. Update every member before sharing; 0.5.0 cannot co
 - TCP reachability between the systems. Daisy listens on port 24850 by default.
 - Trackpad swipes work from macOS 26 and later.
 
+## Install
+
 Open the release DMG and drag Daisy to Applications. Opened from anywhere else after downloading, Daisy offers to move itself to Applications, replacing an older copy there and keeping its settings and paired peers, then reopens from there.
+
+### Homebrew
+
+Each release includes a `daisy.rb` cask that installs the
+same signed and notarized app. You can use it in a local tap without a published
+Daisy tap. Create the local tap once:
+
+```bash
+brew tap-new --no-git local/daisy
+mkdir -p "$(brew --repository local/daisy)/Casks"
+```
+
+Download the recipe for the version you want and install it:
+
+```bash
+curl --fail --location https://github.com/misfitdev/daisy/releases/download/v0.6.0/daisy.rb \
+  --output "$(brew --repository local/daisy)/Casks/daisy.rb"
+brew install --cask local/daisy/daisy
+```
+
+For a later release, download its recipe from that release's tag using the same
+command with the new version. Quit Daisy, then run:
+
+```bash
+brew upgrade --cask local/daisy/daisy
+```
+
+Reopen Daisy afterward. Update every group member to a compatible version.
+Homebrew checks the DMG's SHA-256 before installing. It does not grant
+Accessibility or Input Monitoring, and Daisy does not update itself.
+`brew uninstall --cask local/daisy/daisy` removes the app while retaining
+settings, device identity, and paired peers. If Daisy was installed manually,
+quit it and remove the existing app from Applications before installing the cask.
+
+## Open Daisy
 
 Daisy lives in the menu bar. While Accessibility or Input Monitoring is missing, it opens a walkthrough that asks for each in turn, opens the matching System Settings pane and moves on once it is switched on. macOS can apply Input Monitoring only after Daisy reopens; the walkthrough offers **Reopen Daisy** when that is needed, then continues. Afterward, choose **Open Daisy** from the menu-bar flower.
 

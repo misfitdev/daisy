@@ -100,6 +100,10 @@ Device-bound peer trust is stored in `trust-v5/`. Peer records from before devic
 
 ## Release integrity
 
+The Homebrew cask pins the release DMG's SHA-256, and Homebrew verifies that
+checksum before installation. It installs the same signed and notarized app;
+device identity and trust checks do not depend on the installation method.
+
 Releases are built only by the release workflow from a tagged commit, signed with Developer ID and notarized by Apple. The DMG and the app inside it are both notarized and stapled. Each DMG and zip carries SLSA Build Level 3 provenance and a GitHub artifact attestation. [releasing.md](releasing.md) explains how to verify both provenance and notarization.
 
 When Daisy moves itself to Applications, Gatekeeper has already approved the running copy. Daisy copies that bundle with `ditto`, preserving its signature, and removes the quarantine attribute from the copy only, so the copy opens without App Translocation. Any copy it replaces goes to the Trash.
