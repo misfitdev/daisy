@@ -51,9 +51,12 @@ bundle:
         exit 1
     fi
     version="$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)"
+    metadata="$(target/release/daisy update-info)"
+    protocol="$(printf '%s\n' "$metadata" | awk '/^protocol = / {print $3}')"
+    [[ "$protocol" =~ ^[0-9]+$ ]] || { echo "the build did not report a network protocol" >&2; exit 1; }
     rm -rf "{{app}}"
     mkdir -p "{{app}}/Contents/MacOS" "{{app}}/Contents/Resources"
-    sed -e "s/__BUNDLE_ID__/{{bundle_id}}/" -e "s/__VERSION__/$version/" macos/Info.plist > "{{app}}/Contents/Info.plist"
+    sed -e "s/__BUNDLE_ID__/{{bundle_id}}/" -e "s/__VERSION__/$version/" -e "s/__NETWORK_PROTOCOL__/$protocol/" macos/Info.plist > "{{app}}/Contents/Info.plist"
     plutil -lint -s "{{app}}/Contents/Info.plist"
     cp -f target/release/daisy "{{app}}/Contents/MacOS/daisy"
     icon_work="$(mktemp -d)"
@@ -146,6 +149,7 @@ package: bundle
     for file in "$zip" "$dmg"; do
         (cd "{{dist}}" && shasum -a 256 "$(basename "$file")" > "$(basename "$file").sha256")
     done
+    cargo run --release --quiet --example update_manifest -- "$zip" > "{{dist}}/Daisy-$version-update.toml"
     ls -l "{{dist}}"
 
 # Release notes for the current version, from conventional commits

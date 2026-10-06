@@ -118,6 +118,8 @@ pub enum Command {
     SetAlwaysDiscoverable(bool),
     /// Put a member's displays where a person dropped them in the group.
     Place(PublicKey, crate::layout::Offset),
+    /// Startup milestones used only by a replacement awaiting commit.
+    Startup(crate::install::update::StartupState),
     Shutdown,
 }
 
@@ -196,9 +198,19 @@ pub enum Event {
 pub struct Handle {
     commands: tokio_mpsc::UnboundedSender<Command>,
     events: Receiver<Event>,
+    stopped: Receiver<()>,
 }
 
 impl Handle {
+    /// Let the runtime finish dropping its sessions and held input before the
+    /// application exits. This is called on the UI thread, never the event tap.
+    pub fn shutdown(&self) -> Result<()> {
+        let _ = self.send(Command::Shutdown);
+        match self.stopped.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => Ok(()),
+            Err(error) => Err(error).context("Daisy's sharing tasks did not finish stopping"),
+        }
+    }
     pub fn send(&self, command: Command) -> Result<()> {
         self.commands
             .send(command)
@@ -217,6 +229,7 @@ impl Handle {
 pub fn spawn(home: PathBuf, name: String) -> Result<Handle> {
     let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::channel();
+    let (stopped_tx, stopped_rx) = mpsc::channel();
     thread::Builder::new()
         .name("daisy-controller".to_owned())
         .spawn(move || {
@@ -230,11 +243,13 @@ pub fn spawn(home: PathBuf, name: String) -> Result<Handle> {
                     }));
                 }
             }
+            let _ = stopped_tx.send(());
         })
         .context("starting Daisy's background controller")?;
     Ok(Handle {
         commands: command_tx,
         events: event_rx,
+        stopped: stopped_rx,
     })
 }
 
@@ -300,6 +315,10 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
 
     let mut session: Option<tokio::task::JoinHandle<()>> = None;
     let mut addresses: Option<tokio_mpsc::UnboundedSender<(String, Option<PublicKey>)>> = None;
+    let mut update_root = std::env::var_os(crate::macos::update::STARTUP_DIRECTORY)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let mut startup = crate::install::update::StartupGate::default();
     while let Some(command) = commands.recv().await {
         let command = match command {
             Command::ConnectByAddress(settings) => {
@@ -457,9 +476,21 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             Command::Place(key, offset) => {
                 arrange.send_replace(Some((key, offset)));
             }
+            Command::Startup(state) => {
+                if startup.observe(state)
+                    && let Some(root) = update_root.take()
+                {
+                    let acknowledged = crate::macos::update::running_bundle()
+                        .and_then(|bundle| crate::install::update::acknowledge(&root, &bundle, &home));
+                    if let Err(error) = acknowledged {
+                        tracing::warn!(error = ?error, "the replacement could not acknowledge startup");
+                    }
+                }
+            }
             Command::Shutdown => {
                 if let Some(running) = session.take() {
                     running.abort();
+                    let _ = running.await;
                 }
                 break;
             }

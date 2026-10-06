@@ -12,6 +12,7 @@ mod pointer;
 pub mod power;
 pub mod shortcut;
 pub mod swipe;
+pub mod update;
 
 use anyhow::{Result, bail};
 

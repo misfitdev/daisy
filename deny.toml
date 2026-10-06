@@ -1,3 +1,12 @@
+[graph]
+# Daisy only ships for Apple silicon; without this, Cargo.lock's
+# cross-platform resolution pulls in other targets' dependencies
+# (Android, Windows, wasm32) and their licenses.
+targets = ["aarch64-apple-darwin"]
+# Dev-dependencies of crates in the graph (e.g. rustls-platform-verifier's own
+# test fixtures) are never compiled into Daisy; their licenses don't apply.
+exclude-dev = true
+
 [advisories]
 ignore = []
 

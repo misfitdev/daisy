@@ -33,6 +33,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Stage a signed local update and restart Daisy after verification
+    InstallUpdate { bundle: PathBuf },
+    /// Compatibility metadata for packaging, without starting Daisy
+    #[command(hide = true)]
+    UpdateInfo,
+    /// Runs from the retained old app during replacement
+    #[command(hide = true)]
+    ApplyUpdate {
+        directory: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        exclude_process: u32,
+    },
     /// Save a picture of Daisy's window with sample systems, for the website
     #[command(hide = true)]
     Screenshot {
@@ -116,8 +128,31 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match &cli.command {
+        Some(Command::UpdateInfo) => {
+            print!("{}", toml::to_string(&daisy::install::update::Build::this_system())?);
+            return Ok(());
+        }
+        Some(Command::ApplyUpdate {
+            directory,
+            exclude_process,
+        }) => return macos::update::apply(directory, *exclude_process),
+        Some(Command::InstallUpdate { bundle }) => {
+            let home = cli.home.clone().map_or_else(default_home, Ok)?;
+            let status = macos::update::install_local(bundle, &home)?.wait()?;
+            if !status.success() {
+                bail!("the update did not complete; inspect the helper's error above");
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
     if let Some(code) = launcher::relaunch_as_app()? {
         std::process::exit(code);
+    }
+    if cli.command.is_none() && macos::update::recover_pending()? {
+        return Ok(());
     }
 
     tracing_subscriber::fmt()
@@ -125,7 +160,6 @@ fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
     macos::restore_pointer();
     let home = cli.home.map_or_else(default_home, Ok)?;
     let name = cli.name.unwrap_or_else(computer_name);
@@ -175,6 +209,9 @@ struct Keys<'a> {
 async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStore, name: &str) -> Result<()> {
     let Keys { identity, signer } = keys;
     match command {
+        Command::UpdateInfo | Command::ApplyUpdate { .. } | Command::InstallUpdate { .. } => {
+            unreachable!("update commands exit before identity and input initialization")
+        }
         Command::Screenshot { path } => daisy::app::screenshot::save(&path),
         Command::Id => {
             println!("{name}\n{}", identity.public_key());
