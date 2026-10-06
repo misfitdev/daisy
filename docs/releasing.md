@@ -41,6 +41,12 @@ Delete the local `.p12` and `.p8` after the secrets are stored.
 
 ## Cutting a release
 
+Keep the stable session protocol for compatible releases; a release-version
+bump does not require a protocol bump. Follow the
+[protocol compatibility rules](protocol.md#changing-the-protocol) before
+changing any wire type or peer behavior. A protocol break requires a manual
+group update and must be explained in the release notes.
+
 1. Set `version` in `Cargo.toml` and make sure `main` is green.
 2. Run `just update`. It updates crates, site packages and the pinned GitHub
    Actions, then lists everything still behind, including major versions and
@@ -61,6 +67,19 @@ Delete the local `.p12` and `.p8` after the secrets are stored.
 5. The workflow runs `just check`, builds `Daisy.app`, signs it with Developer ID, notarizes and staples it, and creates the zip and a DMG that is signed, notarized and stapled the same way. It records a GitHub artifact attestation, generates SLSA Build Level 3 provenance through the OpenSSF generator, and publishes a GitHub release with notes since the previous tag.
 
 ## Verifying a release
+
+The bundle recipe embeds `DaisyNetworkProtocol` in the signed `Info.plist`,
+using the compiled binary's `update-info` command. That command exits before
+identity, input capture or listener initialization. The local updater reads
+this sealed value and the bundle version instead of executing the replacement
+while the current app is sharing.
+
+Packaging also emits `Daisy-<version>-update.toml` from the release source. It
+records metadata format `1`, the package version, `session::PROTOCOL`, and the
+SHA-256 of the final ZIP. The release workflow covers this file with artifact
+attestation and SLSA provenance. It is the compatibility contract for the
+future automatic installer; release numbers and release-note text are not a
+substitute. Verify its provenance and archive binding before using it.
 
 Either command proves that a release file was built by this repository's release workflow:
 

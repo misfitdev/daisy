@@ -154,11 +154,14 @@ define_class!(
                 )
             };
             self.ivars().timer.set(timer).ok();
+            let _ = self.ivars().controller.send(Command::Startup(crate::install::update::StartupState::UiReady));
         }
 
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
-            let _ = self.ivars().controller.send(Command::Shutdown);
+            if let Err(error) = self.ivars().controller.shutdown() {
+                tracing::warn!(error = ?error, "Daisy's sharing tasks did not stop before exit");
+            }
         }
     }
 
@@ -826,6 +829,12 @@ impl AppDelegate {
                 if settings.sharing && self.setup_step() == Step::Done {
                     self.start();
                 }
+                if !settings.sharing {
+                    let _ = self
+                        .ivars()
+                        .controller
+                        .send(Command::Startup(crate::install::update::StartupState::IdleReady));
+                }
             }
             Event::Status(status) => self.apply_status(status),
             Event::Adding(adding) => {
@@ -881,6 +890,16 @@ impl AppDelegate {
     }
 
     fn apply_status(&self, status: Status) {
+        let milestone = match &status {
+            Status::Waiting { .. } | Status::Connected { .. } => {
+                Some(crate::install::update::StartupState::SharingReady)
+            }
+            Status::Problem { .. } => Some(crate::install::update::StartupState::Failed),
+            _ => None,
+        };
+        if let Some(milestone) = milestone {
+            let _ = self.ivars().controller.send(Command::Startup(milestone));
+        }
         let problem = matches!(status, Status::Problem { .. });
         match &status {
             Status::Connected { peers } => self

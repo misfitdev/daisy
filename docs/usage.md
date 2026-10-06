@@ -111,6 +111,16 @@ Quit Daisy, install the [latest release](https://github.com/misfitdev/daisy/rele
 
 Different releases can connect when their protocol versions match. If Daisy reports a protocol mismatch, update the system it identifies; updating all group members together avoids mixed versions. See the [protocol compatibility rules](protocol.md#handshake).
 
+### Install staged update
+
+To install a newer signed release without copying over the running app, mount its DMG and run:
+
+```bash
+/Applications/Daisy.app/Contents/MacOS/daisy install-update /Volumes/Daisy/Daisy.app
+```
+
+Daisy stages and verifies the replacement while the current copy keeps running. It then stops the current process, checks that the network listener has closed, exchanges the complete app bundles, and starts the replacement. Sharing resumes with the same device identity, paired peers, settings and screen arrangement. The previous copy stays available until startup succeeds. If startup fails, Daisy stops the replacement and restores the previous copy. The command accepts only a newer notarized release from the same publisher using the same network protocol. Protocol changes still require a manual group update. This command does not enable automatic installation.
+
 ## Homebrew
 
 Each release includes a `daisy.rb` cask that installs the

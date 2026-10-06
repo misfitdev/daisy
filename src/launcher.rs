@@ -70,7 +70,7 @@ pub async fn launcher_gone() {
 
 /// The .app bundle containing `executable`, if it sits at
 /// `Something.app/Contents/MacOS/<name>`.
-fn app_bundle(executable: &Path) -> Option<PathBuf> {
+pub fn app_bundle(executable: &Path) -> Option<PathBuf> {
     let macos = executable.parent()?;
     let contents = macos.parent()?;
     let bundle = contents.parent()?;

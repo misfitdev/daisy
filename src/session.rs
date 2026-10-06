@@ -22,8 +22,9 @@ pub(crate) const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 /// the handshake payloads instead, so a mismatch can be explained.
 const PROLOGUE: &[u8] = b"daisy";
 
-/// Session protocol version. Raise it for any change that would make two
-/// versions misread each other; sessions need the same version on both sides.
+/// Stable session protocol, independent of the Daisy release number. Keep it
+/// for compatible releases; changing wire meaning or required behavior needs
+/// a new protocol and a manual group update. See docs/protocol.md.
 pub const PROTOCOL: u16 = 6;
 
 /// Longest app version carried in a handshake payload.
@@ -544,6 +545,13 @@ mod tests {
         assert_eq!(Version::decode(&this.encode()), Some(this));
         assert_eq!(Version::decode(&[2]), None);
         assert_eq!(Version::decode(&[0; 2 + MAX_APP_VERSION + 1]), None);
+    }
+
+    #[test]
+    fn the_stable_handshake_payload_is_independent_of_release_numbers() {
+        assert_eq!(PROTOCOL, 6, "a protocol break needs a new group-update contract");
+        assert_eq!(version(6, "0.6.0").encode(), b"\x00\x060.6.0");
+        assert_eq!(Version::decode(b"\x00\x066.0.0"), Some(version(6, "6.0.0")));
     }
 
     #[tokio::test]

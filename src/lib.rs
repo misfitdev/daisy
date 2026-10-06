@@ -34,3 +34,4 @@ pub mod shake;
 pub mod share;
 pub mod swipe;
 pub mod trust;
+pub mod update;

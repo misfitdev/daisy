@@ -33,6 +33,18 @@ Each member shares its displays and one agreed arrangement: an offset per member
 
 Pure decision modules contain no macOS calls and are unit tested directly. The macOS modules carry those decisions out; they do not decide them. See [macos.md](macos.md).
 
+## Staged updates
+
+The staged update transaction lives in `install::update`. It copies and
+verifies complete bundles before stopping sharing, then delegates process
+exit, port availability, atomic bundle exchange and reopening to
+`macos::update`. A retained old executable runs the helper. Startup is committed
+only after the replacement's UI and controller are ready; when sharing was
+enabled, the listener must have started. Failure stops the replacement before
+restoring and reopening the previous bundle. Interrupted cutovers retain a
+complete installed path and recover through the old helper. Device keys,
+peer trust, settings and arrangement remain in the existing data folder.
+
 ## Threads and tasks
 
 - **AppKit main thread**: owns every native menu, window and control. It never waits on the network or reads trust files from an event callback.

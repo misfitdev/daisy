@@ -96,6 +96,61 @@ Each system holds one session with every other member, up to eight systems. Sess
 
 ## Changing the protocol
 
+Protocol 6 is the stable baseline for rolling updates. A group can run different
+Daisy releases for as long as necessary, including when a member returns after
+being offline, provided every release uses this protocol. There is no limit of
+one intervening release. Discovery's TXT `v=1` identifies the beacon format;
+it is not the session protocol or the Daisy release number. Compatible releases
+keep protocol 6, including across minor or major release changes.
+
+Keep the encoding, field order, enum tags and meaning of every existing message
+and nested wire type. This includes device proofs, signed introductions and
+revocations, trust policy strings, control ownership, input generations and
+clipboard acknowledgments. A security requirement must never be weakened to
+connect an older peer.
+
+The fixed bytes in `tests/fixtures/protocol-6.txt` pin all existing message and
+input variants and their nested enums. `tests/protocol_6.rs` checks both encoding
+and decoding against those bytes. Do not regenerate the fixtures to accommodate
+a wire change. These tests protect the encoding; behavior still needs review
+and decision tests when a change affects another member.
+
+Appending an optional variant is compatible only after both releases can
+negotiate support through an authenticated, backward-compatible exchange.
+Protocol 6 currently has no such exchange. Do not send a newly appended variant
+to a protocol-6 peer or infer its support from its release string or Bonjour
+advertisement. Until negotiation exists, a new transmitted variant requires a
+protocol change. Unknown messages remain errors; silently ignoring control or
+security messages is unsafe.
+
+There is currently no protocol N−1 bridge. Protocol 5 and 6 remain incompatible;
+changing the version comparison to accept adjacent numbers does not implement
+one. A future bridge must map the previous protocol's wire and behavioral
+contract explicitly and test both connection directions and mixed groups.
+
+### Automatic installation contract
+
+Packaging emits `Daisy-<version>-update.toml` with metadata format `1`, the exact
+Daisy release, session protocol, and SHA-256 of the final ZIP archive. The
+release workflow attests this metadata alongside the archive and includes it
+in SLSA provenance. A missing, malformed, unsupported or unverified manifest
+does not authorize automatic installation.
+
+Before replacing the app, the installer must verify the manifest's provenance
+from this repository's release workflow and the selected release tag, verify
+the ZIP's SHA-256 against it, and check that the version matches the selected
+release and the protocol equals this system's protocol. `update::Manifest::matches`
+checks the last three properties; it does not verify provenance or authorize
+installation. The installer must also verify the app's signature and identity
+and retain the local device key, trust store and settings.
+
+This applies to every automatic policy, including minor/patch-only. Semver
+alone is not evidence of protocol compatibility. Protocol changes require a
+manual group update even when no peers are currently connected: an offline
+member must be able to return. Notifications may still offer such a release.
+Automatic installation remains unavailable until the installer and policy
+implement these checks.
+
 - Adding a message or event: append a variant. An older peer cannot decode an unknown tag and ends the session, so only send a new message to a peer known to understand it.
 - Anything that changes the meaning of an existing message, or removes or reorders one: raise `PROTOCOL` in `src/session.rs`, so mismatched peers stop at the handshake and say which to update, rather than misbehave.
 

@@ -22,6 +22,10 @@ Daisy shares your keyboard, mouse, trackpad and clipboard across macOS systems o
 
 Move the pointer past a screen edge toward another system. Daisy remembers paired systems and reconnects automatically.
 
+For an existing installation, the [staged update command](docs/usage.md#install-a-staged-update)
+verifies a newer compatible release before restarting and retains the previous
+copy until startup succeeds.
+
 ## Security
 
 Connections stay on your local network and are encrypted between paired systems. Daisy needs no account or cloud service.

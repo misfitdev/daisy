@@ -20,6 +20,8 @@
 	<string>__VERSION__</string>
 	<key>CFBundleVersion</key>
 	<string>__VERSION__</string>
+	<key>DaisyNetworkProtocol</key>
+	<integer>__NETWORK_PROTOCOL__</integer>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<!-- no Dock icon: runs in the background, and later from the menu bar -->
