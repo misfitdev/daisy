@@ -91,6 +91,9 @@ pub fn check(repository: &str) -> Result<Vec<Release>> {
     ureq::get(format!("https://api.github.com/repos/{repository}/releases"))
         .header("User-Agent", "daisy-update-check")
         .header("Accept", "application/vnd.github+json")
+        .config()
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
         .call()
         .context("requesting the releases feed")?
         .body_mut()

@@ -111,7 +111,7 @@ Quit Daisy, install the [latest release](https://github.com/misfitdev/daisy/rele
 
 Different releases can connect when their protocol versions match. If Daisy reports a protocol mismatch, update the system it identifies; updating all group members together avoids mixed versions. See the [protocol compatibility rules](protocol.md#handshake).
 
-### Install staged update
+### Install a staged update
 
 To install a newer signed release without copying over the running app, mount its DMG and run:
 

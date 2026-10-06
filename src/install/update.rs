@@ -188,16 +188,27 @@ pub fn restart(root: &Path, platform: &mut impl Platform) -> Result<()> {
         fs::remove_dir_all(root)?;
         bail!("an interrupted update was recovered; the previous app was restored");
     }
-    platform.verify(&candidate, &plan.next)?;
-    platform.verify(&previous, &plan.previous)?;
-    platform.stop(&plan.target, false)?;
-    if let Err(error) = platform.listener_available() {
-        let _ = platform.launch(&plan.target, &plan.home, None);
-        return Err(error.context("the network listener is still in use; the update was not installed"));
-    }
-    if let Err(error) = platform.exchange(&candidate, &plan.target) {
-        let _ = platform.launch(&plan.target, &plan.home, None);
-        return Err(error.context("the app could not be replaced; the previous app was retained"));
+    let before_exchange = (|| -> Result<()> {
+        platform.verify(&candidate, &plan.next)?;
+        platform.verify(&previous, &plan.previous)?;
+        platform.stop(&plan.target, false)?;
+        if let Err(error) = platform.listener_available() {
+            let _ = platform.launch(&plan.target, &plan.home, None);
+            return Err(error.context("the network listener is still in use; the update was not installed"));
+        }
+        if let Err(error) = platform.exchange(&candidate, &plan.target) {
+            let _ = platform.launch(&plan.target, &plan.home, None);
+            return Err(error.context("the app could not be replaced; the previous app was retained"));
+        }
+        Ok(())
+    })();
+    if let Err(error) = before_exchange {
+        if let Err(cleanup) = fs::remove_dir_all(root) {
+            return Err(error.context(format!(
+                "the old app was retained but staging cleanup failed: {cleanup:#}"
+            )));
+        }
+        return Err(error);
     }
     let started = platform
         .launch(&plan.target, &plan.home, Some(root))

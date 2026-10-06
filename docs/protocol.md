@@ -96,18 +96,17 @@ Each system holds one session with every other member, up to eight systems. Sess
 
 ## Changing the protocol
 
-Protocol 6 is the stable baseline for rolling updates. A group can run different
-Daisy releases for as long as necessary, including when a member returns after
-being offline, provided every release uses this protocol. There is no limit of
-one intervening release. Discovery's TXT `v=1` identifies the beacon format;
-it is not the session protocol or the Daisy release number. Compatible releases
-keep protocol 6, including across minor or major release changes.
+Daisy release numbers and session protocol numbers are independent. Different
+Daisy releases can share a group when their session protocols match. There is
+no limit on the number of intervening compatible releases. Discovery's TXT
+`v=1` identifies the beacon format, not the session protocol or release number.
 
-Keep the encoding, field order, enum tags and meaning of every existing message
-and nested wire type. This includes device proofs, signed introductions and
-revocations, trust policy strings, control ownership, input generations and
-clipboard acknowledgments. A security requirement must never be weakened to
-connect an older peer.
+Keep the current session protocol number for compatible releases, including
+minor or major release changes. Preserve the encoding, field order, enum tags
+and meaning of every existing message and nested wire type. This includes
+device proofs, signed introductions and revocations, trust policy strings,
+control ownership, input generations and clipboard acknowledgments. A security
+requirement must never be weakened to connect an older peer.
 
 The fixed bytes in `tests/fixtures/protocol-6.txt` pin all existing message and
 input variants and their nested enums. `tests/protocol_6.rs` checks both encoding
@@ -145,13 +144,12 @@ installation. The installer must also verify the app's signature and identity
 and retain the local device key, trust store and settings.
 
 This applies to every automatic policy, including minor/patch-only. Semver
-alone is not evidence of protocol compatibility. Protocol changes require a
-manual group update even when no peers are currently connected: an offline
-member must be able to return. Notifications may still offer such a release.
+alone is not evidence of protocol compatibility. Protocol changes require a manual group update while Daisy supports only one
+session protocol. Notifications may still offer a release.
 Automatic installation remains unavailable until the installer and policy
 implement these checks.
 
-- Adding a message or event: append a variant. An older peer cannot decode an unknown tag and ends the session, so only send a new message to a peer known to understand it.
+- Adding a message or event: append a variant and raise `PROTOCOL` in `src/session.rs` before transmitting it, until authenticated capability negotiation exists. An older peer cannot decode an unknown tag and ends the session.
 - Anything that changes the meaning of an existing message, or removes or reorders one: raise `PROTOCOL` in `src/session.rs`, so mismatched peers stop at the handshake and say which to update, rather than misbehave.
 
 A physical event on any member claims ownership with a newer generation, sent to every member. The 150 ms settle window limits repeated claims when members are used together; equal generations favor the greater key. Remote injection is suppressed during local physical activity. When the member in control leaves the group, the others take control back locally. A change of driver preserves the arrangement.

@@ -220,8 +220,10 @@ fn stop_or_replacement_failure_never_discards_the_old_app() {
         system.fail = Some(failure);
         assert!(restart(&staged.root, &mut system).is_err());
         assert_eq!(read(&staged.plan.target), build("0.6.0"));
-        assert_eq!(read(&staged.previous()), build("0.6.0"));
-        assert!(staged.root.exists());
+        assert!(!staged.root.exists());
+        system.fail = None;
+        drop(staged);
+        stage(directory.path(), &mut system).unwrap();
     }
 }
 
