@@ -44,6 +44,7 @@ pub struct Link {
 pub struct SharedControl {
     pub state: Mutex<Control>,
     pub interrupted: AtomicBool,
+    pub diagnostics: crate::diagnostics::CaptureQueue,
     wake: tokio::sync::mpsc::Sender<()>,
     wakeups: Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
     activity: AtomicU64,
@@ -57,6 +58,7 @@ impl SharedControl {
         Self {
             state: Mutex::new(Control::new(me, owner)),
             interrupted: AtomicBool::new(false),
+            diagnostics: crate::diagnostics::CaptureQueue::default(),
             wake,
             wakeups: Mutex::new(Some(wakeups)),
             activity: AtomicU64::new(0),

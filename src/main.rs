@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use daisy::identity::{Identity, PublicKey};
 use daisy::input::Side;
@@ -33,6 +33,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Collect developer traces from the running app and supported connected peers
+    Trace {
+        /// New private NDJSON output file
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Download, verify and install a newer compatible stable release
     Update {
         /// Install this exact stable version instead of the latest release
@@ -136,6 +142,13 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
+        Some(Command::Trace { output }) => {
+            let home = cli.home.clone().map_or_else(default_home, Ok)?;
+            return tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(daisy::diagnostics::collect(&home, output));
+        }
         Some(Command::UpdateInfo) => {
             print!("{}", toml::to_string(&daisy::install::update::Build::this_system())?);
             return Ok(());
@@ -173,9 +186,19 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with_writer(std::io::stderr)
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))),
+        )
+        .with(
+            daisy::diagnostics::TraceLayer(daisy::diagnostics::hub().clone()).with_filter(
+                tracing_subscriber::filter::dynamic_filter_fn(|metadata, _context| {
+                    daisy::diagnostics::trace_filter(metadata)
+                }),
+            ),
+        )
         .init();
 
     macos::restore_pointer();
@@ -202,6 +225,11 @@ async fn run_cli(command: Command, home: PathBuf, name: String) -> Result<()> {
     } else {
         daisy::introduce::Signer::load_or_create(&home.join("device-identity"))?
     };
+    let _trace = if matches!(command, Command::Listen { .. } | Command::Connect { .. }) {
+        Some(daisy::diagnostics::serve(&home, identity.public_key()).await?)
+    } else {
+        None
+    };
     let peers = PeerStore::open(&home)?;
     let keys = Keys {
         identity: &identity,
@@ -227,7 +255,11 @@ struct Keys<'a> {
 async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStore, name: &str) -> Result<()> {
     let Keys { identity, signer } = keys;
     match command {
-        Command::Update { .. } | Command::UpdateInfo | Command::ApplyUpdate { .. } | Command::InstallUpdate { .. } => {
+        Command::Trace { .. }
+        | Command::Update { .. }
+        | Command::UpdateInfo
+        | Command::ApplyUpdate { .. }
+        | Command::InstallUpdate { .. } => {
             unreachable!("update commands exit before identity and input initialization")
         }
         Command::Screenshot { path } => daisy::app::screenshot::save(&path),
@@ -536,5 +568,11 @@ mod tests {
                 ..
             })
         ));
+    }
+    #[test]
+    fn developer_trace_requires_an_explicit_output_path() {
+        let cli = Cli::try_parse_from(["daisy", "trace", "--output", "/tmp/trace.ndjson"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Trace { output }) if output == Path::new("/tmp/trace.ndjson")));
+        assert!(Cli::try_parse_from(["daisy", "trace"]).is_err());
     }
 }

@@ -26,6 +26,7 @@ Each member shares its displays and one agreed arrangement: an offset per member
 | Control | `control` | Group-wide ownership and simultaneous-use settling |
 | Layout | `layout` | Display geometry, the agreed arrangement, snapping, and where the pointer goes next |
 | Sharing | `share` | One input core for the group, with a link per member: claims, routing, arrangement, bounded queues, heartbeat and cleanup |
+| Developer diagnostics | `diagnostics`, `macos::diagnostics` | Dynamic trace requests, bounded event capture and encrypted streaming, local collector socket, foreground observations |
 | Latency | `latency` | Round trips per link from heartbeat pings and pongs: a recent average and percentiles |
 | Clipboard | `clipboard` | What to send when control crosses, echo prevention, chunking and reassembly; `macos::pasteboard` reads and writes the pasteboard |
 | Decisions | `input`, `swipe`, `shake`, `control`, `trust`, `install`, `setup` | Routing, edge crossing, held-input release, swipe pacing, pointer-shake recognition, trust duration, moving to Applications and the permission walkthrough |
@@ -126,3 +127,20 @@ confirmation and rollback. A failed download or verification leaves the
 installed app running. `macos::update::request_release` starts a separate
 installer worker for policy callers; it does not exclude the GUI process from
 the helper's stop operation.
+
+## Developer trace flow
+
+A local CLI attaches to the running application through its private Unix socket.
+The collector's lifetime enables the trace layer and causes the sharing loop to
+request `trace-v1` events from every connected, capable peer. Each peer keeps a
+lease for the authenticated requesting link; dropping it disables that request.
+Optional capabilities are carried in authenticated Noise handshake payloads,
+independently of the required sharing protocol.
+
+The tracing layer bounds formatted event fields and enqueues records without
+network or disk I/O. Event-tap decisions use a separate copy-only queue drained by
+the sharing task. A lower-priority sender queue and single outstanding-frame
+credit prevent trace streams from accumulating ahead of input. The collector labels
+remote records with the channel key and streams them to the CLI. Overflow drops
+diagnostics and increments explicit loss counters. The native application also
+observes foreground-application changes without changing focus.

@@ -63,7 +63,14 @@ impl UserActivity {
         let name = CfString::new(c"Daisy shared user activity");
         // SAFETY: the string lives until the call returns. IOKit accepts the
         // previous ID and may replace it when its idle timeout has expired.
+        let previous = self.0;
         let result = unsafe { IOPMAssertionDeclareUserActivity(name.0, USER_ACTIVE_LOCAL, &mut self.0) };
+        tracing::debug!(
+            previous_assertion = previous,
+            assertion = self.0,
+            result,
+            "display user activity refreshed"
+        );
         if result != 0 {
             tracing::warn!(result, "could not refresh display activity");
         }

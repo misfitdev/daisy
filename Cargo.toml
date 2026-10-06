@@ -26,7 +26,7 @@ spake2 = "0.4"
 subtle = "2.6"
 thiserror = "2.0.21"
 toml = "1.1.6"
-tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "net", "signal", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 backon = { version = "1.6.0", default-features = false, features = ["std", "tokio-sleep"] }

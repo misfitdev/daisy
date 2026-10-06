@@ -1256,6 +1256,7 @@ impl AppDelegate {
 }
 
 pub fn run(home: PathBuf, name: String) -> Result<()> {
+    let _focus = crate::macos::diagnostics::FocusObserver::observe();
     let mtm = MainThreadMarker::new().context("Daisy's interface must start on the main thread")?;
     let controller = controller::spawn(home, name.clone())?;
     let app = NSApplication::sharedApplication(mtm);

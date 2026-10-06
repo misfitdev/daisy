@@ -167,6 +167,9 @@ where
 
 /// One peer's session within the group.
 struct Link {
+    trace_capable: bool,
+    trace_sent: bool,
+    trace_request: crate::diagnostics::Lease,
     outgoing: Outgoing,
     _incoming: Incoming,
     meter: crate::latency::Meter,
@@ -240,7 +243,28 @@ where
     // links already waiting join before any input is routed
     let mut waiting = waiting;
     waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
+    let trace = crate::diagnostics::hub();
     loop {
+        control.diagnostics.drain();
+        let collecting = trace.collecting();
+        for (key, link) in &mut links {
+            if link.trace_sent != collecting {
+                link.trace_sent = collecting;
+                tracing::info!(peer = %key, enabled = collecting, supported = link.trace_capable, "developer trace streaming changed");
+                if link.trace_capable {
+                    if let Err(error) = link.outgoing.send(Message::TraceControl { enabled: collecting }) {
+                        ended.push((*key, Err(error)));
+                    }
+                } else if collecting {
+                    tracing::warn!(peer = %key, "peer does not support developer trace streaming; update this peer");
+                }
+            }
+        }
+        for record in trace.drain() {
+            for link in links.values_mut().filter(|link| link.trace_request.enabled()) {
+                link.outgoing.send_trace(record.clone());
+            }
+        }
         if placement.version() != kept {
             kept = placement.version();
             let _ = group.save.send(placement.message());
@@ -252,6 +276,7 @@ where
             let was_owner = state.owner() == key;
             let generation = was_owner.then(|| state.interrupt(control.now()));
             drop(state);
+            tracing::debug!(peer = %key, was_owner, generation = ?generation, "peer link ended");
             if was_owner {
                 for action in release.target.reclaim() {
                     release.injector.execute(&action);
@@ -275,8 +300,12 @@ where
             match change {
                 Membership::Join(joining) => {
                     let key = joining.channel.remote_key();
+                    let trace_capable = joining.channel.trace_capable();
                     let (sender, receiver) = joining.channel.split();
                     let link = Link {
+                        trace_capable,
+                        trace_sent: false,
+                        trace_request: crate::diagnostics::hub().lease(),
                         outgoing: spawn_sender(sender),
                         _incoming: spawn_receiver(key, receiver, received_tx.clone()),
                         meter: crate::latency::Meter::default(),
@@ -329,6 +358,7 @@ where
             continue;
         }
         tokio::select! {
+            _ = trace.changed.notified() => {},
             change = membership.recv() => match change {
                 Some(change) => waiting.push_back(change),
                 None => std::future::pending::<()>().await,
@@ -362,6 +392,7 @@ where
                     }
                     return result;
                 };
+                log_transition("outgoing", me, None, &message, &control);
                 match message {
                     Message::ControlClaim { .. } => {
                         for action in release.target.reclaim() { release.injector.execute(&action); }
@@ -382,7 +413,10 @@ where
                                 link.outgoing.send_clipboard(sharing.crossing());
                             }
                         }
-                        None => pointer.leave(None),
+                        None => {
+                        tracing::debug!(destination = %to, "edge entry refused: peer locked or unavailable");
+                        pointer.leave(None);
+                    },
                     },
                     other => {
                         let reclaiming = matches!(other, Message::Reclaim { .. });
@@ -406,8 +440,25 @@ where
                     Err(SessionError::Closed) => { ended.push((peer, closed_after(quiet))); continue; }
                     Err(error) => { ended.push((peer, Err(error.into()))); continue; }
                 };
+                log_transition("incoming", me, Some(peer), &message, &control);
                 let outcome: Result<()> = (|| {
                     match message {
+                        Message::TraceControl { enabled } => {
+                            anyhow::ensure!(link.trace_capable, "trace capability was not negotiated");
+                            link.trace_request.set(enabled);
+                            tracing::info!(peer = %peer, enabled, "peer developer trace request changed");
+                        }
+                        Message::TraceAck { sequence } => {
+                            anyhow::ensure!(link.trace_capable, "trace capability was not negotiated");
+                            link.outgoing.trace_window.acknowledge(sequence);
+                        }
+                        Message::TraceRecord { record } => {
+                            anyhow::ensure!(link.trace_capable, "trace capability was not negotiated");
+                            anyhow::ensure!(record.bounded(), "oversized developer trace record");
+                            let sequence = record.sequence;
+                            if link.trace_sent && trace.collecting() { trace.collect(peer.to_hex(), record); }
+                            link.outgoing.send(Message::TraceAck { sequence })?;
+                        }
                         Message::Ping { nonce } => link.outgoing.send(Message::Pong { nonce })?,
                         Message::Pong { nonce } => {
                             if let Some(round_trip) = link.meter.answered(nonce, control.now())
@@ -436,6 +487,7 @@ where
                         Message::Activity { generation } => {
                             let accepted = control.state.lock().unwrap_or_else(|e| e.into_inner())
                                 .receives_activity(generation, peer, control.now(), *locked.borrow(), control.local_busy());
+                            tracing::debug!(peer = %peer, generation, accepted, "display activity decision");
                             if accepted {
                                 release.injector.arrived();
                             }
@@ -454,6 +506,7 @@ where
                             let changed = state.claim(generation, owner);
                             let mine = state.owns();
                             drop(state);
+                            tracing::debug!(peer = %peer, generation, owner = %owner, accepted = changed, "control state decision");
                             if changed && was_mine && !mine {
                                 pointer.yield_control();
                                 crossed = None;
@@ -463,7 +516,10 @@ where
                         Message::ControlClaim { generation } => {
                             let mut state = control.state.lock().unwrap_or_else(|e| e.into_inner());
                             let changed = state.claim(generation, peer);
+                            let owner = state.owner();
+                            let current_generation = state.generation();
                             drop(state);
+                            tracing::debug!(peer = %peer, generation, accepted = changed, owner = %owner, current_generation, "control claim decision");
                             if changed {
                                 pointer.yield_control();
                                 crossed = None;
@@ -475,6 +531,7 @@ where
                             let state = control.state.lock().unwrap_or_else(|e| e.into_inner());
                             let current = state.owns() && state.generation() == generation;
                             drop(state);
+                            tracing::debug!(peer = %peer, generation, current, crossed = ?crossed, destination = %to, "edge leave decision");
                             if current && crossed == Some(peer) {
                                 crossed = None;
                                 handoff = Some((generation, to, at));
@@ -486,6 +543,11 @@ where
                             let state = control.state.lock().unwrap_or_else(|e| e.into_inner());
                             let receives = state.receives(generation, peer, control.now()) && !control.local_busy();
                             drop(state);
+                            if !matches!(message, Message::Input { .. }) {
+                                tracing::debug!(peer = %peer, generation, receives, local_busy = control.local_busy(), "remote transition decision");
+                            } else if !receives {
+                                tracing::trace!(peer = %peer, generation, "remote input rejected");
+                            }
                             if !receives {
                                 if let Message::Enter { at, .. } = message {
                                     // straight back where it came from
@@ -575,11 +637,13 @@ where
                         .then(|| Message::Activity { generation: state.generation() })
                 };
                 if let Some(message) = message {
+                    log_transition("outgoing", me, None, &message, &control);
                     broadcast(&links, message, &mut ended);
                 }
                 for (key, link) in links.iter_mut() {
                     if link.last_heard.elapsed() > SILENCE_LIMIT {
-                        ended.push((*key, Err(Silent.into())));
+                        tracing::warn!(peer = %key, quiet_ms = link.last_heard.elapsed().as_millis() as u64, "peer heartbeat timed out");
+                    ended.push((*key, Err(Silent.into())));
                         continue;
                     }
                     if link.outgoing.stopped() {
@@ -596,6 +660,34 @@ where
             }
         }
     }
+}
+
+fn log_transition(
+    flow: &str,
+    me: PublicKey,
+    peer: Option<PublicKey>,
+    message: &Message,
+    control: &crate::control::SharedControl,
+) {
+    let (reason, generation, destination) = match message {
+        Message::ControlClaim { generation } => ("physical_input_claim", Some(*generation), None),
+        Message::ControlState { generation, owner } => ("initial_control_state", Some(*generation), Some(*owner)),
+        Message::Enter { generation, to, .. } => ("edge_enter", Some(*generation), Some(*to)),
+        Message::Leave { generation, to, .. } => ("edge_leave", Some(*generation), Some(*to)),
+        Message::Reclaim { generation } => ("emergency_return", Some(*generation), None),
+        Message::Activity { generation } => ("display_activity", Some(*generation), None),
+        Message::Locked { .. } => ("screen_lock_changed", None, None),
+        _ => return,
+    };
+    // Formatting must not extend the decision lock: capture treats contention
+    // as a local-input recovery, so tracing could otherwise induce a jump.
+    let (owner, current_generation) = {
+        let state = control.state.lock().unwrap_or_else(|e| e.into_inner());
+        (state.owner(), state.generation())
+    };
+    tracing::debug!(flow, system = %me, peer = ?peer, reason, generation = ?generation,
+        destination = ?destination, owner = %owner, current_generation,
+        local_busy = control.local_busy(), "sharing transition");
 }
 
 /// Places any member that has no place yet beside this system, on the side
@@ -729,7 +821,27 @@ impl Drop for Incoming {
     }
 }
 
+struct TraceWindow {
+    outstanding: std::sync::Mutex<Option<u64>>,
+    credit: Semaphore,
+}
+
+impl TraceWindow {
+    fn acknowledge(&self, sequence: u64) {
+        let mut outstanding = self.outstanding.lock().unwrap_or_else(|e| e.into_inner());
+        if *outstanding == Some(sequence) {
+            *outstanding = None;
+            self.credit.add_permits(1);
+        }
+    }
+}
+
 struct Outgoing {
+    trace_enabled: tokio::sync::watch::Sender<Option<bool>>,
+    trace_ack: tokio::sync::watch::Sender<Option<u64>>,
+    traces: Option<mpsc::Sender<Message>>,
+    trace_dropped: u64,
+    trace_window: std::sync::Arc<TraceWindow>,
     messages: Option<mpsc::Sender<Message>>,
     clipboard: Option<mpsc::Sender<Vec<ClipboardPart>>>,
     /// Chunks the peer has acknowledged, and so how many more may be sent.
@@ -738,7 +850,30 @@ struct Outgoing {
 }
 
 impl Outgoing {
+    fn send_trace(&mut self, mut record: crate::diagnostics::Record) {
+        record.dropped_before = record.dropped_before.saturating_add(self.trace_dropped);
+        self.trace_dropped = 0;
+        if let Some(sender) = &self.traces
+            && let Err(error) = sender.try_send(Message::TraceRecord { record })
+            && let Message::TraceRecord { record } = error.into_inner()
+        {
+            self.trace_dropped = record.dropped_before.saturating_add(1);
+        }
+    }
     fn send(&self, message: Message) -> Result<()> {
+        // Diagnostic controls are coalesced separately so they cannot consume
+        // input queue slots or turn trace backpressure into a sharing failure.
+        match message {
+            Message::TraceControl { enabled } => {
+                self.trace_enabled.send_replace(Some(enabled));
+                return Ok(());
+            }
+            Message::TraceAck { sequence } => {
+                self.trace_ack.send_replace(Some(sequence));
+                return Ok(());
+            }
+            _ => {}
+        }
         let messages = self
             .messages
             .as_ref()
@@ -790,6 +925,7 @@ impl Outgoing {
     async fn drain(mut self) -> Result<()> {
         self.messages.take();
         self.clipboard.take();
+        self.traces.take();
         match tokio::time::timeout(OUTGOING_DRAIN_LIMIT, &mut self.task).await {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(error))) => Err(error.into()),
@@ -856,12 +992,21 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (messages, mut outgoing) = mpsc::channel(OUTGOING_CAPACITY);
+    let (traces, mut diagnostics) = mpsc::channel(32);
+    let (trace_enabled, mut requests) = tokio::sync::watch::channel(None);
+    let (trace_ack, mut acknowledgments) = tokio::sync::watch::channel(None);
+    let trace_window = std::sync::Arc::new(TraceWindow {
+        outstanding: std::sync::Mutex::new(None),
+        credit: Semaphore::new(1),
+    });
+    let credits = trace_window.clone();
     let (clipboard, mut snapshots) = mpsc::channel::<Vec<ClipboardPart>>(CLIPBOARD_CAPACITY);
     let window = std::sync::Arc::new(Semaphore::new(WINDOW));
     let permits = window.clone();
     let task = tokio::spawn(async move {
         let mut snapshots = Some(&mut snapshots);
         let mut pending = VecDeque::new();
+        let mut pending_trace = None;
         loop {
             // Input and heartbeats first; clipboard parts only when nothing
             // else is waiting. A chunk also needs room in the window, so no
@@ -873,6 +1018,14 @@ where
                     Some(message) => sender.send(&message).await?,
                     None => return Ok(()),
                 },
+                Ok(()) = requests.changed() => {
+                    let enabled = *requests.borrow_and_update();
+                    if let Some(enabled) = enabled { sender.send(&Message::TraceControl { enabled }).await?; }
+                }
+                Ok(()) = acknowledgments.changed() => {
+                    let sequence = *acknowledgments.borrow_and_update();
+                    if let Some(sequence) = sequence { sender.send(&Message::TraceAck { sequence }).await?; }
+                }
                 snapshot = async { snapshots.as_mut().unwrap().recv().await }, if pending.is_empty() && snapshots.is_some() => {
                     match snapshot {
                         Some(mut parts) => {
@@ -897,10 +1050,24 @@ where
                         sender.send(&Message::Clipboard { part }).await?;
                     }
                 }
+                Some(message) = diagnostics.recv(), if pending_trace.is_none() => pending_trace = Some(message),
+                Ok(permit) = credits.credit.acquire(), if pending_trace.is_some() => {
+                    permit.forget();
+                    let message = pending_trace.take().unwrap();
+                    if let Message::TraceRecord { record } = &message {
+                        *credits.outstanding.lock().unwrap_or_else(|e| e.into_inner()) = Some(record.sequence);
+                    }
+                    sender.send(&message).await?;
+                }
             }
         }
     });
     Outgoing {
+        trace_enabled,
+        trace_ack,
+        traces: Some(traces),
+        trace_dropped: 0,
+        trace_window,
         messages: Some(messages),
         clipboard: Some(clipboard),
         window,
@@ -3130,5 +3297,114 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+    fn diagnostic_record(sequence: u64) -> crate::diagnostics::Record {
+        crate::diagnostics::Record {
+            sequence,
+            unix_ms: 0,
+            elapsed_ms: 0,
+            build: "test".into(),
+            level: "TRACE".into(),
+            target: "daisy::test".into(),
+            fields: Default::default(),
+            dropped_before: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostic_window_cannot_block_input_or_accept_stale_acknowledgments() {
+        let (channel, mut peer) = channels().await;
+        let (sender, _receiver) = channel.split();
+        let mut outgoing = spawn_sender(sender);
+        outgoing.send_trace(diagnostic_record(10));
+        outgoing.send_trace(diagnostic_record(11));
+        assert!(matches!(peer.recv().await.unwrap(), Message::TraceRecord { record } if record.sequence == 10));
+        outgoing.trace_window.acknowledge(9);
+        outgoing.send(Message::Ping { nonce: 123 }).unwrap();
+        assert_eq!(peer.recv().await.unwrap(), Message::Ping { nonce: 123 });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), peer.recv())
+                .await
+                .is_err()
+        );
+        outgoing.trace_window.acknowledge(10);
+        assert!(matches!(peer.recv().await.unwrap(), Message::TraceRecord { record } if record.sequence == 11));
+        outgoing.trace_window.acknowledge(10);
+        assert_eq!(outgoing.trace_window.credit.available_permits(), 0);
+    }
+
+    #[tokio::test]
+    async fn saturated_diagnostics_do_not_fill_the_input_queue_and_report_loss() {
+        let (channel, mut peer) = channels().await;
+        let (sender, _receiver) = channel.split();
+        let mut outgoing = spawn_sender(sender);
+        for sequence in 0..100 {
+            outgoing.send_trace(diagnostic_record(sequence));
+        }
+        assert_eq!(outgoing.trace_dropped, 68);
+        outgoing.send(Message::Reclaim { generation: 17 }).unwrap();
+        assert_eq!(peer.recv().await.unwrap(), Message::Reclaim { generation: 17 });
+        assert!(matches!(peer.recv().await.unwrap(), Message::TraceRecord { record } if record.sequence == 0));
+        outgoing.trace_window.acknowledge(0);
+        assert!(matches!(peer.recv().await.unwrap(), Message::TraceRecord { record } if record.sequence == 1));
+        outgoing.send_trace(diagnostic_record(100));
+        assert_eq!(outgoing.trace_dropped, 0);
+        for sequence in 2..32 {
+            outgoing.trace_window.acknowledge(sequence - 1);
+            assert!(
+                matches!(peer.recv().await.unwrap(), Message::TraceRecord { record } if record.sequence == sequence)
+            );
+        }
+        outgoing.trace_window.acknowledge(31);
+        assert!(
+            matches!(peer.recv().await.unwrap(), Message::TraceRecord { record } if record.sequence == 100 && record.dropped_before == 68)
+        );
+    }
+    #[tokio::test]
+    async fn trace_controls_do_not_consume_input_slots_and_coalesce_to_latest_state() {
+        let (channel, mut peer) = channels().await;
+        let (sender, _receiver) = channel.split();
+        let outgoing = spawn_sender(sender);
+        for sequence in 0..100 {
+            outgoing
+                .send(Message::TraceControl {
+                    enabled: sequence % 2 == 0,
+                })
+                .unwrap();
+            outgoing.send(Message::TraceAck { sequence }).unwrap();
+        }
+        assert_eq!(outgoing.messages.as_ref().unwrap().capacity(), OUTGOING_CAPACITY);
+        outgoing.send(Message::Ping { nonce: 7 }).unwrap();
+        assert_eq!(peer.recv().await.unwrap(), Message::Ping { nonce: 7 });
+        assert_eq!(peer.recv().await.unwrap(), Message::TraceControl { enabled: false });
+        assert_eq!(peer.recv().await.unwrap(), Message::TraceAck { sequence: 99 });
+    }
+    #[test]
+    fn transition_logging_never_holds_the_capture_decision_lock() {
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+        struct CheckLock(Arc<SharedControl>, Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> Layer<S> for CheckLock {
+            fn on_event(&self, _: &tracing::Event<'_>, _: Context<'_, S>) {
+                assert!(
+                    self.0.state.try_lock().is_ok(),
+                    "formatting traces must not trigger capture's contention recovery"
+                );
+                self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let key = Identity::generate().unwrap().public_key();
+        let control = Arc::new(SharedControl::new(key, key));
+        let emitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(CheckLock(control.clone(), emitted.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            log_transition(
+                "outgoing",
+                key,
+                None,
+                &Message::ControlClaim { generation: 1 },
+                &control,
+            );
+        });
+        assert_eq!(emitted.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }
