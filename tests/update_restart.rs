@@ -137,6 +137,24 @@ fn stage(directory: &Path, system: &mut System) -> Result<Staged> {
 }
 
 #[test]
+fn copied_candidate_must_match_the_exact_verified_build() {
+    for unexpected in [
+        build("0.8.0"),
+        Build {
+            version: "0.7.0".into(),
+            protocol: 7,
+        },
+    ] {
+        let (directory, mut system) = setup();
+        put(&directory.path().join("Download/Daisy.app"), &unexpected);
+        assert!(stage(directory.path(), &mut system).is_err());
+        assert_eq!(read(&directory.path().join("Apps/Daisy.app")), build("0.6.0"));
+        assert!(system.running);
+        assert!(!directory.path().join("Apps/.Daisy.app.update").exists());
+    }
+}
+
+#[test]
 fn staging_keeps_the_old_app_and_listener_running() {
     let (directory, mut system) = setup();
     let staged = stage(directory.path(), &mut system).unwrap();

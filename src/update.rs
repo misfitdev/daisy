@@ -19,6 +19,30 @@ pub const REPOSITORY: &str = "misfitdev/daisy";
 /// How often the background check repeats.
 pub const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// Anonymous HTTPS transport for the release installer. Redirects cannot
+/// downgrade to HTTP, and request/body limits apply to every download.
+pub struct ReleaseSource;
+
+impl crate::install::release::Source for ReleaseSource {
+    fn get(&mut self, url: &str, limit: usize) -> Result<Vec<u8>> {
+        ureq::get(url)
+            .header("User-Agent", "daisy-release-installer")
+            .header("Accept", "application/vnd.github+json")
+            .config()
+            .https_only(true)
+            .max_redirects(5)
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build()
+            .call()
+            .context("downloading release data")?
+            .body_mut()
+            .with_config()
+            .limit(limit as u64)
+            .read_to_vec()
+            .context("reading bounded release data")
+    }
+}
+
 /// Release compatibility metadata, bound to the final installation archive.
 /// The installer must verify its release-workflow attestation before using it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +151,45 @@ pub fn watch(repository: &'static str, current: Version, interval: Duration) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_transport_refuses_plain_http_before_connecting() {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let stop = done.clone();
+        let server = std::thread::spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                        let mut request = [0; 2048];
+                        let _ = stream.read(&mut request);
+                        let _ =
+                            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
+                        return true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1))
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            false
+        });
+        let result =
+            crate::install::release::Source::get(&mut ReleaseSource, &format!("http://{address}/release"), 1024);
+        done.store(true, Ordering::Release);
+        let connected = server.join().unwrap();
+        assert!(result.is_err());
+        assert!(!connected);
+    }
 
     #[test]
     fn release_metadata_binds_protocol_version_and_archive() {

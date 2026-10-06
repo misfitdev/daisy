@@ -107,3 +107,22 @@ The command-line `connect` command runs `service::connect` as a loop. Once a ses
 Physical events on a receiving system pass locally on their first callback and claim control; momentum scrolling after a trackpad flick never claims, and stays on the system the flick began on. A claim names the claimant and a generation, and goes to every member; every member keeps the greatest `(generation, key)`, so all agree on one owner. Repeated local claims are limited to once per 150 ms during simultaneous use, while local activity excludes remote injection immediately. Claims release held keys, buttons, modifiers, swipes and scrolls. Every shared input and crossing carries its generation, so queued input from the previous owner is discarded.
 
 Posted input and swipe shortcut events carry a Daisy marker that the event tap excludes from ownership and forwarding. The callback uses only cached state, nonblocking locks and bounded queue operations. Both sides exchange heartbeat messages and unwind capture and held-input state on cancellation or connection loss.
+
+## Verified release installation
+
+`install::release` selects a newer stable release and verifies both its
+compatibility manifest and architecture-specific ZIP. Anonymous HTTPS reads
+have request and size limits. Sigstore verification checks certificate chains,
+transparency evidence and the exact release workflow/tag identity; the signed
+SLSA statement must also name the selected asset and SHA-256 digest. Missing or
+invalid metadata prevents staging.
+
+Archives are extracted into a private temporary directory after checking every
+path, entry type and expanded size. Links, special files, duplicate paths and
+paths outside the app are rejected. The downloaded app's signed build metadata
+must match the verified manifest, and its Developer ID publisher must match
+the installed copy. The existing staging helper then owns restart, readiness
+confirmation and rollback. A failed download or verification leaves the
+installed app running. `macos::update::request_release` starts a separate
+installer worker for policy callers; it does not exclude the GUI process from
+the helper's stop operation.

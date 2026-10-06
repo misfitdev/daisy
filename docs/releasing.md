@@ -78,7 +78,7 @@ Packaging also emits `Daisy-<version>-update.toml` from the release source. It
 records metadata format `1`, the package version, `session::PROTOCOL`, and the
 SHA-256 of the final ZIP. The release workflow covers this file with artifact
 attestation and SLSA provenance. It is the compatibility contract for the
-future automatic installer; release numbers and release-note text are not a
+verified release installer and future automatic policies; release numbers and release-note text are not a
 substitute. Verify its provenance and archive binding before using it.
 
 Either command proves that a release file was built by this repository's release workflow:
@@ -164,3 +164,25 @@ and the Pages workflow reports its test, build, and deployment results.
 ## Release notes
 
 Release notes come from Conventional Commit subjects through `git cliff`; `just notes` previews them. `feat`, `fix`, `perf` and `docs` commits are listed. `chore`, `ci`, `build`, `test`, `style` and `refactor` commits are omitted.
+
+## Release installer verification
+
+`daisy update` consumes the architecture-specific ZIP and the update TOML
+manifest through the public releases API. Both assets need the release
+workflow's GitHub artifact attestation. The verifier checks SLSA v1 claims and
+Sigstore certificate, signature and transparency evidence against the expected
+repository, workflow and version tag; a downloadable asset alone is not
+sufficient. The separate OpenSSF SLSA provenance remains available for external
+verification.
+
+Keep the Sigstore verifier dependency and its bundled public trust roots
+current. A release signed by an unknown root is refused by an older updater;
+manual installation from the notarized DMG remains available. An older release
+without an attested compatibility manifest cannot be installed by this command.
+The download worker is separate from the running app, so all installed GUI
+processes must exit before the helper exchanges bundles.
+
+The release ZIP must be a single-disk archive without ZIP64 metadata, symlinks,
+or special files. The installer limits compressed downloads to 256 MiB,
+expanded contents to 512 MiB and the directory to 10,000 entries. Duplicate
+paths, traversal and unexpected top-level content are rejected before writing.
