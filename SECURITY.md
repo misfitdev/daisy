@@ -17,7 +17,7 @@ Reports are acknowledged within seven days. Confirmed vulnerabilities are handle
 
 ## Supported versions
 
-Daisy is in beta. Security fixes are issued for the latest release only.
+Security fixes are issued for the [latest release](https://github.com/misfitdev/daisy/releases/latest) only. Include your installed version when reporting a problem.
 
 ## Scope
 

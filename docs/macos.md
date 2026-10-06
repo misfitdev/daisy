@@ -1,5 +1,7 @@
 # macOS internals
 
+Implementation reference for input capture and replay. To grant or repair permissions, see the [User guide](usage.md#permissions).
+
 What Daisy relies on in macOS, including undocumented parts, and what was measured to establish it. Hardware observations below name the relevant macOS versions; they were not all established by one machine pair.
 
 ## Device signing
@@ -14,7 +16,7 @@ Reading input needs Input Monitoring; posting input needs Accessibility. macOS g
 
 macOS judges a process by the app responsible for it. A binary run directly from Terminal, even inside `Daisy.app`, borrows Terminal's permissions and hides the permission bugs that matter. Daisy therefore relaunches itself through `open`, making the app responsible for itself, and waits. Ctrl-C stops the launcher; the app notices within 250 ms and shuts down cleanly.
 
-The Daisy setup window reports each grant and has a **Grant…** action for anything missing. The optional `daisy permissions --request` command provides the same check and prompt path.
+The Daisy setup window reports each grant and has a **Set Up…** action for anything missing. The optional `daisy permissions --request` command provides the same check and prompt path.
 
 ## The event tap
 

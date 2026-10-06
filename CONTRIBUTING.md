@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping. Daisy is small and opinionated: Mac-to-Mac only, no accounts, and no claim about hardware behavior without hardware evidence.
+Build, test and submit a change to Daisy. Hardware behavior needs evidence from hardware; unit tests cover decisions.
 
 ## Setup
 
@@ -13,13 +13,18 @@ mise install      # Rust, project commands, release notes and security scanners
 just              # list the tasks
 ```
 
-## Signing a local app
+## Build and run a local app
 
 Running the app or CLI with a persistent device identity requires a signed `Daisy.app` with an embedded provisioning profile for `dev.misfit.daisy`. Set `DAISY_PROVISIONING_PROFILE` to the profile’s path. `just app` defaults to a Developer ID Application certificate; set `DAISY_SIGN_IDENTITY` to select another certificate authorized by the profile. See [release setup](docs/releasing.md#one-time-setup) for the profile requirements. Unlock this system before creating or rotating its device key.
 
+```bash
+export DAISY_PROVISIONING_PROFILE=/path/to/Daisy.provisioningprofile
+just app
+```
+
 `just check` uses software signing keys in unit tests and needs no signing credentials. An ad hoc bundle can exercise the interface, but cannot create the persistent Keychain device identity.
 
-## The gate
+## Check a change
 
 `just check` runs clippy with warnings as errors, `rustfmt --check` and the tests. It must pass before a change is committed, and CI runs the same gate on macOS 26.
 
@@ -36,6 +41,18 @@ mise exec -- actionlint
 ```
 
 `cargo deny` may report allowed duplicate-version warnings; advisories, license failures, forbidden sources and workflow findings must be resolved or narrowly documented. ReachSec has no upstream `--version` flag, so `mise ls --current` is the version record.
+
+## Check documentation and website changes
+
+The task index, setup, trust and troubleshooting pages live in `docs/`. The website renders the same Markdown. Edit the canonical page rather than adding a second copy to the site.
+
+```bash
+npm --prefix site ci
+npm --prefix site test
+npm --prefix site run build
+```
+
+The build rejects broken local documentation links, image paths and section anchors. Keep GitHub-relative links in Markdown; the site rewrites them to its routes. Website-only visual changes also need inspection at wide and narrow sizes.
 
 ## Testing on hardware
 
@@ -59,11 +76,11 @@ Say in the pull request which macOS versions you tested and which system you wer
 
 Design notes live in [docs/](docs/): [usage](docs/usage.md), [architecture](docs/architecture.md), [protocol](docs/protocol.md), [security model](docs/security-model.md), [macOS internals](docs/macos.md) and [releasing](docs/releasing.md).
 
-User-visible behavior belongs in the usage guide and README status table. When hardware verification changes a feature's status, update its Bead and those documents in the same change.
+Document user-visible behavior in the [User guide](docs/usage.md) and relevant website copy. When hardware verification changes a feature's status, update its Bead and those documents in the same change.
 
 ## Commits and pull requests
 
-Commit messages follow [Conventional Commits](https://www.conventionalcommits.org). `feat` and `fix` subjects become release notes, so write them for someone installing the release: “Forward left and right swipes the right way round,” not “Flip sign in synthetic_sign.”
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org). `feat`, `fix`, `perf` and `docs` subjects become release notes, so write them for someone installing the release: “Forward left and right swipes the right way round,” not “Flip sign in synthetic_sign.”
 
 Explain why in the body; the diff shows what. Keep pull requests to one change with its test.
 

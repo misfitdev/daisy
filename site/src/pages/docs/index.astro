@@ -1,40 +1,13 @@
 ---
+import { getCollection, render } from "astro:content";
 import Base from "../../layouts/Base.astro";
-import { docs } from "../../lib/docs.mjs";
-import { href } from "../../config";
-
-const blurbs: Record<string, string> = {
-  "getting-started": "Install Daisy, allow it, pair two systems and cross your first edge.",
-  trust: "How pairing works, how long trust lasts, and how to forget a peer.",
-  ...Object.fromEntries(docs.map((d) => [d.slug, d.lede])),
-};
-const groups = [
-  { name: "Use", items: [{ slug: "getting-started", title: "Getting started" }, { slug: "trust", title: "Trust and pairing" }, ...docs.filter((d) => d.group === "Use")] },
-  { name: "Understand", items: docs.filter((d) => d.group === "Understand") },
-  { name: "Contribute", items: docs.filter((d) => d.group === "Contribute") },
-];
+const entries = await getCollection("docs");
+const entry = entries.find((entry) => entry.id.toLowerCase() === "readme")!;
+const { Content } = await render(entry);
 ---
-
-<Base title="Docs" current="docs" description="Guides and reference for Daisy.">
+<Base title="Docs" current="docs" description="Find setup, daily tasks, troubleshooting and technical reference for Daisy.">
   <div class="wrap page">
-    <header class="page-head">
-      <h1>Docs</h1>
-      <p>New to Daisy? Start with <a href={href("/docs/getting-started/")}>Getting started</a>. The rest is here when you want it.</p>
-    </header>
-    {groups.map((g) => (
-      <section class="doc-group" aria-labelledby={`g-${g.name}`}>
-        <h2 id={`g-${g.name}`}>{g.name}</h2>
-        <ul class="doc-list">
-          {g.items.map((d) => (
-            <li>
-              <a href={href(`/docs/${d.slug}/`)}>
-                <strong>{d.title}</strong>
-                <span>{blurbs[d.slug]}</span>
-              </a>
-            </li>
-          ))}
-        </ul>
-      </section>
-    ))}
+    <header class="page-head"><h1>Docs</h1></header>
+    <div class="prose"><Content /></div>
   </div>
 </Base>

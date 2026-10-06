@@ -38,7 +38,7 @@ The handshake tells each side the other's long-term public key, but not whether 
 
 An attacker in the middle has a different handshake with each side and does not know the code, so it gets one guess per attempt: a one-in-a-million chance. Comparing a short code by eye would not be safe because an attacker could grind keys until screens matched; the code is only ever PAKE input.
 
-Each system runs one pairing exchange at a time and accepts at most five unknown-key attempts in a ten-minute window; an always-open gate gets a fresh allowance each window. After a pairing fails or is cancelled, a system waits 15 seconds before opening another, so a dismissed prompt does not return at once. **Add a System** is available only while finding systems on the network, not while connecting to a typed address. Noise handshakes time out after 15 seconds; trust negotiation or code entry times out after two minutes. Choosing **Add a System** again, or restarting `listen --pair`, deliberately opens a new window.
+Each system runs one pairing exchange at a time and accepts at most five unknown-key attempts in a ten-minute window; an always-open gate gets a fresh allowance each window. After a pairing fails or is cancelled, a system waits 15 seconds before opening another, so a dismissed prompt does not return at once. **Add a System** is available whenever sharing is active, including connections by address, unless **Always discoverable** is on or an invitation is already open. Noise handshakes time out after 15 seconds; trust negotiation or code entry times out after two minutes. Choosing **Add a System** again, or restarting `listen --pair`, deliberately opens a new window.
 
 ## How long trust lasts
 
@@ -96,7 +96,7 @@ Each system’s P-256 device private key stays in its Secure Enclave. The Data P
 
 The `device-identity` file holds a Keychain lookup reference, not private key material. The separate X25519 Noise key remains in `identity`. Both files are user-only (`0600`, under a `0700` directory). Copying the Noise key and the Keychain reference to another system does not supply the pinned device key. `daisy rotate-key` replaces both identities, retires the previous device key, and requires fresh pairing. A failed retirement restores the prior reference and reports an error. Unlock this system before creating or rotating a device key.
 
-Device-bound peer trust is stored in `trust-v5/`. Peer records from before device-bound identity are not accepted or converted; those groups must pair again. Updating from 0.5.0 to 0.6.0 retains the existing device-bound records. Pinned public keys, introducers and trust policies live in `trust-v5/peers.toml`; signed revocations live in `trust-v5/revocations.toml`. Each update locks, rereads and rewrites the store, preventing a running process from restoring a peer another process forgot.
+Device-bound peer trust is stored in `trust-v5/`. Peer records from before device-bound identity are not accepted or converted; those groups must pair again. Pinned public keys, introducers and trust policies live in `trust-v5/peers.toml`; signed revocations live in `trust-v5/revocations.toml`. Each update locks, rereads and rewrites the store, preventing a running process from restoring a peer another process forgot.
 
 ## Release integrity
 

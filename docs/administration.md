@@ -1,5 +1,7 @@
 # Administration
 
+Use a configuration profile to restrict pairing policy across managed systems. For individual setup, see the [Getting started](getting-started.md).
+
 Daisy reads settings that an administrator enforces with a configuration profile for the preference domain `dev.misfit.daisy`. It honors only enforced values, so a person cannot override them with `defaults write`.
 
 | Key | Type | Effect |

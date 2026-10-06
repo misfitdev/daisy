@@ -1,5 +1,7 @@
 # Releasing
 
+Build and publish an official release. For a local development build, start with [Contributing](../CONTRIBUTING.md); for installing an existing release, see the [Getting started](getting-started.md).
+
 For maintainers. Official release artifacts are built, signed, notarized and published by `.github/workflows/release.yml` from a version tag.
 
 Signed app builds require a macOS provisioning profile for `dev.misfit.daisy` that authorizes the selected signing certificate. Set `DAISY_PROVISIONING_PROFILE` to its local path. The bundle recipe validates the profile, embeds it, and derives the application identifier and team entitlements for Daisy’s default Keychain access group. The default signing identity is Developer ID Application; `DAISY_SIGN_IDENTITY` can select another certificate authorized by the profile.
@@ -116,7 +118,7 @@ and artifact attestations.
 ## Website CI and deployment
 
 Website and documentation pull requests run the Pages workflow on Linux:
-`npm ci`, `npm test`, and `npm run build` in `site/`. Pull requests do not
+`npm ci`, `npm test`, and `npm run build` in `site/`. The build checks generated documentation routes, local links, images and section anchors; a broken reference fails the build. Pull requests do not
 upload a Pages artifact or deploy. Changes limited to the site, documentation,
 or task metadata skip the macOS app workflow.
 

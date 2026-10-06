@@ -18,7 +18,7 @@ export default defineConfig({
   trailingSlash: "always",
   vite: { define: { "import.meta.env.DAISY_VERSION": JSON.stringify(version) } },
   markdown: {
-    remarkPlugins: [[remarkRepoDocs, { base }]],
+    remarkPlugins: [[remarkRepoDocs, { base, downloadUrl: `https://github.com/misfitdev/daisy/releases/download/v${version}/Daisy-${version}-macos-arm64.dmg` }]],
     shikiConfig: { theme: "css-variables" },
   },
 });

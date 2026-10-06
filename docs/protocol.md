@@ -1,5 +1,7 @@
 # Protocol
 
+Wire reference for implementers. For connection troubleshooting, see the [Troubleshooting](troubleshooting.md); for authentication decisions, see the [Security model](security-model.md).
+
 How two peers talk. `src/protocol.rs` is the definition; this page explains it. If they disagree, the code is right.
 
 ## Transport
