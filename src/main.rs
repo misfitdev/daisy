@@ -33,6 +33,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Download, verify and install a newer compatible stable release
+    Update {
+        /// Install this exact stable version instead of the latest release
+        #[arg(long)]
+        version: Option<semver::Version>,
+    },
     /// Stage a signed local update and restart Daisy after verification
     InstallUpdate { bundle: PathBuf },
     /// Compatibility metadata for packaging, without starting Daisy
@@ -146,6 +152,18 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Some(Command::Update { version }) => {
+            let home = cli.home.clone().map_or_else(default_home, Ok)?;
+            let Some(mut helper) = macos::update::install_release(&home, version.as_ref())? else {
+                println!("Daisy is already up to date.");
+                return Ok(());
+            };
+            let status = helper.wait()?;
+            if !status.success() {
+                bail!("the update did not complete; inspect the helper's error above");
+            }
+            return Ok(());
+        }
         _ => {}
     }
     if let Some(code) = launcher::relaunch_as_app()? {
@@ -209,7 +227,7 @@ struct Keys<'a> {
 async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStore, name: &str) -> Result<()> {
     let Keys { identity, signer } = keys;
     match command {
-        Command::UpdateInfo | Command::ApplyUpdate { .. } | Command::InstallUpdate { .. } => {
+        Command::Update { .. } | Command::UpdateInfo | Command::ApplyUpdate { .. } | Command::InstallUpdate { .. } => {
             unreachable!("update commands exit before identity and input initialization")
         }
         Command::Screenshot { path } => daisy::app::screenshot::save(&path),

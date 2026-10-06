@@ -1,6 +1,6 @@
 # Usage
 
-Daisy shares one keyboard, mouse and supported trackpad gestures across a group of up to eight systems on the same network. It does not use an account or cloud service. Find a specific task in the [documentation index](README.md).
+Daisy shares one keyboard, mouse and supported trackpad gestures across a group of up to eight systems on the same network. Peer sharing needs no account or cloud service. Find a specific task in the [documentation index](README.md).
 
 ## Get started
 
@@ -107,9 +107,34 @@ From the command line, `listen --no-discovery` disables advertising; connections
 
 ## Update Daisy
 
-Quit Daisy, install the [latest release](https://github.com/misfitdev/daisy/releases/latest) in Applications and reopen it. Settings and paired trust are retained. If you installed with Homebrew, use the [Homebrew upgrade steps](#homebrew).
+To download and install the latest compatible stable release, run the command
+from the installed app:
 
-Different releases can connect when their protocol versions match. If Daisy reports a protocol mismatch, update the system it identifies; updating all group members together avoids mixed versions. See the [protocol compatibility rules](protocol.md#handshake).
+```bash
+/Applications/Daisy.app/Contents/MacOS/daisy update
+```
+
+Daisy verifies the release and its compatibility before stopping the running
+copy. It then restarts with your device identity, paired trust, settings and
+screen arrangement retained. If startup fails, it restores the previous copy.
+The installed app folder must be writable by your account. This command does
+not enable automatic updates. If an older installed build
+reports `unrecognized subcommand`, use the DMG or Homebrew steps below.
+
+Use `update --version 0.7.0` to request a specific newer stable release. The
+release must have verified compatibility metadata and use the same session
+protocol as this system. Prereleases, older versions, and releases without
+usable verification metadata are refused before installation.
+
+If the command refuses a release, quit Daisy, install the
+[latest release](https://github.com/misfitdev/daisy/releases/latest) from its DMG
+in Applications and reopen it. If you installed with Homebrew, use the
+[Homebrew upgrade steps](#homebrew).
+
+Different releases can connect when their protocol versions match. A protocol
+change needs a manual group update. If Daisy reports a protocol mismatch,
+update the system it identifies. See the
+[protocol compatibility rules](protocol.md#handshake).
 
 ### Install a staged update
 

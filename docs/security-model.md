@@ -107,3 +107,21 @@ device identity and trust checks do not depend on the installation method.
 Releases are built only by the release workflow from a tagged commit, signed with Developer ID and notarized by Apple. The DMG and the app inside it are both notarized and stapled. Each DMG and zip carries SLSA Build Level 3 provenance and a GitHub artifact attestation. [releasing.md](releasing.md) explains how to verify both provenance and notarization.
 
 When Daisy moves itself to Applications, Gatekeeper has already approved the running copy. Daisy copies that bundle with `ditto`, preserving its signature, and removes the quarantine attribute from the copy only, so the copy opens without App Translocation. Any copy it replaces goes to the Trash.
+
+## Verified updates
+
+The release installer reads public GitHub release assets and attestations over
+HTTPS without an account or access token. Both the compatibility manifest and
+ZIP archive must have a valid Sigstore signature and transparency proof from
+this repository's release workflow at the selected version tag. Verification
+uses bundled public Sigstore trust roots and the GitHub Actions OIDC issuer.
+Signed SLSA provenance must bind the expected repository, workflow, tag, asset
+name and SHA-256 digest. Unknown signing roots are rejected; the trust-root
+snapshot is updated with the verifier dependency in subsequent releases.
+
+The manifest must declare the selected version, the current session protocol,
+and the exact ZIP SHA-256. Archive paths, entry types and expanded sizes are
+checked before extraction into a private temporary directory. Before staging,
+Daisy verifies the extracted app's notarization, bundle identifier, Developer
+ID publisher and signed build version/protocol. The staged copy is checked
+again before restart. Downloaded code is not executed during verification.

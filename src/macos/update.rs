@@ -5,7 +5,7 @@ use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -25,13 +25,57 @@ pub fn running_bundle() -> Result<PathBuf> {
     crate::launcher::app_bundle(&std::env::current_exe()?).context("run the updater from the installed Daisy.app")
 }
 
+/// Run the verified release installer in a separate process so policy callers
+/// do not exclude the running GUI from the restart helper's stop operation.
+pub fn request_release(home: &Path, version: Option<&semver::Version>) -> Result<Child> {
+    let executable = running_bundle()?.join("Contents/MacOS/daisy");
+    let mut command = Command::new(executable);
+    command.arg("--home").arg(home).arg("update");
+    if let Some(version) = version {
+        command.arg("--version").arg(version.to_string());
+    }
+    command
+        .env_remove("DAISY_LAUNCHER_PID")
+        .env_remove(STARTUP_DIRECTORY)
+        .spawn()
+        .context("starting verified release installation")
+}
+
+/// CLI worker: downloaded data is never executed before provenance, build
+/// metadata, notarization and same-publisher signature checks have passed.
+pub fn install_release(home: &Path, version: Option<&semver::Version>) -> Result<Option<Child>> {
+    let target = running_bundle()?;
+    let mut platform = Executor::new(&target)?;
+    let previous = build_info(&target)?;
+    let release = match crate::install::release::fetch(&mut crate::update::ReleaseSource, &previous, version) {
+        Ok(release) => release,
+        Err(error) if error.is::<crate::install::release::AlreadyCurrent>() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let directory = tempfile::Builder::new()
+        .prefix("daisy-release-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()?;
+    let source = release.extract(directory.path())?;
+    platform.verify(&source, release.build())?;
+    install_candidate(&source, home, Some(release.build())).map(Some)
+}
+
 /// Stages a locally supplied, publisher-signed update. The release installer
 /// must check download provenance before using this same handoff API.
 pub fn install_local(source: &Path, home: &Path) -> Result<Child> {
+    install_candidate(source, home, None)
+}
+
+fn install_candidate(source: &Path, home: &Path, expected: Option<&Build>) -> Result<Child> {
     let target = running_bundle()?;
     let mut platform = Executor::new(&target)?;
     platform.verify_signature(source)?;
     let next = build_info(source)?;
+    ensure!(
+        expected.is_none_or(|expected| expected == &next),
+        "the app no longer matches the verified release metadata"
+    );
     let mut staged = Staged::prepare(source, &target, home, Build::this_system(), next, &mut platform)?;
     let child = Command::new(staged.helper())
         .arg("apply-update")

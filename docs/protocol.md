@@ -146,8 +146,11 @@ and retain the local device key, trust store and settings.
 This applies to every automatic policy, including minor/patch-only. Semver
 alone is not evidence of protocol compatibility. Protocol changes require a manual group update while Daisy supports only one
 session protocol. Notifications may still offer a release.
-Automatic installation remains unavailable until the installer and policy
-implement these checks.
+The verified `update` command enforces these checks before staging a release.
+Both manifest and ZIP signatures are verified against the bundled public
+Sigstore trust roots, the GitHub Actions issuer, and the exact repository,
+release workflow, tag and artifact digest. Automatic update policies are not
+yet exposed.
 
 - Adding a message or event: append a variant and raise `PROTOCOL` in `src/session.rs` before transmitting it, until authenticated capability negotiation exists. An older peer cannot decode an unknown tag and ends the session.
 - Anything that changes the meaning of an existing message, or removes or reorders one: raise `PROTOCOL` in `src/session.rs`, so mismatched peers stop at the handshake and say which to update, rather than misbehave.

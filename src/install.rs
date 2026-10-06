@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod release;
 pub mod update;
 
 const BUNDLE_NAME: &str = "Daisy.app";
