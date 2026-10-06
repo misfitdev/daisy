@@ -113,6 +113,33 @@ Users can also install the release's recipe through a local tap; see
 metadata; the DMG and ZIP are the assets covered by the existing provenance
 and artifact attestations.
 
+## Website CI and deployment
+
+Website and documentation pull requests run the Pages workflow on Linux:
+`npm ci`, `npm test`, and `npm run build` in `site/`. Pull requests do not
+upload a Pages artifact or deploy. Changes limited to the site, documentation,
+or task metadata skip the macOS app workflow.
+
+Site and documentation changes on `main` run the same checks and deploy using
+the latest published stable release for download links. PR builds use the
+version in `Cargo.toml` without querying the release API.
+
+After the release workflow publishes its assets, it dispatches Pages on the
+default branch with the exact `release_tag`. Pages validates that release is
+published, stable, and contains its versioned DMG before building. Deployment
+runs in its own workflow rather than the tag run, avoiding the stale artifact
+behavior seen when the same commit was already deployed from `main`.
+
+To redeploy a specific published release:
+
+```bash
+gh workflow run pages.yml --ref main -f release_tag=v0.6.0
+```
+
+Omit `release_tag` to use the latest stable release. Pages dispatch and
+deployment are separate runs; the release workflow reports the dispatch,
+and the Pages workflow reports its test, build, and deployment results.
+
 ## Release notes
 
 Release notes come from Conventional Commit subjects through `git cliff`; `just notes` previews them. `feat`, `fix`, `perf` and `docs` commits are listed. `chore`, `ci`, `build`, `test`, `style` and `refactor` commits are omitted.

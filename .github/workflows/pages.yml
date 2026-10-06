@@ -8,15 +8,27 @@ on:
       - "docs/**"
       - ".mise.toml"
       - ".github/workflows/pages.yml"
+      - ".github/workflows/release.yml"
   workflow_dispatch:
-  # the release workflow redeploys once its DMG is published
-  workflow_call:
+    inputs:
+      release_tag:
+        description: "Published release tag (empty uses the latest stable release)"
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - "site/**"
+      - "docs/**"
+      - ".mise.toml"
+      - "Cargo.toml"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/release.yml"
 
 permissions: {}
 
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: pages-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'production' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -32,23 +44,38 @@ jobs:
         with:
           install_args: node
 
-      - name: Build the site
+      - name: Resolve published release version
+        if: github.event_name != 'pull_request'
         working-directory: site
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
-          export DAISY_VERSION="${tag#v}"
+          metadata="$RUNNER_TEMP/site-release.json"
+          if [ -n "$RELEASE_TAG" ]; then
+            gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,assets,isDraft,isPrerelease > "$metadata"
+          else
+            gh release view --repo "$GITHUB_REPOSITORY" --json tagName,assets,isDraft,isPrerelease > "$metadata"
+          fi
+          version="$(node scripts/release-version.mjs "$metadata" "$RELEASE_TAG")"
+          echo "DAISY_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Test and build site
+        working-directory: site
+        run: |
           npm ci
+          npm test
           npm run build
 
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+        if: github.event_name != 'pull_request'
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: github.event_name != 'pull_request'
         with:
           path: site/dist
 
   deploy:
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     permissions:

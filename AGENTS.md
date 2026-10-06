@@ -51,6 +51,12 @@ events. Do not call hardware behavior verified unless it ran on hardware in
 this session; record which system was used at each step and the macOS
 version of each system.
 
+Website and docs changes have their own Pages CI: `npm ci`, `npm test`, and
+`npm run build` in `site/`. PRs only test and build; `main` changes deploy.
+After publishing a release, the release workflow dispatches Pages on the
+default branch with an explicit release tag. Do not restore deployment from
+the tag's reusable workflow context. See `docs/releasing.md`.
+
 ## Architecture
 
 - `src/protocol.rs` is the only wire-message definition.
