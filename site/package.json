@@ -1,1 +1,16 @@
-{"name":"daisy-site","private":true,"type":"module","scripts":{"dev":"astro dev","build":"astro build","preview":"astro preview","test":"node --test test/*.test.ts"},"dependencies":{"@astrojs/markdown-remark":"7.3.1","astro":"7.3.5","unist-util-visit":"5.1.0"}}
+{
+  "name": "daisy-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && node scripts/check-docs.mjs",
+    "preview": "astro preview",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "7.3.1",
+    "astro": "7.3.5",
+    "unist-util-visit": "5.1.0"
+  }
+}

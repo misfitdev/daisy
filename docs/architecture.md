@@ -1,5 +1,7 @@
 # Architecture
 
+How Daisy routes input, coordinates a group and saves state. For setup and daily tasks, use the [User guide](usage.md).
+
 ## Control and layout
 
 A group is up to eight systems, each holding one encrypted session with every other. Every member captures physical input and can replay remote input. The system being used supplies input; touching another member takes control there immediately. Connection direction is independent of control.
@@ -54,9 +56,9 @@ side remains held.
 ## Session flow
 
 1. The controller starts automatic listening and browsing, or an optional direct connection from saved `SessionSettings`.
-2. Noise `XX` establishes an encrypted channel and exposes the remote static key. Both sides sign its handshake hash with their Secure Enclave device keys before settling trust.
+2. Noise `XX` establishes an encrypted channel and exposes the remote static key. Both sides exchange and verify `DeviceProof`, signed over its handshake hash and sender role with their Secure Enclave device keys, before settling trust.
 3. The trust layer accepts an already-pinned key or, only while both peers explicitly allow pairing, runs SPAKE2 using the six-digit code as input.
-4. Both sides exchange `Layout` and `SigningKey`, then catch each other up on introductions and revocations, and the link joins the input core. The first link starts the core: one event tap, one injector and one owner of control for every link; the last link to end stops it.
+4. Both sides exchange `Layout`, then catch each other up on introductions and revocations, and the link joins the input core. The first link starts the core: one event tap, one injector and one owner of control for every link; the last link to end stops it.
 5. The event tap on the system in use observes local input. While control is local, events pass through untouched.
 6. Pushing the pointer off one of this system's displays toward another member's display, within 40 points, hides and pins the local pointer, then sends `Enter` to that member with the exact entry point. Control never crosses while a mouse button is held, and never onto a locked member.
 7. Input is swallowed locally and forwarded. A key pressed before crossing keeps its release on the system it was pressed on, so it cannot become stuck remotely.
@@ -68,7 +70,9 @@ Whatever ends replay of remote input releases every key and button that system s
 
 ## Reconnecting
 
-Nearby paired peers reconnect automatically: after a session ends, both return to listening and advertising with Bonjour, and the elected opener connects again as soon as it sees the peer, running the full handshake and trust check. The native app adds explicit address attempts to the same listening and discovering group, sharing its input core and preserving existing links. The command-line `connect` command runs `service::connect` as a loop. Once a session has run, a drop is followed by a wait from `reconnect::waits()` and a fresh attempt: TCP connect, Noise handshake, a check that the key matches the peer of the first session, the trust check, then a new session. `reconnect::retryable` retries only failures of the connection itself (unreachable, reset, silent, timed out); trust, key, protocol, setup and local file errors stop the loop. The first attempt is never retried, and reconnects never pair. The listening peer needs nothing extra: it accepts every connection and runs each as its own link. A peer that closes after more than the silence limit counts as a lost connection, not a deliberate stop, so single-session trust keeps its reconnect grace.
+While sharing remains enabled, nearby paired peers reconnect after network drops when trust remains valid and Bonjour can discover an advertising peer. The elected opener repeats the full handshake, device proof and trust checks. **Stop Sharing** ends connections without triggering reconnect. The native app adds explicit address attempts to the same listening and discovering group, sharing its input core and preserving existing links.
+
+The command-line `connect` command runs `service::connect` as a loop. Once a session has run, a drop is followed by a wait from `reconnect::waits()` and a fresh attempt: TCP connect, Noise handshake, a check that the key matches the peer of the first session, the trust check, then a new session. `reconnect::retryable` retries only failures of the connection itself (unreachable, reset, silent, timed out); trust, key, protocol, setup and local file errors stop the loop. The first attempt is never retried, and reconnects never pair. The listening peer needs nothing extra: it accepts every connection and runs each as its own link. A peer that closes after more than the silence limit counts as a lost connection, not a deliberate stop, so single-session trust keeps its reconnect grace.
 
 ## Saved state
 

@@ -30,7 +30,7 @@ Read the [security model](docs/security-model.md) or [report a vulnerability pri
 
 ## Documentation
 
-- [User guide](docs/usage.md): setup, settings, troubleshooting and the command line.
+- [Task index](docs/README.md) · [User guide](docs/usage.md): setup, settings, troubleshooting and the command line.
 - [Architecture](docs/architecture.md), [protocol](docs/protocol.md) and [macOS internals](docs/macos.md).
 - [Contributing](CONTRIBUTING.md) and [release guide](docs/releasing.md): building, signing and verifying releases.
 

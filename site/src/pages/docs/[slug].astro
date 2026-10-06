@@ -4,10 +4,10 @@ import Docs from "../../layouts/Docs.astro";
 import { docs } from "../../lib/docs.mjs";
 
 export async function getStaticPaths() {
-  const entries = await getCollection("docs");
+  const entries = [...await getCollection("docs"), ...await getCollection("contributors")];
   return docs.map((d) => ({
     params: { slug: d.slug },
-    props: { entry: entries.find((e) => e.id === d.file)!, meta: d },
+    props: { entry: entries.find((e) => e.id.toLowerCase() === d.file.toLowerCase())!, meta: d },
   }));
 }
 

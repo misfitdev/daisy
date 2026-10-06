@@ -684,7 +684,7 @@ code {
   color: var(--ink-2);
 }
 
-.setup-shot {
+.prose img {
   display: block;
   width: min(100%, 580px);
   height: auto;
@@ -1101,48 +1101,6 @@ code {
   color: var(--ink-2);
 }
 
-.doc-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 0;
-  max-width: 52rem;
-}
-
-.doc-list li {
-  border-bottom: 1px solid var(--rule);
-}
-
-.doc-list a {
-  display: grid;
-  grid-template-columns: minmax(0, 14rem) minmax(0, 1fr);
-  gap: var(--space-3);
-  padding-block: 1.1rem;
-  text-decoration: none;
-}
-
-.doc-list a:hover strong {
-  text-decoration: underline;
-}
-
-.doc-list strong {
-  font-weight: 600;
-}
-
-.doc-list span {
-  color: var(--ink-2);
-}
-
-.doc-group + .doc-group {
-  margin-top: var(--space-5);
-}
-
-.doc-group h2 {
-  font-size: var(--step-title);
-  margin-bottom: 0.5rem;
-}
-
 .steps {
   list-style: none;
   counter-reset: step;
@@ -1184,11 +1142,6 @@ code {
 
 .steps p + p {
   margin-top: 0.75rem;
-}
-
-.steps .assurance {
-  color: var(--ink);
-  font-weight: 600;
 }
 
 .download-panel {
@@ -1265,11 +1218,6 @@ code {
 
   .toc {
     display: none;
-  }
-
-  .doc-list a {
-    grid-template-columns: 1fr;
-    gap: 0.25rem;
   }
 
   .footer-row {
