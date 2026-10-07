@@ -178,8 +178,7 @@ brew upgrade --cask local/daisy/daisy
 ```
 
 Reopen Daisy afterward. See [update compatibility](#update-daisy) if a peer reports a protocol mismatch.
-Homebrew checks the DMG's SHA-256 before installing. It does not grant
-Accessibility or Input Monitoring, and Daisy does not update itself.
+Homebrew verifies the DMG's SHA-256 during cask installation; it does not grant Accessibility or Input Monitoring. When an automatic-update policy is selected in Advanced settings, Daisy can update its running app, including a Homebrew-installed copy. To update manually instead, use the latest release cask recipe and run `brew upgrade` as above.
 `brew uninstall --cask local/daisy/daisy` removes the app while retaining
 settings, device identity, and paired peers. If Daisy was installed manually,
 quit it and remove the existing app from Applications before installing the cask.
