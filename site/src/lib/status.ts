@@ -49,7 +49,7 @@ export const features: Feature[] = [
 
   {
     title: "Shared clipboard",
-    detail: "Copy on one system and paste on another.",
+    detail: "Copy text, images, files and folders on one system and paste on another.",
     status: "available",
   },
   {

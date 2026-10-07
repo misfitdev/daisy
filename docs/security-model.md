@@ -110,6 +110,10 @@ Items marked concealed or transient by their source app stay on the system
 where they were copied. This includes clipboard entries from password managers
 that use the standard macOS markers.
 
+Copied files use a separate encrypted bulk connection. Each connection completes a fresh device proof and must match both keys pinned for an active paired peer. Requests contain only an offer ID and item index; there is no path request or listing operation. Only original recipients of a live offer can request its items. New clipboard offers supersede earlier offers, and each destination has a 15-second idle lease. Acquired transfers can finish after replacement.
+
+A file offer contains at most 64 items, 100,000 entries and 4 GiB of contents. Each item has at most 32 MiB of extended attributes. The receiver bounds decompression by declared file size, confines paths and symbolic-link graphs to the offered item, preserves extended attributes including `com.apple.quarantine` without adding quarantine when the sender supplied none, and publishes completed files with an exclusive atomic rename. Cancelled or incomplete transfers are removed. Completed file URLs remain on the clipboard until replaced, independently of their released remote offer. Completed clipboard files are kept in a private cache for the current boot, bounded to 8 GiB and 200,000 entries; caches from previous boots are removed before new materialization.
+
 ## Keys at rest
 
 Each system’s P-256 device private key stays in its Secure Enclave. The Data Protection Keychain persists it with `AfterFirstUnlockThisDeviceOnly` protection and private-key usage access control. It is non-exportable, does not synchronize, and cannot be restored onto another system. Signing does not require Touch ID or password prompts, so reconnects remain unattended. Malware running under the user’s account on the paired system can request signatures there.

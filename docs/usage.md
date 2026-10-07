@@ -58,6 +58,11 @@ link. Control-Option-Command-Escape remains the shortcut to take control back.
 
 When control moves, the clipboard goes with it: the system giving up control sends its clipboard, including when control moves because someone started using the other system. Copy on one system, move to the peer and paste there; copy on the peer, come back (through the edge, by using this system, or with Control-Option-Command-Escape) and paste here.
 
+- In `Daisy.app`, files and folders copied in Finder are shared with every connected group member. Paste normally in Finder. Daisy receives their contents when Finder first requests the clipboard; Finder can make that request before you choose Paste. A native panel shows progress and lets you cancel. While receiving, Finder’s Paste action is unavailable; wait for the panel to finish, then paste.
+- Pending file offers expire after 15 seconds without activity. Copy the files again if the offer expires. Copying something else or receiving a newer offer replaces the offer; transfers already running may finish.
+- A file offer is limited to 64 items, 100,000 entries and 4 GiB of contents. Folders may be nested up to 128 levels. Symbolic links must stay within the copied folder. Extended attributes, including quarantine, are preserved.
+- Completing a download releases the remote offer. The local file URLs stay on the clipboard until it is replaced, even if the offering peer disconnects. Completed files remain in a private clipboard cache for this system’s current boot, so changing the clipboard cannot interrupt a Finder copy already reading them. Daisy cleans caches from earlier boots and abandoned incomplete receives when it next receives files. The cache has an 8 GiB storage limit; a full cache produces an error rather than removing files Finder might still use.
+- Standalone CLI sessions and peers without file-sharing support receive Finder’s available text representation of copied files.
 - Plain text, rich text and images are shared. Images copied as TIFF, such as screenshots, arrive as PNG.
 - Text and rich text are limited to 4 MB each and images to 32 MB. Anything larger stays on the system it was copied on; the rest of the copy still crosses.
 - Items marked concealed or transient by their source app stay on the system where they were copied.

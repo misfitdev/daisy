@@ -45,6 +45,7 @@ impl PublicKey {
 
 /// A Keychain reference to a system-specific Secure Enclave signing key.
 /// The private scalar is never returned to Daisy.
+#[derive(Clone)]
 pub struct Signer {
     reference: Vec<u8>,
     public: PublicKey,

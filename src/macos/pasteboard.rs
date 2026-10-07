@@ -68,6 +68,18 @@ impl Clipboard for Pasteboard {
         (!content.is_empty()).then_some(content)
     }
 
+    fn read_for_peer(&self, files: bool) -> Option<Content> {
+        if files
+            && super::file_pasteboard::available()
+            && NSPasteboard::generalPasteboard()
+                .types()
+                .is_some_and(|types| types.iter().any(|t| t.to_string() == "public.file-url"))
+        {
+            return None;
+        }
+        self.read()
+    }
+
     fn write(&mut self, content: &Content) -> i64 {
         let board = NSPasteboard::generalPasteboard();
         // SAFETY: as in `read`.

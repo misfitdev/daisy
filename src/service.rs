@@ -951,6 +951,19 @@ where
     let peers = config.peers;
     let initiator = channel.role() == crate::session::Role::Initiator;
     let key = channel.remote_key();
+    let _file_peer = if channel.files_capable() {
+        hub.files
+            .as_ref()
+            .map(|files| {
+                channel
+                    .stream()
+                    .peer_addr()
+                    .map(|address| files.join(key, address.ip()))
+            })
+            .transpose()?
+    } else {
+        None
+    };
     if let Some(side) = chosen_side {
         peers.set_side(&key, side)?;
     }
@@ -1135,6 +1148,7 @@ pub const MAX_GROUP: usize = 8;
 /// injector and one owner of control. It starts with the first link and
 /// stops after the last.
 pub struct Hub {
+    files: Option<std::sync::Arc<crate::file_transfer::Hub>>,
     // Only the session's original hub owns the core lifetime. Task clones cannot
     // keep their own sockets and capture running after that session is stopped.
     _lifetime: Option<CoreLifetime>,
@@ -1164,6 +1178,7 @@ impl Clone for Hub {
     fn clone(&self) -> Self {
         Self {
             _lifetime: None,
+            files: self.files.clone(),
             tasks: self.tasks.clone(),
             me: self.me,
             peers: self.peers.clone(),
@@ -1188,8 +1203,31 @@ impl Drop for Member {
 
 impl Hub {
     pub fn new(config: &SessionConfig<'_>) -> Self {
-        let tasks = std::sync::Arc::default();
+        let tasks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let files = if crate::file_transfer::supported() {
+            match crate::file_transfer::Hub::start(
+                config.identity.clone(),
+                config.signer.clone(),
+                config.peers.clone(),
+                config.clipboard.clone(),
+            ) {
+                Ok((hub, task)) => {
+                    tasks
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(task.abort_handle());
+                    Some(hub)
+                }
+                Err(error) => {
+                    tracing::warn!(?error, "copied-file service could not start");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Self {
+            files,
             _lifetime: Some(CoreLifetime(std::sync::Arc::clone(&tasks))),
             tasks,
             me: config.identity.public_key(),
@@ -1355,6 +1393,7 @@ async fn run_core_once(
         }
     }));
     let group = share::Group {
+        files: hub.files.clone(),
         displays: watched,
         control,
         choices: choices.clone(),
