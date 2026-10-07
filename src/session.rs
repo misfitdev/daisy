@@ -80,9 +80,8 @@ fn decode_handshake_payload(bytes: &[u8]) -> Option<(Version, bool)> {
     let mut version = Version::decode(bytes)?;
     let trace = if let Some((app, capabilities)) = version.app.split_once('\0') {
         let trace = capabilities
-            .strip_prefix("caps=")?
-            .split(',')
-            .any(|cap| cap == "trace-v1");
+            .strip_prefix("caps=")
+            .is_some_and(|caps| caps.split(',').any(|cap| cap == "trace-v1"));
         version.app = app.to_owned();
         trace
     } else {
@@ -800,6 +799,21 @@ mod tests {
             );
             assert_eq!(a.unwrap().trace_capable(), left_trace && right_trace);
             assert_eq!(b.unwrap().trace_capable(), left_trace && right_trace);
+        }
+    }
+
+    #[test]
+    fn unknown_capability_tails_preserve_the_peer_version_without_enabling_trace() {
+        let version = Version::this_system();
+        for tail in ["", "future=trace-v1", "caps=trace-v2", "caps="] {
+            let mut payload = version.encode();
+            payload.push(0);
+            payload.extend_from_slice(tail.as_bytes());
+            assert_eq!(
+                decode_handshake_payload(&payload),
+                Some((version.clone(), false)),
+                "capability tail: {tail:?}"
+            );
         }
     }
 

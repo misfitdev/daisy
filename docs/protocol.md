@@ -182,7 +182,8 @@ Sigstore trust roots, the GitHub Actions issuer, and the exact repository,
 release workflow, tag and artifact digest. Automatic update policies are not
 yet exposed.
 
-- Adding a message or event: append a variant and raise `PROTOCOL` in `src/session.rs` before transmitting it, until authenticated capability negotiation exists. An older peer cannot decode an unknown tag and ends the session.
+- Adding an optional message or event: append a variant and negotiate support through an authenticated, backward-compatible capability exchange before transmitting it. An older peer cannot decode an unknown tag and ends the session.
+- Adding a required message or event: append a variant and raise `PROTOCOL` in `src/session.rs` before transmitting it.
 - Anything that changes the meaning of an existing message, or removes or reorders one: raise `PROTOCOL` in `src/session.rs`, so mismatched peers stop at the handshake and say which to update, rather than misbehave.
 
 A physical event on any member claims ownership with a newer generation, sent to every member. The 150 ms settle window limits repeated claims when members are used together; equal generations favor the greater key. Remote injection is suppressed during local physical activity. When the member in control leaves the group, the others take control back locally. A change of driver preserves the arrangement.

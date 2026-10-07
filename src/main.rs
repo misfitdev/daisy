@@ -226,7 +226,13 @@ async fn run_cli(command: Command, home: PathBuf, name: String) -> Result<()> {
         daisy::introduce::Signer::load_or_create(&home.join("device-identity"))?
     };
     let _trace = if matches!(command, Command::Listen { .. } | Command::Connect { .. }) {
-        Some(daisy::diagnostics::serve(&home, identity.public_key()).await?)
+        match daisy::diagnostics::serve(&home, identity.public_key()).await {
+            Ok(server) => Some(server),
+            Err(error) => {
+                tracing::warn!(error = ?error, "developer trace server unavailable");
+                None
+            }
+        }
     } else {
         None
     };
