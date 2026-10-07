@@ -165,7 +165,7 @@ mkdir -p "$(brew --repository local/daisy)/Casks"
 Download the recipe for the version you want and install it:
 
 ```bash
-curl --fail --location https://github.com/misfitdev/daisy/releases/download/v0.6.0/daisy.rb \
+curl --fail --location https://github.com/misfitdev/daisy/releases/download/v0.7.0/daisy.rb \
   --output "$(brew --repository local/daisy)/Casks/daisy.rb"
 brew install --cask local/daisy/daisy
 ```

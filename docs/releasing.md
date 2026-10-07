@@ -158,7 +158,7 @@ behavior seen when the same commit was already deployed from `main`.
 To redeploy a specific published release:
 
 ```bash
-gh workflow run pages.yml --ref main -f release_tag=v0.6.0
+gh workflow run pages.yml --ref main -f release_tag=v0.7.0
 ```
 
 Omit `release_tag` to use the latest stable release. Pages dispatch and
