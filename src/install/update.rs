@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 pub struct Build {
     pub version: String,
     pub protocol: u16,
+    #[serde(default)]
+    pub supported_protocols: Vec<u16>,
 }
 
 impl Build {
@@ -20,15 +22,21 @@ impl Build {
         Self {
             version: env!("CARGO_PKG_VERSION").into(),
             protocol: crate::session::PROTOCOL,
+            supported_protocols: crate::session::supported_protocols(&crate::session::Version::this_system()),
         }
     }
 
     pub fn accepts(&self, next: &Self) -> bool {
-        self.protocol == next.protocol
+        next.supports(self.protocol)
             && semver::Version::parse(&self.version)
                 .ok()
                 .zip(semver::Version::parse(&next.version).ok())
                 .is_some_and(|(old, new)| new > old && new.pre.is_empty())
+    }
+
+    pub fn supports(&self, protocol: u16) -> bool {
+        self.supported_protocols.contains(&protocol)
+            || (self.supported_protocols.is_empty() && self.protocol == protocol)
     }
 }
 

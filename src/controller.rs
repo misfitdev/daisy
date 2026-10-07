@@ -73,6 +73,9 @@ pub struct AppSettings {
     /// Sharing was on when Daisy last ran, so it starts again.
     #[serde(default)]
     pub sharing: bool,
+    /// What to do when a verified compatible release is available.
+    #[serde(default)]
+    pub update_policy: crate::update::Policy,
 }
 
 impl Default for AppSettings {
@@ -82,6 +85,7 @@ impl Default for AppSettings {
             share_clipboard: default_share_clipboard(),
             always_discoverable: false,
             sharing: false,
+            update_policy: crate::update::Policy::default(),
         }
     }
 }
@@ -110,6 +114,7 @@ pub enum Command {
     Refresh,
     /// Turn clipboard sharing on or off, including for a running session.
     SetClipboard(bool),
+    SetUpdatePolicy(crate::update::Policy),
     /// Accept a new system for `ADD_SYSTEM_WINDOW`.
     AddSystem,
     /// Stop accepting a new system early.
@@ -283,6 +288,8 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     }
     let mut stored = settings.clone();
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
+    let (update_policy, update_policy_rx) = watch::channel(stored.update_policy);
+    let active_protocols = std::sync::Arc::new(ActiveProtocols::default());
     // always advertised while sharing; the advertisement names no one
     let (_discoverable, discoverable) = watch::channel(true);
     let (arrange, arrangement) = watch::channel(None);
@@ -319,6 +326,12 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     {
         return;
     }
+    tokio::spawn(update_worker(
+        home.clone(),
+        events.clone(),
+        update_policy_rx,
+        active_protocols.clone(),
+    ));
 
     let mut session: Option<tokio::task::JoinHandle<()>> = None;
     let mut addresses: Option<tokio_mpsc::UnboundedSender<(String, Option<PublicKey>)>> = None;
@@ -386,6 +399,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     discoverable: discoverable.clone(),
                     arrangement: arrangement.clone(),
                     listening: listening.clone(),
+                    protocols: active_protocols.clone(),
                 };
                 session = Some(tokio::spawn(async move {
                     let start = Start { settings, side_chosen };
@@ -455,6 +469,18 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     let _ = send_problem(
                         &events,
                         "Clipboard setting could not be saved",
+                        "Check that Daisy can write its data folder, then try again.".to_owned(),
+                    );
+                }
+            }
+            Command::SetUpdatePolicy(policy) => {
+                stored.update_policy = policy;
+                update_policy.send_replace(policy);
+                if let Err(error) = save_settings(&home, &stored) {
+                    tracing::error!(error = ?error, "update policy could not be saved");
+                    let _ = send_problem(
+                        &events,
+                        "Update policy could not be saved",
                         "Check that Daisy can write its data folder, then try again.".to_owned(),
                     );
                 }
@@ -562,6 +588,139 @@ struct Live {
     discoverable: watch::Receiver<bool>,
     arrangement: watch::Receiver<Option<crate::share::Placing>>,
     listening: watch::Receiver<Listening>,
+    protocols: std::sync::Arc<ActiveProtocols>,
+}
+
+#[derive(Default)]
+struct ActiveProtocols {
+    peers: std::sync::Mutex<std::collections::BTreeMap<PublicKey, u16>>,
+    revision: watch::Sender<u64>,
+}
+
+impl ActiveProtocols {
+    fn changed(&self) {
+        self.revision
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    fn revision(&self) -> u64 {
+        *self.revision.borrow()
+    }
+}
+
+fn retry_update_after_mesh_change(policy: crate::update::Policy, installing: bool) -> bool {
+    !installing && policy != crate::update::Policy::NotifyOnly
+}
+
+fn mesh_changed_since(attempted_revision: u64, current_revision: u64) -> bool {
+    attempted_revision != current_revision
+}
+
+async fn update_worker(
+    home: PathBuf,
+    events: Sender<Event>,
+    mut policy: watch::Receiver<crate::update::Policy>,
+    protocols: std::sync::Arc<ActiveProtocols>,
+) {
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("package version is semver");
+    let mut releases = crate::update::watch(crate::update::REPOSITORY, current.clone(), crate::update::INTERVAL);
+    let mut latest: Option<crate::update::Release> = None;
+    let mut handled: Option<(String, crate::update::Policy)> = None;
+    let mut protocol_changes = protocols.revision.subscribe();
+    let (completion_tx, mut completion_rx) = tokio_mpsc::unbounded_channel::<(u64, bool)>();
+    let mut installing = false;
+    loop {
+        tokio::select! {
+            changed = releases.changed() => {
+                if changed.is_err() { return; }
+                latest = releases.borrow().clone();
+            }
+            changed = policy.changed() => {
+                if changed.is_err() { return; }
+            }
+            changed = protocol_changes.changed() => {
+                if changed.is_err() { return; }
+                if retry_update_after_mesh_change(*policy.borrow(), installing) {
+                    handled = None;
+                }
+            }
+            completion = completion_rx.recv(), if installing => {
+                let Some((attempted_revision, success)) = completion else { return; };
+                installing = false;
+                if !success && mesh_changed_since(attempted_revision, protocols.revision()) {
+                    handled = None;
+                }
+            }
+        }
+        let Some(release) = latest.as_ref() else {
+            continue;
+        };
+        let Ok(version) = semver::Version::parse(release.tag_name.trim_start_matches('v')) else {
+            continue;
+        };
+        let selected_policy = *policy.borrow();
+        if installing {
+            continue;
+        }
+        let key = (version.to_string(), selected_policy);
+        if handled.as_ref() == Some(&key) {
+            continue;
+        }
+        handled = Some(key);
+        if selected_policy == crate::update::Policy::NotifyOnly {
+            let _ = events.send(Event::Notice {
+                title: "Daisy update available".to_owned(),
+                detail: format!(
+                    "Daisy {} is available. Update from the app or run `daisy update`.",
+                    version
+                ),
+            });
+            continue;
+        }
+        if !selected_policy.permits(&current, &version) {
+            continue;
+        }
+        let mut peer_protocols = protocols
+            .peers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        peer_protocols.sort_unstable();
+        peer_protocols.dedup();
+        if peer_protocols.contains(&0) {
+            continue;
+        }
+        let attempted_revision = protocols.revision();
+        let home = home.clone();
+        let events = events.clone();
+        let completion = completion_tx.clone();
+        installing = true;
+        tokio::task::spawn_blocking(move || {
+            let result = crate::macos::update::request_release_for_protocols(&home, &version, &peer_protocols)
+                .and_then(|child| child.wait_with_output().map_err(anyhow::Error::from))
+                .and_then(|output| {
+                    if output.status.success() {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "verified update was deferred: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ))
+                    }
+                });
+            let success = result.is_ok();
+            if let Err(error) = result {
+                tracing::warn!(error = ?error, "automatic Daisy update did not start");
+                let _ = events.send(Event::Notice {
+                    title: "Automatic update postponed".to_owned(),
+                    detail: "This release is not verified as compatible with every connected peer. Update the group together, then try again.".to_owned(),
+                });
+            }
+            let _ = completion.send((attempted_revision, success));
+        });
+    }
 }
 
 async fn run_session(home: PathBuf, name: String, start: Start, live: Live, events: Sender<Event>) {
@@ -571,6 +730,7 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
         discoverable,
         arrangement,
         mut listening,
+        protocols,
     } = live;
     // the session starts from the current choice; only later ones are news
     listening.mark_unchanged();
@@ -589,6 +749,7 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
             adding: false,
+            protocols: protocols.clone(),
         };
         let pairing = Some(settings.trust);
         let config = service::SessionConfig {
@@ -662,6 +823,7 @@ struct ControllerObserver {
     linked: Vec<(String, PublicKey, usize)>,
     /// Whether pairing was opened while the group runs.
     adding: bool,
+    protocols: std::sync::Arc<ActiveProtocols>,
 }
 
 impl ControllerObserver {
@@ -715,6 +877,12 @@ impl ServiceObserver for ControllerObserver {
     }
 
     fn link(&mut self, peer: &str, key: PublicKey, link: crate::control::Link) {
+        self.protocols
+            .peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, link.protocol);
+        self.protocols.changed();
         let _ = self.events.send(Event::Link { key, link });
         let now = trust::now();
         let fresh = self
@@ -752,6 +920,16 @@ impl ServiceObserver for ControllerObserver {
             self.linked[index].2 -= 1;
             if self.linked[index].2 == 0 {
                 self.linked.remove(index);
+                if self
+                    .protocols
+                    .peers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&key)
+                    .is_some()
+                {
+                    self.protocols.changed();
+                }
                 if self.stats.remove(&key).is_some() {
                     self.save_stats();
                 }
@@ -868,7 +1046,10 @@ fn mismatch_copy(mismatch: &Mismatch, name: Option<&str>) -> (String, String) {
         "{peer} runs Daisy {} (protocol {}). This system runs Daisy {} (protocol {}). Update Daisy on {update} to connect.",
         mismatch.peer.app, mismatch.peer.protocol, mismatch.local.app, mismatch.local.protocol
     );
-    (title, detail)
+    (
+        title,
+        format!("{detail} Download the latest compatible version from https://github.com/misfitdev/daisy/releases."),
+    )
 }
 
 fn recovery_for(error: &anyhow::Error) -> String {
@@ -950,6 +1131,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn active_mesh_changes_advance_the_update_eligibility_revision() {
+        let protocols = ActiveProtocols::default();
+        let mut observed = protocols.revision.subscribe();
+        let key = Identity::generate().unwrap().public_key();
+
+        protocols.peers.lock().unwrap().insert(key, 6);
+        protocols.changed();
+        assert_eq!(protocols.revision(), 1);
+        assert!(observed.has_changed().unwrap());
+        observed.borrow_and_update();
+
+        protocols.peers.lock().unwrap().remove(&key);
+        protocols.changed();
+        assert_eq!(protocols.revision(), 2);
+        assert!(observed.has_changed().unwrap());
+    }
+
+    #[test]
+    fn automatic_update_retries_after_the_active_mesh_changes() {
+        assert!(retry_update_after_mesh_change(crate::update::Policy::InstallAll, false,));
+        assert!(retry_update_after_mesh_change(
+            crate::update::Policy::InstallMinorAndPatch,
+            false,
+        ));
+        assert!(!retry_update_after_mesh_change(
+            crate::update::Policy::NotifyOnly,
+            false,
+        ));
+        assert!(!retry_update_after_mesh_change(crate::update::Policy::InstallAll, true,));
+        assert!(mesh_changed_since(4, 5));
+        assert!(!mesh_changed_since(4, 4));
+    }
+
+    #[test]
     fn address_addition_keeps_the_running_group() {
         assert_eq!(address_action(true), AddressAction::Join);
         assert_eq!(address_action(false), AddressAction::Start);
@@ -986,6 +1201,7 @@ mod tests {
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
             adding: false,
+            protocols: std::sync::Arc::default(),
         };
         let studio = Identity::generate().unwrap().public_key();
         let desk = Identity::generate().unwrap().public_key();
@@ -1030,6 +1246,7 @@ mod tests {
             share_clipboard: false,
             always_discoverable: true,
             sharing: true,
+            update_policy: crate::update::Policy::InstallAll,
         };
         save_settings(directory.path(), &settings).unwrap();
         assert_eq!(load_settings(directory.path()).unwrap(), settings);
@@ -1059,10 +1276,10 @@ mod tests {
         };
         let (title, detail) = mismatch_copy(&mismatch, Some("Studio"));
         assert_eq!(title, "Studio runs a different version of Daisy");
-        assert_eq!(
-            detail,
+        assert!(detail.starts_with(
             "Studio runs Daisy 0.1.3 (protocol 3). This system runs Daisy 0.1.2 (protocol 2). Update Daisy on this system to connect."
-        );
+        ));
+        assert!(detail.ends_with("https://github.com/misfitdev/daisy/releases."));
         let newer_here = Mismatch {
             peer: mismatch.local.clone(),
             local: mismatch.peer.clone(),
@@ -1070,7 +1287,8 @@ mod tests {
         };
         let (title, detail) = mismatch_copy(&newer_here, None);
         assert_eq!(title, "The peer runs a different version of Daisy");
-        assert!(detail.ends_with("Update Daisy on the peer to connect."));
+        assert!(detail.contains("Update Daisy on the peer to connect."));
+        assert!(detail.ends_with("https://github.com/misfitdev/daisy/releases."));
 
         let wrapped = anyhow::Error::from(SessionError::VersionMismatch(Box::new(newer_here))).context("connecting");
         let home = tempfile::tempdir().unwrap();
@@ -1123,6 +1341,7 @@ mod tests {
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
             adding: false,
+            protocols: std::sync::Arc::default(),
         };
         observer.waiting("Studio", key, service::DEFAULT_PORT, Some(Policy::IDLE));
         assert!(matches!(
@@ -1155,6 +1374,7 @@ mod tests {
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
             adding: false,
+            protocols: std::sync::Arc::default(),
         };
         let next = || received.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
         observer.pairing_opened();
@@ -1184,6 +1404,7 @@ mod tests {
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
             adding: false,
+            protocols: std::sync::Arc::default(),
         };
         for _ in 0..3 {
             observer.connection_failed("192.168.1.20:24850", &anyhow::anyhow!("connection refused"));

@@ -74,12 +74,12 @@ identity, input capture or listener initialization. The local updater reads
 this sealed value and the bundle version instead of executing the replacement
 while the current app is sharing.
 
-Packaging also emits `Daisy-<version>-update.toml` from the release source. It
-records metadata format `1`, the package version, `session::PROTOCOL`, and the
-SHA-256 of the final ZIP. The release workflow covers this file with artifact
-attestation and SLSA provenance. It is the compatibility contract for the
-verified release installer and future automatic policies; release numbers and release-note text are not a
-substitute. Verify its provenance and archive binding before using it.
+Packaging also emits `Daisy-<version>-update.toml` from the release source.
+It records metadata format `2`, package version, `session::PROTOCOL`, the
+supported protocol list, and the final ZIP SHA-256. The release workflow
+attests the file and includes it in SLSA provenance. This metadata is the
+compatibility contract for verified updates; release numbers and release-note
+text do not replace it. Verify provenance and archive binding before use.
 
 Either command proves that a release file was built by this repository's release workflow:
 
@@ -126,8 +126,12 @@ brew upgrade --cask misfitdev/daisy/daisy
 These commands require the tap to be published. After each stable release,
 update its cask using that release's generated `daisy.rb`. Homebrew's livecheck
 detects new stable releases, but does not update the tap's recipe itself.
-Daisy does not install updates automatically. Quit Daisy before upgrading,
-then reopen it; install the same compatible version on every group member.
+Advanced settings offers three update policies: notify only, install all stable
+updates, or install minor and patch updates. Protocol-changing installs require
+signed compatibility metadata that supports this system and every currently
+connected peer. Offline peers do not block installation and may need Daisy
+updated before reconnecting. If an incompatible active peer disconnects,
+Daisy retries compatibility against the remaining group.
 Accessibility and Input Monitoring still require approval in System Settings.
 Users can also install the release's recipe through a local tap; see
 [Homebrew installation](usage.md#homebrew). The generated recipe is release

@@ -13,6 +13,43 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Policy {
+    #[default]
+    NotifyOnly,
+    InstallAll,
+    InstallMinorAndPatch,
+}
+
+impl Policy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotifyOnly => "Notify only",
+            Self::InstallAll => "Install all updates",
+            Self::InstallMinorAndPatch => "Install minor and patch updates",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::NotifyOnly => Self::InstallAll,
+            Self::InstallAll => Self::InstallMinorAndPatch,
+            Self::InstallMinorAndPatch => Self::NotifyOnly,
+        }
+    }
+
+    pub fn permits(self, current: &Version, next: &Version) -> bool {
+        next > current
+            && next.pre.is_empty()
+            && match self {
+                Self::NotifyOnly => false,
+                Self::InstallAll => true,
+                Self::InstallMinorAndPatch => current.major == next.major,
+            }
+    }
+}
+
 /// Daisy's own repository, queried for its releases feed.
 pub const REPOSITORY: &str = "misfitdev/daisy";
 
@@ -23,9 +60,21 @@ pub const INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// downgrade to HTTP, and request/body limits apply to every download.
 pub struct ReleaseSource;
 
+pub(crate) fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .build()
+        .new_agent()
+}
+
 impl crate::install::release::Source for ReleaseSource {
     fn get(&mut self, url: &str, limit: usize) -> Result<Vec<u8>> {
-        ureq::get(url)
+        http_agent()
+            .get(url)
             .header("User-Agent", "daisy-release-installer")
             .header("Accept", "application/vnd.github+json")
             .config()
@@ -51,15 +100,18 @@ pub struct Manifest {
     pub format: u32,
     pub version: String,
     pub protocol: u16,
+    #[serde(default)]
+    pub supported_protocols: Vec<u16>,
     pub archive_sha256: String,
 }
 
 impl Manifest {
     pub fn for_archive(archive: &[u8]) -> Self {
         Self {
-            format: 1,
+            format: 2,
             version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol: crate::session::PROTOCOL,
+            supported_protocols: crate::session::supported_protocols(&crate::session::Version::this_system()),
             archive_sha256: archive_sha256(archive),
         }
     }
@@ -68,9 +120,21 @@ impl Manifest {
     /// install. Release-number proximity is never evidence of compatibility.
     /// Unknown metadata and protocol changes require a manual group update.
     pub fn matches(&self, release: &Version, local_protocol: u16, archive: &[u8]) -> bool {
-        self.format == 1
+        let compatible = match self.format {
+            1 => self.protocol == local_protocol,
+            2 => {
+                let mut supported = self.supported_protocols.clone();
+                supported.sort_unstable();
+                supported.dedup();
+                !supported.is_empty()
+                    && supported.len() == self.supported_protocols.len()
+                    && supported.contains(&self.protocol)
+                    && supported.contains(&local_protocol)
+            }
+            _ => false,
+        };
+        compatible
             && Version::parse(&self.version).is_ok_and(|version| version == *release)
-            && self.protocol == local_protocol
             && self.archive_sha256 == archive_sha256(archive)
     }
 }
@@ -112,7 +176,8 @@ fn parse_tag(tag: &str) -> Option<Version> {
 /// Fetches the releases feed for `repository`. GitHub returns 403 for API
 /// requests without a `User-Agent`.
 pub fn check(repository: &str) -> Result<Vec<Release>> {
-    ureq::get(format!("https://api.github.com/repos/{repository}/releases"))
+    http_agent()
+        .get(format!("https://api.github.com/repos/{repository}/releases"))
         .header("User-Agent", "daisy-update-check")
         .header("Accept", "application/vnd.github+json")
         .config()
@@ -151,6 +216,32 @@ pub fn watch(repository: &'static str, current: Version, interval: Duration) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_update_policies_follow_semver_boundaries() {
+        let current = Version::parse("0.6.4").unwrap();
+        assert!(!Policy::NotifyOnly.permits(&current, &Version::parse("0.6.5").unwrap()));
+        assert!(Policy::InstallAll.permits(&current, &Version::parse("1.0.0").unwrap()));
+        assert!(Policy::InstallMinorAndPatch.permits(&current, &Version::parse("0.7.0").unwrap()));
+        assert!(!Policy::InstallMinorAndPatch.permits(&current, &Version::parse("1.0.0").unwrap()));
+        assert!(!Policy::InstallAll.permits(&current, &Version::parse("0.6.5-rc.1").unwrap()));
+    }
+
+    #[test]
+    fn compatibility_manifest_names_every_supported_protocol() {
+        let archive = b"release bytes";
+        let manifest = Manifest::for_archive(archive);
+        let version = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        assert!(manifest.matches(&version, crate::session::PROTOCOL, archive));
+        assert!(manifest.matches(&version, crate::session::MIN_PROTOCOL, archive));
+        assert!(!manifest.matches(&version, crate::session::MIN_PROTOCOL - 1, archive));
+        let mut malformed = manifest.clone();
+        malformed.supported_protocols.push(crate::session::PROTOCOL);
+        assert!(!malformed.matches(&version, crate::session::PROTOCOL, archive));
+        malformed = manifest;
+        malformed.supported_protocols.clear();
+        assert!(!malformed.matches(&version, crate::session::PROTOCOL, archive));
+    }
 
     #[test]
     fn release_transport_refuses_plain_http_before_connecting() {
@@ -199,12 +290,13 @@ mod tests {
         let serialized = toml::to_string(&manifest).unwrap();
         let decoded: Manifest = toml::from_str(&serialized).unwrap();
         assert!(decoded.matches(&release, crate::session::PROTOCOL, archive));
-        assert!(!decoded.matches(&release, crate::session::PROTOCOL - 1, archive));
+        assert!(decoded.matches(&release, crate::session::MIN_PROTOCOL, archive));
+        assert!(!decoded.matches(&release, crate::session::MIN_PROTOCOL - 1, archive));
         assert!(!decoded.matches(&release, crate::session::PROTOCOL + 1, archive));
         assert!(!decoded.matches(&release, crate::session::PROTOCOL, b"replaced archive"));
         assert!(!decoded.matches(&Version::parse("99.0.0").unwrap(), crate::session::PROTOCOL, archive));
         let mut unknown = decoded.clone();
-        unknown.format = 2;
+        unknown.format = 3;
         assert!(!unknown.matches(&release, crate::session::PROTOCOL, archive));
         unknown = decoded;
         unknown.version = "latest".into();

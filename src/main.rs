@@ -44,6 +44,9 @@ enum Command {
         /// Install this exact stable version instead of the latest release
         #[arg(long)]
         version: Option<semver::Version>,
+        /// Active peer protocols that the verified release must preserve.
+        #[arg(long = "compatible-protocol")]
+        compatible_protocols: Vec<u16>,
     },
     /// Stage a signed local update and restart Daisy after verification
     InstallUpdate { bundle: PathBuf },
@@ -165,9 +168,14 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
-        Some(Command::Update { version }) => {
+        Some(Command::Update {
+            version,
+            compatible_protocols,
+        }) => {
             let home = cli.home.clone().map_or_else(default_home, Ok)?;
-            let Some(mut helper) = macos::update::install_release(&home, version.as_ref())? else {
+            let Some(mut helper) =
+                macos::update::install_release_for_protocols(&home, version.as_ref(), compatible_protocols)?
+            else {
                 println!("Daisy is already up to date.");
                 return Ok(());
             };

@@ -169,6 +169,7 @@ where
 
 /// One peer's session within the group.
 struct Link {
+    protocol: u16,
     files_capable: bool,
     trace_capable: bool,
     trace_sent: bool,
@@ -309,9 +310,11 @@ where
                 Membership::Join(joining) => {
                     let key = joining.channel.remote_key();
                     let trace_capable = joining.channel.trace_capable();
+                    let protocol = joining.channel.protocol();
                     let files_capable = joining.channel.files_capable();
                     let (sender, receiver) = joining.channel.split();
                     let link = Link {
+                        protocol,
                         files_capable,
                         trace_capable,
                         trace_sent: false,
@@ -819,6 +822,7 @@ fn publish(
         .iter()
         .map(|(key, link)| {
             let report = crate::control::Link {
+                protocol: link.protocol,
                 latency_ms: link
                     .meter
                     .average()

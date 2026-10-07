@@ -122,22 +122,22 @@ from the installed app:
 Daisy verifies the release and its compatibility before stopping the running
 copy. It then restarts with your device identity, paired trust, settings and
 screen arrangement retained. If startup fails, it restores the previous copy.
-The installed app folder must be writable by your account. This command does
-not enable automatic updates. If an older installed build
+The installed app folder must be writable by your account. Automatic update policy is controlled in Advanced settings: notify only,
+install all stable updates, or install minor and patch updates. The installer
+checks signed compatibility metadata against this system and every connected
+peer before replacing Daisy. Offline peers do not block an update and may need
+to update Daisy before reconnecting. If an incompatible peer disconnects,
+Daisy retries the compatibility check against the remaining group. If an older installed build
 reports `unrecognized subcommand`, use the DMG or Homebrew steps below.
 
-Use `update --version 0.7.0` to request a specific newer stable release. The
-release must have verified compatibility metadata and use the same session
-protocol as this system. Prereleases, older versions, and releases without
-usable verification metadata are refused before installation.
+Use `update --version 0.7.0` to request a specific newer stable release. Daisy verifies the release and checks that it is compatible with this system and every currently connected peer before installation. Prereleases, older versions, and releases without usable verification metadata are refused.
 
 If the command refuses a release, quit Daisy, install the
 [latest release](https://github.com/misfitdev/daisy/releases/latest) from its DMG
 in Applications and reopen it. If you installed with Homebrew, use the
 [Homebrew upgrade steps](#homebrew).
 
-Different releases can connect when their protocol versions match. A protocol
-change needs a manual group update. If Daisy reports a protocol mismatch,
+Different releases can connect when compatible. Daisy checks compatibility automatically. If it reports a compatibility issue,
 update the system it identifies. See the
 [protocol compatibility rules](protocol.md#handshake).
 
@@ -149,7 +149,7 @@ To install a newer signed release without copying over the running app, mount it
 /Applications/Daisy.app/Contents/MacOS/daisy install-update /Volumes/Daisy/Daisy.app
 ```
 
-Daisy stages and verifies the replacement while the current copy keeps running. It then stops the current process, checks that the network listener has closed, exchanges the complete app bundles, and starts the replacement. Sharing resumes with the same device identity, paired peers, settings and screen arrangement. The previous copy stays available until startup succeeds. If startup fails, Daisy stops the replacement and restores the previous copy. The command accepts only a newer notarized release from the same publisher using the same network protocol. Protocol changes still require a manual group update. This command does not enable automatic installation.
+Daisy stages and verifies the replacement while the current copy keeps running. It then stops the current process, checks that the network listener has closed, exchanges the app bundles, and starts the replacement. Sharing resumes with the same device identity, paired peers, settings, and screen arrangement. The previous copy stays available until startup succeeds. If startup fails, Daisy stops the replacement and restores the previous copy. The command accepts only a newer notarized release from the same publisher that Daisy can use with this installation. This command applies a staged update; automatic update behavior is controlled separately in Advanced settings.
 
 ## Homebrew
 
@@ -178,8 +178,7 @@ brew upgrade --cask local/daisy/daisy
 ```
 
 Reopen Daisy afterward. See [update compatibility](#update-daisy) if a peer reports a protocol mismatch.
-Homebrew checks the DMG's SHA-256 before installing. It does not grant
-Accessibility or Input Monitoring, and Daisy does not update itself.
+Homebrew verifies the DMG's SHA-256 during cask installation; it does not grant Accessibility or Input Monitoring. When an automatic-update policy is selected in Advanced settings, Daisy can update its running app, including a Homebrew-installed copy. To update manually instead, use the latest release cask recipe and run `brew upgrade` as above.
 `brew uninstall --cask local/daisy/daisy` removes the app while retaining
 settings, device identity, and paired peers. If Daisy was installed manually,
 quit it and remove the existing app from Applications before installing the cask.

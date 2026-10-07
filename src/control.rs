@@ -29,6 +29,8 @@ impl Activity {
 /// What a person sees of one peer's link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Link {
+    /// Authenticated wire protocol negotiated for this active peer.
+    pub protocol: u16,
     /// Recent average round trip, in whole milliseconds.
     pub latency_ms: Option<u64>,
     /// Whether this system has control.
