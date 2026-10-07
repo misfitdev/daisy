@@ -12,7 +12,9 @@ test:
 
 # Lint and check formatting
 lint:
-    cargo clippy --all-targets -- -D warnings
+    # separate target dir: clippy's rustc flags differ from plain build/test,
+    # so sharing target/debug invalidates its incremental cache every run
+    cargo clippy --target-dir target/clippy --all-targets -- -D warnings
     cargo fmt --check
 
 # Format the code
