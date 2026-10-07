@@ -122,8 +122,12 @@ from the installed app:
 Daisy verifies the release and its compatibility before stopping the running
 copy. It then restarts with your device identity, paired trust, settings and
 screen arrangement retained. If startup fails, it restores the previous copy.
-The installed app folder must be writable by your account. This command does
-not enable automatic updates. If an older installed build
+The installed app folder must be writable by your account. Automatic update policy is controlled in Advanced settings: notify only,
+install all stable updates, or install minor and patch updates. The installer
+checks signed compatibility metadata against this system and every connected
+peer before replacing Daisy. Offline peers do not block an update and may need
+to update Daisy before reconnecting. If an incompatible peer disconnects,
+Daisy retries the compatibility check against the remaining group. If an older installed build
 reports `unrecognized subcommand`, use the DMG or Homebrew steps below.
 
 Use `update --version 0.7.0` to request a specific newer stable release. The
@@ -136,8 +140,7 @@ If the command refuses a release, quit Daisy, install the
 in Applications and reopen it. If you installed with Homebrew, use the
 [Homebrew upgrade steps](#homebrew).
 
-Different releases can connect when their protocol versions match. A protocol
-change needs a manual group update. If Daisy reports a protocol mismatch,
+Different releases can connect when their protocol versions match. Protocol 6 and 7 can connect during rolling updates. Protocols below 6 need a manual group update. If Daisy reports a protocol mismatch,
 update the system it identifies. See the
 [protocol compatibility rules](protocol.md#handshake).
 

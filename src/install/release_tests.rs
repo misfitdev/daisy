@@ -35,9 +35,10 @@ fn setup() -> (MemorySource, Build) {
         ("Daisy.app/Contents/Info.plist", b"signed metadata"),
     ]);
     let manifest = toml::to_string(&Manifest {
-        format: 1,
+        format: 2,
         version: "0.6.0".into(),
-        protocol: 6,
+        protocol: 7,
+        supported_protocols: vec![7, 6],
         archive_sha256: digest(&archive),
     })
     .unwrap()
@@ -76,6 +77,7 @@ fn setup() -> (MemorySource, Build) {
         Build {
             version: "0.5.0".into(),
             protocol: 6,
+            supported_protocols: vec![6],
         },
     )
 }
@@ -89,6 +91,25 @@ fn trusted(bytes: &[u8], hash: &str, name: &str, tag: &str) -> Result<()> {
         "unverified asset"
     );
     Ok(())
+}
+
+#[test]
+fn release_manifest_must_cover_every_active_peer_protocol() {
+    let (mut compatible, previous) = setup();
+    assert!(
+        fetch_verified_for_protocols(&mut compatible, &previous, None, &[6, 7], |bytes, hash, name, tag| {
+            trusted(bytes, hash, name, tag)
+        },)
+        .is_ok()
+    );
+
+    let (mut incompatible, previous) = setup();
+    assert!(
+        fetch_verified_for_protocols(&mut incompatible, &previous, None, &[6, 5], |bytes, hash, name, tag| {
+            trusted(bytes, hash, name, tag)
+        },)
+        .is_err()
+    );
 }
 
 #[test]
@@ -106,7 +127,8 @@ fn both_assets_are_verified_before_a_candidate_can_be_extracted() {
         release.build(),
         &Build {
             version: "0.6.0".into(),
-            protocol: 6
+            protocol: 7,
+            supported_protocols: vec![7, 6],
         }
     );
     let directory = private_directory();
@@ -198,9 +220,9 @@ fn verified_metadata_must_match_version_protocol_and_archive() {
         let url = format!("{REPO}/releases/download/v0.6.0/Daisy-0.6.0-update.toml");
         let mut manifest: Manifest = toml::from_str(std::str::from_utf8(&source.responses[&url]).unwrap()).unwrap();
         match kind {
-            "format" => manifest.format = 2,
+            "format" => manifest.format = 3,
             "version" => manifest.version = "0.7.0".into(),
-            "protocol" => manifest.protocol = 7,
+            "protocol" => manifest.protocol = 8,
             "hash" => manifest.archive_sha256 = "0".repeat(64),
             _ => {}
         }

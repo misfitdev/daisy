@@ -10,6 +10,7 @@ fn build(version: &str) -> Build {
     Build {
         version: version.into(),
         protocol: 6,
+        supported_protocols: Vec::new(),
     }
 }
 
@@ -143,6 +144,8 @@ fn copied_candidate_must_match_the_exact_verified_build() {
         Build {
             version: "0.7.0".into(),
             protocol: 7,
+
+            supported_protocols: vec![7],
         },
     ] {
         let (directory, mut system) = setup();
@@ -298,6 +301,8 @@ fn unknown_or_breaking_build_metadata_never_stages_an_update() {
         Build {
             version: "0.7.0".into(),
             protocol: 7,
+
+            supported_protocols: vec![7],
         },
         build("0.6.0"),
         build("0.5.0"),

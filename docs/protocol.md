@@ -10,18 +10,21 @@ A TCP connection, to port 24850 by default. Every frame is a big-endian `u16` le
 
 ## Handshake
 
-Every connection starts a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake in which both sides send their long-term keys. The prologue is `daisy` and never changes.
+Every connection starts with a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake
+in which both sides send their long-term keys. Its prologue is `daisy` and
+never changes. Each side includes its protocol number in the first handshake
+message, followed by its Daisy release and authenticated capabilities in UTF-8
+within the existing 64-byte limit. Protocol 7 advertises `protocols-7-6`; a
+peer negotiates the greatest protocol both sides support. Protocol-6 peers
+ignore this tail and continue using protocol 6. Trace and file-transfer
+capabilities are negotiated independently. The capability tail is authenticated
+by Noise and bound into the device proof.
 
-Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 6. Trace-capable releases optionally append `\0caps=trace-v1,files-v1` to the release text,
-keeping the entire text within the existing 64-byte limit. Older readers accept
-this UTF-8 payload as display-version text. New readers separate the release from
-the capability list. The tail is authenticated by Noise and bound into the device
-proof; omission means no optional capabilities. If the release text leaves no room,
-no capability is advertised. This does not change the required sharing protocol.
-
-Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
-
-The handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
+Both sides finish the authenticated handshake before comparing versions, so a
+peer can explain a mismatch. Different releases connect when they negotiate a
+shared protocol. Protocol 7 bridges protocol 6 during rolling updates; versions
+below 6 and unknown future versions are rejected with an update direction. The
+handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
 
 After the handshake the session splits into a sending half and a receiving half, so input can go out while messages arrive. Each direction keeps its own nonce, counting up from zero, so a replayed or reordered frame fails to authenticate.
 
@@ -148,56 +151,58 @@ Each system holds one session with every other member, up to eight systems. Sess
 ## Changing the protocol
 
 Daisy release numbers and session protocol numbers are independent. Different
-Daisy releases can share a group when their session protocols match. There is
-no limit on the number of intervening compatible releases. Discovery's TXT
-`v=1` identifies the beacon format, not the session protocol or release number.
+Daisy releases can share a group when their negotiated session protocol is
+compatible. Discovery's TXT `v=1` identifies the beacon format, not the session
+protocol or release number.
 
-Keep the current session protocol number for compatible releases, including
-minor or major release changes. Preserve the encoding, field order, enum tags
-and meaning of every existing message and nested wire type. This includes
-device proofs, signed introductions and revocations, trust policy strings,
-control ownership, input generations and clipboard acknowledgments. A security
-requirement must never be weakened to connect an older peer.
+Keep the current protocol compatible across releases where possible. Preserve
+the encoding, field order, enum tags, and meaning of every existing message
+and nested wire type. This includes device proofs, signed introductions and
+revocations, trust policy strings, control ownership, and input. The fixed bytes
+in `tests/fixtures/protocol-6.txt` pin existing protocol-6 messages and input
+enums; `tests/protocol_6.rs` checks encoding and decoding. Do not regenerate
+those fixtures to accommodate a wire change.
 
-The fixed bytes in `tests/fixtures/protocol-6.txt` pin all existing message and
-input variants and their nested enums. `tests/protocol_6.rs` checks both encoding
-and decoding against those bytes. Do not regenerate the fixtures to accommodate
-a wire change. These tests protect the encoding; behavior still needs review
-and decision tests when a change affects another member.
+An optional message variant is compatible only after both releases negotiate
+support through an authenticated, backward-compatible exchange. Never infer
+support from a release number or Bonjour advertisement, and never send an
+optional variant unless both authenticated payloads advertised its capability.
+A required message or behavior change requires a protocol change. Unknown
+messages remain errors; silently ignoring control or security messages is
+unsafe.
 
-Appending an optional variant is compatible only after both releases negotiate
-support through an authenticated, backward-compatible exchange. Developer tracing
-uses the handshake capability tail described above. Never infer support from a
-release number or Bonjour advertisement, and never send an optional variant unless
-both authenticated payloads advertised its capability. A new required message or
-behavior still requires a protocol change. Unknown messages remain errors; silently ignoring control or
-security messages is unsafe.
-
-There is currently no protocol N−1 bridge. Protocol 5 and 6 remain incompatible;
-changing the version comparison to accept adjacent numbers does not implement
-one. A future bridge must map the previous protocol's wire and behavioral
-contract explicitly and test both connection directions and mixed groups.
+Protocol 7 explicitly bridges protocol 6. The authenticated handshake advertises
+supported protocols and each link selects the greatest mutual version before
+sharing begins. This preserves mixed protocol-6/protocol-7 groups during a
+rolling update; numeric adjacency alone never authorizes compatibility.
+Protocols below 6 and unknown future protocols remain incompatible. The update
+installer checks signed release metadata against this system and every
+currently connected peer. If an incompatible active peer disconnects, Daisy retries compatibility against the remaining group. Offline peers do not block an update; if one returns
+incompatible, Daisy rejects the connection and points to the canonical release
+page.
 
 ### Automatic installation contract
 
-Packaging emits `Daisy-<version>-update.toml` with metadata format `1`, the exact
-Daisy release, session protocol, and SHA-256 of the final ZIP archive. The
-release workflow attests this metadata alongside the archive and includes it
-in SLSA provenance. A missing, malformed, unsupported or unverified manifest
-does not authorize automatic installation.
+Packaging emits `Daisy-<version>-update.toml` metadata format `2`, binding the
+exact Daisy release, primary session protocol, supported protocol list, and
+SHA-256 of the final ZIP archive. Format 1 remains valid only for an exact
+single-protocol match. The release workflow attests the metadata alongside the
+archive and includes it in SLSA provenance. Missing, malformed, unsupported,
+or unverified metadata does not authorize automatic installation.
 
-Before replacing the app, the installer must verify the manifest's provenance
-from this repository's release workflow and the selected release tag, verify
-the ZIP's SHA-256 against it, and check that the version matches the selected
-release and the protocol equals this system's protocol. `update::Manifest::matches`
-checks the last three properties; it does not verify provenance or authorize
-installation. The installer must also verify the app's signature and identity
-and retain the local device key, trust store and settings.
+Before replacing the app, the installer verifies the manifest provenance for
+the repository's release workflow and selected tag, verifies the ZIP SHA-256,
+and confirms the supported protocol list includes this system and every
+currently connected peer. `update::Manifest::matches` checks the version, tag,
+archive digest, and protocol metadata; it does not verify provenance or
+authorize installation. The installer also verifies the app signature and
+identity and retains the local device key, trust store, and settings.
 
-This applies to every automatic policy, including minor/patch-only. Semver
-alone is not evidence of protocol compatibility. Protocol changes require a manual group update while Daisy supports only one
-session protocol. Notifications may still offer a release.
-The verified `update` command enforces these checks before staging a release.
+Every automatic policy, including minor/patch-only, applies these checks.
+Semver alone is not evidence of protocol compatibility. Only currently
+connected peers gate an automatic protocol update; saved or disconnected peers
+may need to update Daisy before reconnecting. The
+verified `update` command enforces these checks before staging a release.
 Both manifest and ZIP signatures are verified against the bundled public
 Sigstore trust roots, the GitHub Actions issuer, and the exact repository,
 release workflow, tag and artifact digest. Automatic update policies are not

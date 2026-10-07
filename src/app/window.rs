@@ -279,6 +279,7 @@ pub struct AdvancedViews {
     pub always: Retained<Switch>,
     pub clipboard: Retained<Switch>,
     pub login: Retained<Switch>,
+    pub update_policy: Retained<NSButton>,
     /// For Accessibility and Input Monitoring: shown when allowed, and the
     /// button that sets it up when not.
     permission_rows: [(Retained<NSView>, Retained<NSButton>); 2],
@@ -319,12 +320,15 @@ impl AdvancedViews {
         let clipboard = switch(true, "Share clipboard when control moves", sel!(toggleShareClipboard:));
         let login = switch(true, "Open at login", sel!(toggleLaunchAtLogin:));
         let always = switch(false, "Always discoverable", sel!(toggleAlwaysDiscoverable:));
+        let update_policy = button("Notify only", sel!(cycleUpdatePolicy:), target, mtm);
+        update_policy.setFrameSize(NSSize::new(210.0, 28.0));
         rows(
             &options,
             &[
                 ("Share clipboard when control moves", &**clipboard),
                 ("Open at login", &**login),
                 ("Always discoverable", &**always),
+                ("Automatic updates", &*update_policy),
             ],
             mtm,
         );
@@ -383,6 +387,7 @@ impl AdvancedViews {
             always,
             clipboard,
             login,
+            update_policy,
             permission_rows,
         }
     }

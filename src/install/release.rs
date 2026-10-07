@@ -66,13 +66,33 @@ impl VerifiedRelease {
 /// Select an exact stable release, or the latest stable release. Neither
 /// release metadata nor a caller's requested version authorizes installation.
 pub fn fetch(source: &mut impl Source, previous: &Build, requested: Option<&Version>) -> Result<VerifiedRelease> {
-    fetch_verified(source, previous, requested, verify_attestations)
+    fetch_for_protocols(source, previous, requested, &[previous.protocol])
 }
 
+pub fn fetch_for_protocols(
+    source: &mut impl Source,
+    previous: &Build,
+    requested: Option<&Version>,
+    required_protocols: &[u16],
+) -> Result<VerifiedRelease> {
+    fetch_verified_for_protocols(source, previous, requested, required_protocols, verify_attestations)
+}
+
+#[cfg(test)]
 fn fetch_verified(
     source: &mut impl Source,
     previous: &Build,
     requested: Option<&Version>,
+    verify: impl Fn(&[u8], &str, &str, &str) -> Result<()>,
+) -> Result<VerifiedRelease> {
+    fetch_verified_for_protocols(source, previous, requested, &[previous.protocol], verify)
+}
+
+fn fetch_verified_for_protocols(
+    source: &mut impl Source,
+    previous: &Build,
+    requested: Option<&Version>,
+    required_protocols: &[u16],
     verify: impl Fn(&[u8], &str, &str, &str) -> Result<()>,
 ) -> Result<VerifiedRelease> {
     if let Some(version) = requested {
@@ -98,15 +118,12 @@ fn fetch_verified(
         requested.is_none_or(|wanted| *wanted == version),
         "the release does not match the requested version"
     );
-    let next = Build {
-        version: version.to_string(),
-        protocol: previous.protocol,
-    };
     if requested.is_none() && Version::parse(&previous.version).is_ok_and(|current| current >= version) {
         bail!(AlreadyCurrent);
     }
+    let current = Version::parse(&previous.version).context("the installed version is not valid semver")?;
     ensure!(
-        previous.accepts(&next),
+        version > current && version.pre.is_empty(),
         "the selected release is not newer than this system's stable version"
     );
     let architecture = match std::env::consts::ARCH {
@@ -127,8 +144,29 @@ fn fetch_verified(
     let manifest: Manifest =
         toml::from_str(std::str::from_utf8(&manifest_bytes)?).context("reading verified compatibility metadata")?;
     ensure!(
-        manifest.format == 1 && manifest.version == version.to_string() && manifest.protocol == previous.protocol,
+        (manifest.format == 1
+            && manifest.protocol == previous.protocol
+            && required_protocols.iter().all(|protocol| *protocol == manifest.protocol)
+            || manifest.format == 2
+                && manifest.supported_protocols.contains(&manifest.protocol)
+                && required_protocols
+                    .iter()
+                    .all(|protocol| manifest.supported_protocols.contains(protocol)))
+            && manifest.version == version.to_string(),
         "the release metadata does not prove compatibility with this system"
+    );
+    let next = Build {
+        version: version.to_string(),
+        protocol: manifest.protocol,
+        supported_protocols: if manifest.format == 1 {
+            vec![manifest.protocol]
+        } else {
+            manifest.supported_protocols.clone()
+        },
+    };
+    ensure!(
+        previous.accepts(&next),
+        "the selected release is not newer than this system or lacks its protocol"
     );
     let archive = read(source, &archive_asset.browser_download_url, ARCHIVE_LIMIT)?;
     ensure!(

@@ -22,6 +22,8 @@
 	<string>__VERSION__</string>
 	<key>DaisyNetworkProtocol</key>
 	<integer>__NETWORK_PROTOCOL__</integer>
+	<key>DaisySupportedProtocols</key>
+	<string>__SUPPORTED_PROTOCOLS__</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<!-- no Dock icon: runs in the background, and later from the menu bar -->

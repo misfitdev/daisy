@@ -54,10 +54,12 @@ bundle:
     version="$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)"
     metadata="$(target/release/daisy update-info)"
     protocol="$(printf '%s\n' "$metadata" | awk '/^protocol = / {print $3}')"
-    [[ "$protocol" =~ ^[0-9]+$ ]] || { echo "the build did not report a network protocol" >&2; exit 1; }
+    protocols="$(printf '%s\n' "$metadata" | sed -n 's/^supported_protocols = \[\(.*\)\]$/\1/p' | tr -d ' ')"
+    [[ "$protocol" =~ ^[0-9]+$ && "$protocols" =~ ^([0-9]+,)*[0-9]+$ ]] || { echo "the build did not report supported network protocols" >&2; exit 1; }
+    case ",$protocols," in *",$protocol,"*) ;; *) echo "the primary protocol is missing from the supported protocol list" >&2; exit 1 ;; esac
     rm -rf "{{app}}"
     mkdir -p "{{app}}/Contents/MacOS" "{{app}}/Contents/Resources"
-    sed -e "s/__BUNDLE_ID__/{{bundle_id}}/" -e "s/__VERSION__/$version/" -e "s/__NETWORK_PROTOCOL__/$protocol/" macos/Info.plist > "{{app}}/Contents/Info.plist"
+    sed -e "s/__BUNDLE_ID__/{{bundle_id}}/" -e "s/__VERSION__/$version/" -e "s/__NETWORK_PROTOCOL__/$protocol/" -e "s/__SUPPORTED_PROTOCOLS__/$protocols/" macos/Info.plist > "{{app}}/Contents/Info.plist"
     plutil -lint -s "{{app}}/Contents/Info.plist"
     cp -f target/release/daisy "{{app}}/Contents/MacOS/daisy"
     icon_work="$(mktemp -d)"

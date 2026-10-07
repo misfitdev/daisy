@@ -25,7 +25,14 @@ const PROLOGUE: &[u8] = b"daisy";
 /// Stable session protocol, independent of the Daisy release number. Keep it
 /// for compatible releases; changing wire meaning or required behavior needs
 /// a new protocol and a manual group update. See docs/protocol.md.
-pub const PROTOCOL: u16 = 6;
+pub const PROTOCOL: u16 = 7;
+/// Lowest wire protocol this release can still speak. The next protocol
+/// generation keeps one prior protocol available for rolling updates. Keep
+/// this explicit: numeric adjacency alone is not a compatibility contract.
+pub const MIN_PROTOCOL: u16 = 6;
+/// Explicit compatibility bridges, in negotiation preference order. A future
+/// protocol must be added here only after its bridge is implemented and tested.
+const PROTOCOL_COMPATIBILITY: &[(u16, &[u16])] = &[(7, &[7, 6])];
 
 /// Longest app version carried in a handshake payload.
 const MAX_APP_VERSION: usize = 64;
@@ -36,6 +43,26 @@ pub struct Version {
     pub protocol: u16,
     /// The Daisy release, as people see it.
     pub app: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HandshakeVersion {
+    version: Version,
+    trace: bool,
+    supported: Vec<u16>,
+}
+
+pub fn supported_protocols(version: &Version) -> Vec<u16> {
+    PROTOCOL_COMPATIBILITY
+        .iter()
+        .find(|(protocol, _)| *protocol == version.protocol)
+        .map_or_else(|| vec![version.protocol], |(_, supported)| supported.to_vec())
+}
+
+fn select_protocol(local: &Version, peer: &HandshakeVersion) -> Option<u16> {
+    supported_protocols(local)
+        .into_iter()
+        .find(|protocol| peer.supported.contains(protocol))
 }
 
 impl Version {
@@ -67,17 +94,34 @@ impl Version {
 // The optional tail is valid UTF-8 and stays within the legacy payload limit.
 // Older readers treat it as part of the display version and never advertise it.
 const TRACE_CAPABILITY: &str = "\0caps=trace-v1";
-const FILE_CAPABILITY: &str = ",files-v1";
 
 fn negotiated_payload(version: &Version, trace: bool) -> Vec<u8> {
-    let mut payload = handshake_payload(version, trace);
-    if trace
-        && crate::file_transfer::supported()
-        && version.app.len() + TRACE_CAPABILITY.len() + FILE_CAPABILITY.len() <= MAX_APP_VERSION
-    {
-        payload.extend_from_slice(FILE_CAPABILITY.as_bytes());
+    negotiated_payload_for(version, trace, MIN_PROTOCOL.min(version.protocol))
+}
+
+fn negotiated_payload_for(version: &Version, trace: bool, protocol: u16) -> Vec<u8> {
+    let mut wire_version = version.clone();
+    wire_version.protocol = protocol;
+    let mut payload = handshake_payload(&wire_version, trace);
+    let supported = supported_protocols(version);
+    if supported.len() > 1 {
+        let list = supported.iter().map(u16::to_string).collect::<Vec<_>>().join("-");
+        append_capability(&mut payload, &format!("protocols-{list}"));
+    }
+    if trace && crate::file_transfer::supported() {
+        append_capability(&mut payload, "files-v1");
     }
     payload
+}
+
+fn append_capability(payload: &mut Vec<u8>, capability: &str) -> bool {
+    let separator = if payload[2..].contains(&0) { "," } else { "\0caps=" };
+    if payload.len() + separator.len() + capability.len() > 2 + MAX_APP_VERSION {
+        return false;
+    }
+    payload.extend_from_slice(separator.as_bytes());
+    payload.extend_from_slice(capability.as_bytes());
+    true
 }
 
 fn advertises_files(bytes: &[u8]) -> bool {
@@ -97,18 +141,41 @@ fn handshake_payload(version: &Version, trace: bool) -> Vec<u8> {
     payload
 }
 
-fn decode_handshake_payload(bytes: &[u8]) -> Option<(Version, bool)> {
+fn decode_handshake_payload(bytes: &[u8]) -> Option<HandshakeVersion> {
     let mut version = Version::decode(bytes)?;
-    let trace = if let Some((app, capabilities)) = version.app.split_once('\0') {
-        let trace = capabilities
-            .strip_prefix("caps=")
-            .is_some_and(|caps| caps.split(',').any(|cap| cap == "trace-v1"));
+    let (trace, supported) = if let Some((app, capabilities)) = version.app.split_once('\0') {
+        let caps = capabilities.strip_prefix("caps=").unwrap_or_default();
+        let trace = caps.split(',').any(|cap| cap == "trace-v1");
+        let protocol_capability = caps.split(',').find_map(|cap| cap.strip_prefix("protocols-"));
+        let supported = if let Some(list) = protocol_capability {
+            let mut parsed = list
+                .split('-')
+                .map(str::parse::<u16>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            if parsed.is_empty() || parsed.contains(&0) {
+                return None;
+            }
+            parsed.sort_unstable();
+            parsed.dedup();
+            if parsed.len() != list.split('-').count() || !parsed.contains(&version.protocol) {
+                return None;
+            }
+            parsed.sort_unstable_by(|a, b| b.cmp(a));
+            parsed
+        } else {
+            vec![version.protocol]
+        };
         version.app = app.to_owned();
-        trace
+        (trace, supported)
     } else {
-        false
+        (false, vec![version.protocol])
     };
-    Some((version, trace))
+    Some(HandshakeVersion {
+        version,
+        trace,
+        supported,
+    })
 }
 
 /// Two systems run different protocol versions.
@@ -188,6 +255,7 @@ pub struct Channel<S> {
     recv_nonce: u64,
     role: Role,
     remote_key: PublicKey,
+    protocol: u16,
     trace_capable: bool,
     files_capable: bool,
     handshake_hash: Vec<u8>,
@@ -249,6 +317,7 @@ where
         let len = handshake.write_message(&[], &mut buffer)?;
         write_frame(&mut stream, &buffer[..len]).await?;
 
+        let selected = peer.as_ref().map(|peer| peer.version.protocol);
         Self::finish(
             stream,
             handshake,
@@ -258,6 +327,7 @@ where
             local,
             trace,
             peer_files,
+            selected,
         )
     }
 
@@ -275,8 +345,12 @@ where
         let len = handshake.read_message(&frame, &mut buffer)?;
         let peer_files = advertises_files(&buffer[..len]);
         let peer = decode_handshake_payload(&buffer[..len]);
+        let selected = peer.as_ref().and_then(|peer| select_protocol(local, peer));
         // <- e, ee, s, es, with this system's version
-        let len = handshake.write_message(&negotiated_payload(local, trace), &mut buffer)?;
+        let len = handshake.write_message(
+            &negotiated_payload_for(local, trace, selected.unwrap_or(MIN_PROTOCOL.min(local.protocol))),
+            &mut buffer,
+        )?;
         write_frame(&mut stream, &buffer[..len]).await?;
         // -> s, se
         let frame = read_frame(&mut stream).await?;
@@ -291,6 +365,7 @@ where
             local,
             trace,
             peer_files,
+            selected,
         )
     }
 
@@ -300,20 +375,23 @@ where
         handshake: HandshakeState,
         role: Role,
         buffer: Vec<u8>,
-        peer: Option<(Version, bool)>,
+        peer: Option<HandshakeVersion>,
         local: &Version,
         trace: bool,
         peer_files: bool,
+        selected: Option<u16>,
     ) -> Result<Self, SessionError> {
         let remote_key = handshake
             .get_remote_static()
             .and_then(PublicKey::from_bytes)
             .ok_or(SessionError::NoRemoteKey)?;
-        let (peer, remote_trace) = peer.ok_or(SessionError::Incompatible)?;
-        if peer.protocol != local.protocol {
+        let peer = peer.ok_or(SessionError::Incompatible)?;
+        let protocol = selected
+            .filter(|protocol| peer.supported.contains(protocol) && supported_protocols(local).contains(protocol));
+        if protocol.is_none() {
             return Err(SessionError::VersionMismatch(Box::new(Mismatch {
                 peer_key: remote_key,
-                peer,
+                peer: peer.version,
                 local: local.clone(),
             })));
         }
@@ -326,7 +404,8 @@ where
             recv_nonce: 0,
             role,
             remote_key,
-            trace_capable: trace && remote_trace && local.app.len() + TRACE_CAPABILITY.len() <= MAX_APP_VERSION,
+            protocol: protocol.expect("checked above"),
+            trace_capable: trace && peer.trace && local.app.len() + TRACE_CAPABILITY.len() <= MAX_APP_VERSION,
             files_capable: peer_files && advertises_files(&negotiated_payload(local, trace)),
             handshake_hash,
             remote_device: None,
@@ -364,6 +443,10 @@ where
     /// The long-term key the peer proved it holds during the handshake.
     pub fn remote_key(&self) -> PublicKey {
         self.remote_key
+    }
+
+    pub fn protocol(&self) -> u16 {
+        self.protocol
     }
 
     /// Identical on both ends of this session and unique to it, so a proof
@@ -532,6 +615,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protocol_seven_negotiates_with_frozen_protocol_six_in_both_directions() {
+        let current = Version::this_system();
+        let previous = Version {
+            protocol: MIN_PROTOCOL,
+            app: "0.6.0".into(),
+        };
+        for (initiator_version, responder_version) in [
+            (current.clone(), previous.clone()),
+            (previous.clone(), current.clone()),
+            (current.clone(), current.clone()),
+        ] {
+            let initiator = Identity::generate().unwrap();
+            let responder = Identity::generate().unwrap();
+            let (left, right) = tokio::io::duplex(1 << 16);
+            let (a, b) = tokio::join!(
+                Channel::initiate_negotiated(left, &initiator, &initiator_version, false),
+                Channel::respond_negotiated(right, &responder, &responder_version, false),
+            );
+            let (a, b) = (a.unwrap(), b.unwrap());
+            let expected = if initiator_version.protocol == PROTOCOL && responder_version.protocol == PROTOCOL {
+                PROTOCOL
+            } else {
+                MIN_PROTOCOL
+            };
+            assert_eq!(a.protocol(), expected);
+            assert_eq!(b.protocol(), expected);
+        }
+    }
+
+    #[test]
+    fn frozen_protocol_six_reader_accepts_the_legacy_handshake_prefix() {
+        let payload = negotiated_payload(&Version::this_system(), false);
+        let old_reader = Version::decode(&payload).expect("protocol-6 version decoder");
+
+        assert_eq!(old_reader.protocol, MIN_PROTOCOL);
+        assert!(old_reader.app.starts_with(env!("CARGO_PKG_VERSION")));
+        assert!(old_reader.app.contains("\0caps=protocols-7-6"));
+        assert!(old_reader.app.len() <= MAX_APP_VERSION);
+    }
+
+    #[test]
+    fn optional_capabilities_never_overrun_the_legacy_handshake_limit() {
+        for app_len in [32, MAX_APP_VERSION] {
+            let payload = negotiated_payload(
+                &Version {
+                    protocol: PROTOCOL,
+                    app: "x".repeat(app_len),
+                },
+                true,
+            );
+            assert!(payload.len() <= 2 + MAX_APP_VERSION);
+            assert!(Version::decode(&payload).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn three_member_mesh_keeps_mixed_protocol_links_during_rolling_update() {
+        async fn connect(
+            left_identity: &Identity,
+            right_identity: &Identity,
+            left_version: &Version,
+            right_version: &Version,
+        ) -> (Channel<DuplexStream>, Channel<DuplexStream>) {
+            let (left, right) = tokio::io::duplex(1 << 16);
+            let (left, right) = tokio::join!(
+                Channel::initiate_negotiated(left, left_identity, left_version, false),
+                Channel::respond_negotiated(right, right_identity, right_version, false),
+            );
+            (left.unwrap(), right.unwrap())
+        }
+
+        let updated = Version::this_system();
+        let previous = Version {
+            protocol: MIN_PROTOCOL,
+            app: "0.6.0".into(),
+        };
+        let a = Identity::generate().unwrap();
+        let b = Identity::generate().unwrap();
+        let c = Identity::generate().unwrap();
+
+        let (ab, _) = connect(&a, &b, &updated, &updated).await;
+        let (ac, _) = connect(&a, &c, &updated, &previous).await;
+        let (bc, _) = connect(&b, &c, &updated, &previous).await;
+
+        assert_eq!(ab.protocol(), PROTOCOL);
+        assert_eq!(ac.protocol(), MIN_PROTOCOL);
+        assert_eq!(bc.protocol(), MIN_PROTOCOL);
+    }
+
+    #[tokio::test]
     async fn device_proofs_authenticate_both_roles() {
         let (mut left, mut right, _, _) = connected_pair().await;
         let a = crate::device::Signer::generate().unwrap();
@@ -656,7 +829,8 @@ mod tests {
 
     #[test]
     fn the_stable_handshake_payload_is_independent_of_release_numbers() {
-        assert_eq!(PROTOCOL, 6, "a protocol break needs a new group-update contract");
+        assert_eq!(PROTOCOL, 7, "the rolling-update bridge advances the protocol");
+        assert_eq!(MIN_PROTOCOL, PROTOCOL - 1);
         assert_eq!(version(6, "0.6.0").encode(), b"\x00\x060.6.0");
         assert_eq!(Version::decode(b"\x00\x066.0.0"), Some(version(6, "6.0.0")));
     }
@@ -856,6 +1030,30 @@ mod tests {
     }
 
     #[test]
+    fn malformed_protocol_capabilities_are_not_treated_as_legacy_support() {
+        let mut payload = Version {
+            protocol: MIN_PROTOCOL,
+            app: "0.7.0".into(),
+        }
+        .encode();
+        payload.extend_from_slice(b"\0caps=protocols-6-6");
+        assert!(decode_handshake_payload(&payload).is_none());
+        payload.truncate(2 + "0.7.0".len());
+        payload.extend_from_slice(b"\0caps=protocols-6-x");
+        assert!(decode_handshake_payload(&payload).is_none());
+    }
+
+    #[test]
+    fn a_future_protocol_does_not_gain_support_from_numeric_adjacency() {
+        assert_eq!(supported_protocols(&version(PROTOCOL, "0.7.0")), vec![7, 6]);
+        assert_eq!(supported_protocols(&version(8, "0.8.0")), vec![8]);
+
+        let mut payload = version(6, "0.7.0").encode();
+        payload.extend_from_slice(b"\0caps=protocols-7-8");
+        assert!(decode_handshake_payload(&payload).is_none());
+    }
+
+    #[test]
     fn unknown_capability_tails_preserve_the_peer_version_without_enabling_trace() {
         let version = Version::this_system();
         for tail in ["", "future=trace-v1", "caps=trace-v2", "caps="] {
@@ -864,7 +1062,11 @@ mod tests {
             payload.extend_from_slice(tail.as_bytes());
             assert_eq!(
                 decode_handshake_payload(&payload),
-                Some((version.clone(), false)),
+                Some(HandshakeVersion {
+                    version: version.clone(),
+                    trace: false,
+                    supported: vec![version.protocol]
+                }),
                 "capability tail: {tail:?}"
             );
         }
@@ -877,10 +1079,21 @@ mod tests {
         assert!(!advertises_files(&handshake_payload(&version, true)));
         let payload = negotiated_payload(&version, true);
         assert!(advertises_files(&payload));
-        assert_eq!(decode_handshake_payload(&payload), Some((version.clone(), true)));
+        assert_eq!(
+            decode_handshake_payload(&payload).map(|peer| (peer.version.protocol, peer.trace, peer.supported)),
+            Some((MIN_PROTOCOL, true, vec![PROTOCOL, MIN_PROTOCOL]))
+        );
         assert_eq!(
             payload,
-            [version.encode(), b"\0caps=trace-v1,files-v1".to_vec()].concat()
+            [
+                Version {
+                    protocol: MIN_PROTOCOL,
+                    app: version.app.clone()
+                }
+                .encode(),
+                format!("\0caps=trace-v1,protocols-{PROTOCOL}-{MIN_PROTOCOL},files-v1").into_bytes(),
+            ]
+            .concat()
         );
         assert!(!advertises_files(&negotiated_payload(&version, false)));
     }
@@ -892,16 +1105,30 @@ mod tests {
         let legacy = Version::decode(&payload).unwrap();
         assert_eq!(legacy.protocol, PROTOCOL);
         assert!(legacy.app.starts_with(&version.app));
-        assert_eq!(decode_handshake_payload(&payload), Some((version, true)));
+        assert_eq!(
+            decode_handshake_payload(&payload).map(|peer| (peer.version, peer.trace)),
+            Some((version, true))
+        );
         let plain = Version::this_system().encode();
-        assert_eq!(decode_handshake_payload(&plain), Some((Version::this_system(), false)));
+        assert_eq!(
+            decode_handshake_payload(&plain),
+            Some(HandshakeVersion {
+                version: Version::this_system(),
+                trace: false,
+                supported: vec![PROTOCOL]
+            })
+        );
         let long = Version {
             protocol: PROTOCOL,
             app: "a".repeat(MAX_APP_VERSION),
         };
         assert_eq!(
             decode_handshake_payload(&handshake_payload(&long, true)),
-            Some((long, false))
+            Some(HandshakeVersion {
+                supported: vec![PROTOCOL],
+                version: long,
+                trace: false
+            })
         );
     }
 }

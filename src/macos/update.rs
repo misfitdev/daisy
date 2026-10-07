@@ -41,13 +41,48 @@ pub fn request_release(home: &Path, version: Option<&semver::Version>) -> Result
         .context("starting verified release installation")
 }
 
+pub fn request_release_for_protocols(home: &Path, version: &semver::Version, protocols: &[u16]) -> Result<Child> {
+    let executable = running_bundle()?.join("Contents/MacOS/daisy");
+    let mut command = Command::new(executable);
+    command.arg("--home").arg(home).arg("update");
+    command.arg("--version").arg(version.to_string());
+    for protocol in protocols {
+        command.arg("--compatible-protocol").arg(protocol.to_string());
+    }
+    command
+        .env_remove("DAISY_LAUNCHER_PID")
+        .env_remove(STARTUP_DIRECTORY)
+        .stderr(std::process::Stdio::piped());
+    command
+        .spawn()
+        .context("starting verified automatic release installation")
+}
+
 /// CLI worker: downloaded data is never executed before provenance, build
 /// metadata, notarization and same-publisher signature checks have passed.
 pub fn install_release(home: &Path, version: Option<&semver::Version>) -> Result<Option<Child>> {
+    install_release_for_protocols(home, version, &[])
+}
+
+pub fn install_release_for_protocols(
+    home: &Path,
+    version: Option<&semver::Version>,
+    required_protocols: &[u16],
+) -> Result<Option<Child>> {
     let target = running_bundle()?;
     let mut platform = Executor::new(&target)?;
     let previous = build_info(&target)?;
-    let release = match crate::install::release::fetch(&mut crate::update::ReleaseSource, &previous, version) {
+    let required = if required_protocols.is_empty() {
+        vec![previous.protocol]
+    } else {
+        required_protocols.to_vec()
+    };
+    let release = match crate::install::release::fetch_for_protocols(
+        &mut crate::update::ReleaseSource,
+        &previous,
+        version,
+        &required,
+    ) {
         Ok(release) => release,
         Err(error) if error.is::<crate::install::release::AlreadyCurrent>() => return Ok(None),
         Err(error) => return Err(error),
@@ -336,6 +371,12 @@ fn build_info(bundle: &Path) -> Result<Build> {
             .context("the app has no release version")?
             .into(),
         protocol,
+        supported_protocols: fields
+            .get("DaisySupportedProtocols")
+            .and_then(plist::Value::as_string)
+            .map(|value| value.split(',').filter_map(|part| part.parse().ok()).collect())
+            .filter(|protocols: &Vec<u16>| !protocols.is_empty())
+            .unwrap_or_else(|| vec![protocol]),
     })
 }
 

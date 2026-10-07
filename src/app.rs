@@ -386,8 +386,19 @@ define_class!(
             self.refresh_permissions();
         }
 
-        #[unsafe(method(toggleShareClipboard:))]
-        fn toggle_share_clipboard(&self, _sender: Option<&AnyObject>) {
+
+    #[unsafe(method(cycleUpdatePolicy:))]
+    fn cycle_update_policy(&self, _sender: &NSButton) {
+        let mut settings = self.ivars().settings.borrow_mut();
+        settings.update_policy = settings.update_policy.next();
+        let policy = settings.update_policy;
+        drop(settings);
+        let _ = self.ivars().controller.send(Command::SetUpdatePolicy(policy));
+        self.refresh_update_policy();
+    }
+
+    #[unsafe(method(toggleShareClipboard:))]
+    fn toggle_share_clipboard(&self, _sender: Option<&AnyObject>) {
             let on = {
                 let mut settings = self.ivars().settings.borrow_mut();
                 settings.share_clipboard = !settings.share_clipboard;
@@ -788,6 +799,7 @@ impl AppDelegate {
             .ok();
         self.refresh_launch_at_login();
         self.refresh_share_clipboard();
+        self.refresh_update_policy();
         self.rebuild_peers_list();
         self.render_status();
     }
@@ -814,6 +826,7 @@ impl AppDelegate {
                 self.ivars().always_allowed.set(always_discoverable_allowed);
                 *self.ivars().settings.borrow_mut() = settings.clone();
                 self.refresh_share_clipboard();
+                self.refresh_update_policy();
                 self.refresh_always_discoverable();
                 *self.ivars().peers.borrow_mut() = peers;
                 self.apply_settings(&settings.last_session);
@@ -1158,6 +1171,14 @@ impl AppDelegate {
     fn refresh_share_clipboard(&self) {
         if let Some(views) = self.ivars().advanced.get() {
             views.clipboard.set_on(self.ivars().settings.borrow().share_clipboard);
+        }
+    }
+
+    fn refresh_update_policy(&self) {
+        if let Some(views) = self.ivars().advanced.get() {
+            views.update_policy.setTitle(&NSString::from_str(
+                self.ivars().settings.borrow().update_policy.label(),
+            ));
         }
     }
 
