@@ -130,17 +130,14 @@ to update Daisy before reconnecting. If an incompatible peer disconnects,
 Daisy retries the compatibility check against the remaining group. If an older installed build
 reports `unrecognized subcommand`, use the DMG or Homebrew steps below.
 
-Use `update --version 0.7.0` to request a specific newer stable release. The
-release must have verified compatibility metadata and use the same session
-protocol as this system. Prereleases, older versions, and releases without
-usable verification metadata are refused before installation.
+Use `update --version 0.7.0` to request a specific newer stable release. Daisy verifies the release and checks that it is compatible with this system and every currently connected peer before installation. Prereleases, older versions, and releases without usable verification metadata are refused.
 
 If the command refuses a release, quit Daisy, install the
 [latest release](https://github.com/misfitdev/daisy/releases/latest) from its DMG
 in Applications and reopen it. If you installed with Homebrew, use the
 [Homebrew upgrade steps](#homebrew).
 
-Different releases can connect when their protocol versions match. Protocol 6 and 7 can connect during rolling updates. Protocols below 6 need a manual group update. If Daisy reports a protocol mismatch,
+Different releases can connect when compatible. Daisy checks compatibility automatically. If it reports a compatibility issue,
 update the system it identifies. See the
 [protocol compatibility rules](protocol.md#handshake).
 
@@ -152,7 +149,7 @@ To install a newer signed release without copying over the running app, mount it
 /Applications/Daisy.app/Contents/MacOS/daisy install-update /Volumes/Daisy/Daisy.app
 ```
 
-Daisy stages and verifies the replacement while the current copy keeps running. It then stops the current process, checks that the network listener has closed, exchanges the complete app bundles, and starts the replacement. Sharing resumes with the same device identity, paired peers, settings and screen arrangement. The previous copy stays available until startup succeeds. If startup fails, Daisy stops the replacement and restores the previous copy. The command accepts only a newer notarized release from the same publisher using the same network protocol. Protocol changes still require a manual group update. This command does not enable automatic installation.
+Daisy stages and verifies the replacement while the current copy keeps running. It then stops the current process, checks that the network listener has closed, exchanges the app bundles, and starts the replacement. Sharing resumes with the same device identity, paired peers, settings, and screen arrangement. The previous copy stays available until startup succeeds. If startup fails, Daisy stops the replacement and restores the previous copy. The command accepts only a newer notarized release from the same publisher that Daisy can use with this installation. This command applies a staged update; automatic update behavior is controlled separately in Advanced settings.
 
 ## Homebrew
 

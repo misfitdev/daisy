@@ -321,6 +321,8 @@ impl AdvancedViews {
         let login = switch(true, "Open at login", sel!(toggleLaunchAtLogin:));
         let always = switch(false, "Always discoverable", sel!(toggleAlwaysDiscoverable:));
         let update_policy = button("Notify only", sel!(cycleUpdatePolicy:), target, mtm);
+        update_policy.setAccessibilityLabel(Some(&NSString::from_str("Automatic updates policy")));
+        update_policy.setToolTip(Some(&NSString::from_str("Click to choose the next update policy")));
         update_policy.setFrameSize(NSSize::new(210.0, 28.0));
         rows(
             &options,
