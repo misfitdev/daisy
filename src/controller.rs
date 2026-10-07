@@ -300,6 +300,13 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             return;
         }
     };
+    let _trace = match crate::diagnostics::serve(&home, me).await {
+        Ok(server) => Some(server),
+        Err(error) => {
+            tracing::warn!(error = ?error, "developer trace server unavailable");
+            None
+        }
+    };
     if events
         .send(Event::Ready {
             settings,

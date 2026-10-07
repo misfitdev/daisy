@@ -113,6 +113,39 @@ struct Context {
 }
 
 impl Context {
+    fn diagnose_recovery(&self, reason: &'static str) {
+        self.control.diagnostics.record(crate::diagnostics::CaptureEvent {
+            at: self.control.now(),
+            reason,
+            generation: None,
+            event_type: None,
+            source_pid: None,
+            source_state: None,
+        });
+    }
+    fn diagnose(&self, reason: &'static str, generation: Option<u64>, event_type: u32, event: CGEventRef) {
+        let origin = !event.is_null() && event_type < kCGEventTapDisabledByTimeout;
+        // SAFETY: actual input events remain valid for this callback. Tap
+        // notifications never dereference their optional event pointer.
+        let (source_pid, source_state) = if origin {
+            unsafe {
+                (
+                    Some(CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID)),
+                    Some(CGEventGetIntegerValueField(event, kCGEventSourceStateID)),
+                )
+            }
+        } else {
+            (None, None)
+        };
+        self.control.diagnostics.record(crate::diagnostics::CaptureEvent {
+            at: self.control.now(),
+            reason,
+            generation,
+            event_type: Some(event_type),
+            source_pid,
+            source_state,
+        });
+    }
     /// Sends input as part of this system's control, stamped with its
     /// generation. Input made while the peer has control is not sent: it
     /// hands control back to this system instead.
@@ -125,6 +158,7 @@ impl Context {
             return false;
         };
         if !state.owns() {
+            self.diagnose_recovery("owner_changed_while_sending");
             drop(state);
             if let Some(mut driver) = try_lock(&self.driver) {
                 driver.reclaim();
@@ -142,15 +176,21 @@ impl Context {
     }
 
     fn send(&self, message: Message) -> bool {
-        if self.messages.try_send(message).is_ok() {
-            true
-        } else {
-            self.recover_local();
-            false
+        match self.messages.try_send(message) {
+            Ok(()) => true,
+            Err(error) => {
+                self.diagnose_recovery(match error {
+                    mpsc::error::TrySendError::Full(_) => "capture_input_queue_full",
+                    mpsc::error::TrySendError::Closed(_) => "capture_input_queue_closed",
+                });
+                self.recover_local();
+                false
+            }
         }
     }
 
     fn stop_for_contention(&self) {
+        self.diagnose_recovery("capture_lock_contention");
         self.overflow.store(true, Ordering::Release);
     }
 
@@ -158,6 +198,7 @@ impl Context {
         match try_lock(&self.cursor) {
             Some(cursor) => Some(cursor),
             None => {
+                self.diagnose_recovery("cursor_lock_contention");
                 self.recover_local();
                 None
             }
@@ -385,6 +426,7 @@ fn scroll_phase(event: CGEventRef) -> Option<ScrollPhase> {
 
 fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
     if event_type == kCGEventTapDisabledByTimeout || event_type == kCGEventTapDisabledByUserInput {
+        context.diagnose("tap_reenabled", None, event_type, event);
         // macOS turns off taps it thinks are too slow; turn it back on
         // SAFETY: the tap outlives every callback it delivers
         unsafe { CGEventTapEnable(context.tap, true) };
@@ -439,6 +481,7 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
             if let Some(mut cursor) = try_lock(&context.cursor) {
                 cursor.thaw(None);
             }
+            context.diagnose("physical_input_lock_contention", None, event_type, event);
             control.interrupted.store(true, Ordering::Release);
             control.wake();
             return true;
@@ -447,6 +490,16 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
         let claim = state.physical(control.now());
         drop(state);
         if !was_owner {
+            context.diagnose(
+                if claim.is_some() {
+                    "physical_input_claim"
+                } else {
+                    "physical_input_claim_settling"
+                },
+                claim,
+                event_type,
+                event,
+            );
             control.wake();
             if let Some(mut driver) = try_lock(&context.driver) {
                 driver.reclaim();
@@ -538,10 +591,14 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
             } else {
                 context.stop_for_contention();
             }
-            context.send_stamped(|generation| Message::Reclaim { generation });
+            context.send_stamped(|generation| {
+                context.diagnose("emergency_return_shortcut", Some(generation), event_type, event);
+                Message::Reclaim { generation }
+            });
             false
         }
         Route::Home { at: (x, y) } => {
+            context.diagnose("emergency_return_home", None, event_type, event);
             // SAFETY: plain value
             unsafe { CGWarpMouseCursorPosition(CGPoint { x, y }) };
             false

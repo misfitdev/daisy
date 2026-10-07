@@ -3,6 +3,7 @@
 
 pub mod capture;
 pub mod device;
+pub mod diagnostics;
 mod ffi;
 pub mod inject;
 pub mod install;

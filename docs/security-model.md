@@ -26,6 +26,26 @@ After the handshake, every message is encrypted and authenticated with a per-dir
 
 Before trust negotiation, each side signs the completed Noise handshake hash and its connection role with its Secure Enclave P-256 key. Signatures use ECDSA with SHA-256 and DER encoding. Daisy checks the signature, then requires the device public key to match the key pinned with that peer’s Noise identity. The role prevents reflection and the handshake hash prevents replay on another session. Possession of the Noise private key alone does not authorize a connection.
 
+## Developer diagnostics
+
+Tracing is disabled by default. A same-account client can activate one local
+collector through a mode-0600 Unix socket in Daisy's data directory. The CLI
+creates a new mode-0600 NDJSON file and streams records into it.
+
+The collector requests trace events from supported connected peers only after
+Noise capability negotiation, device proof verification, and normal pairing-pin
+and trust checks. Diagnostic traffic uses the existing encrypted sessions and
+per-direction nonces. Each record is attributed to the authenticated sending key.
+A trusted connected peer can request this system's application traces; the request
+ends when its link ends. No unpaired endpoint or third-party service receives them.
+
+Records and queues are bounded. One diagnostic frame may be unacknowledged per
+link, and input and heartbeat queues take priority. Source and collector loss
+counters expose dropped diagnostics. Capture callbacks enqueue copy-only facts
+without formatting, waiting, or I/O. Added control diagnostics exclude keycodes,
+input payloads, and clipboard contents; traces include public system keys, process
+IDs, connection details, and errors. The normal stderr filter remains independent.
+
 ## Pairing
 
 The handshake tells each side the other's long-term public key, but not whether it belongs to the intended peer. Pairing settles that once:

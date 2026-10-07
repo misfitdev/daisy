@@ -115,6 +115,18 @@ pub enum Message {
     Activity {
         generation: u64,
     },
+    /// Optional, negotiated developer tracing on this authenticated link.
+    TraceControl {
+        enabled: bool,
+    },
+    /// Bounded diagnostic traffic, sent only to a requesting collector.
+    TraceRecord {
+        record: crate::diagnostics::Record,
+    },
+    /// Acknowledges one diagnostic frame, keeping traces out of the input path.
+    TraceAck {
+        sequence: u64,
+    },
 }
 
 /// A clipboard snapshot is its items, each a `Begin`, its `Chunk`s and an
@@ -401,5 +413,39 @@ mod tests {
         let encoded = message.encode().unwrap();
         assert_eq!(encoded[0], 20);
         assert_eq!(Message::decode(&encoded).unwrap(), message);
+    }
+    #[test]
+    fn negotiated_trace_tags_are_appended_and_round_trip() {
+        let record = crate::diagnostics::Record {
+            sequence: 1,
+            unix_ms: 2,
+            elapsed_ms: 3,
+            build: "test".into(),
+            level: "TRACE".into(),
+            target: "daisy::test".into(),
+            fields: Default::default(),
+            dropped_before: 4,
+        };
+        for (tag, message) in [
+            (21, Message::TraceControl { enabled: true }),
+            (22, Message::TraceRecord { record }),
+            (23, Message::TraceAck { sequence: 1 }),
+        ] {
+            let bytes = message.encode().unwrap();
+            // Fixed trace-v1 bytes pin its record fields as well as enum tags.
+            // A changed optional contract needs a new negotiated capability.
+            let golden: &[u8] = match tag {
+                21 => &[21, 1],
+                22 => &[
+                    22, 1, 2, 3, 4, 116, 101, 115, 116, 5, 84, 82, 65, 67, 69, 11, 100, 97, 105, 115, 121, 58, 58, 116,
+                    101, 115, 116, 0, 4,
+                ],
+                23 => &[23, 1],
+                _ => unreachable!(),
+            };
+            assert_eq!(bytes, golden);
+            assert_eq!(bytes[0], tag);
+            assert_eq!(Message::decode(&bytes).unwrap(), message);
+        }
     }
 }

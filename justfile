@@ -8,6 +8,7 @@ build:
 # Run the test suite
 test:
     cargo test
+    python3 tools/test_bundle_signing.py
 
 # Lint and check formatting
 lint:
@@ -73,16 +74,16 @@ bundle:
     timestamp=""
     [ "$identity" = "-" ] || timestamp="--timestamp"
     # hardened runtime now, so notarizing later changes nothing at run time
-    profile_args=()
+    sign_args=(--force --options runtime)
     if [ "$identity" != "-" ]; then
         if [ -z "${DAISY_PROVISIONING_PROFILE:-}" ]; then
             echo "set DAISY_PROVISIONING_PROFILE to a macOS profile authorizing this signing certificate and {{bundle_id}}" >&2
             exit 1
         fi
         python3 macos/prepare-profile.py "$DAISY_PROVISIONING_PROFILE" "{{bundle_id}}" "$identity" "{{app}}" "$icon_work/entitlements.plist"
-        profile_args=(--entitlements "$icon_work/entitlements.plist")
+        sign_args+=(--entitlements "$icon_work/entitlements.plist")
     fi
-    codesign --force --options runtime ${timestamp:+"$timestamp"} "${profile_args[@]}" --sign "$identity" --identifier "{{bundle_id}}" "{{app}}"
+    codesign "${sign_args[@]}" ${timestamp:+"$timestamp"} --sign "$identity" --identifier "{{bundle_id}}" "{{app}}"
     codesign --verify --strict "{{app}}"
     echo "signed {{app}} with $identity"
 

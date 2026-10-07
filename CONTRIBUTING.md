@@ -65,6 +65,91 @@ Tests cover decisions: crossing edges, releasing held keys, recognizing swipes, 
 
 Say in the pull request which macOS versions you tested and which system you were using at each step. Control-Option-Command-Escape takes control back if anything goes wrong.
 
+## Developer trace collection
+
+Run a trace-capable Daisy build on each system you want to inspect. Leave sharing
+running, then attach from a terminal on **one** system:
+
+```bash
+/Applications/Daisy.app/Contents/MacOS/daisy trace --output "$HOME/Desktop/daisy-trace.ndjson"
+```
+
+Use `daisy trace` if the CLI is already on your path. With a custom data folder,
+pass the same `--home` used by the running instance. The output path must be new;
+the command creates a file readable only by your account. Press **Control-C** to
+stop. Closing the terminal or losing the requesting connection also disables its
+trace request. Another connected collector can keep its own request active.
+
+The command dynamically enables Daisy's trace events on this system and every
+supported, connected peer. It collects them through the existing authenticated,
+encrypted mesh connections; no restart or `RUST_LOG` setting is needed. Peers that
+lack trace support keep sharing, and the collector records an update notice for
+them. Their internal logs are unavailable until they run a trace-capable build.
+Normal stderr logging retains its existing filter.
+
+Each NDJSON line identifies its source by the authenticated system key and contains
+the build, event level, target, fields, source wall-clock time (`unix_ms`), monotonic
+elapsed time, and sequence. Control generations correlate ownership decisions
+across systems even when their clocks differ. `dropped_before` counts source or
+link-queue losses; `collector_dropped_before` counts losses at the collector.
+Queues and records are bounded, and input and heartbeats take priority over traces.
+
+For unexpected control returns, look for `sharing transition`, `control claim
+decision`, `local capture decision`, `foreground application changed`, `display
+activity decision`, `display user activity refreshed`, and heartbeat failures.
+Capture decisions distinguish physical-input claims, the emergency-return shortcut,
+and queue or lock recovery. Event-source process IDs and event types help identify
+unexpected generated input. Foreground changes are observations, not proof of what
+caused a control claim. The diagnostics do not record typed keycodes, input payloads,
+or clipboard contents. Review the file before sharing it: it contains system keys,
+process IDs, connection details, and error messages.
+
+
+### Investigate an unexpected control transition
+
+Start [developer trace collection](#developer-trace-collection) on one
+system while the mesh is connected. Reproduce the jump, note the time and which
+system you were using, then stop collection with Control-C. Include both Daisy
+versions if the behavior began after an update, and whether you pressed
+Control-Option-Command-Escape.
+
+The combined file distinguishes edge entry/exit, physical-input claims, emergency
+returns, rejected or stale claims, local capture recovery, foreground-application
+changes, display-activity refreshes, and link failures. A display refresh near a
+jump is a lead to investigate; timing alone does not establish a cause.
+
+### Implementation and validation
+
+Optional `trace-v1` support is exchanged in the authenticated Noise handshake and
+bound into the Secure Enclave proof. The required session protocol stays unchanged.
+Fixed-byte tests pin the optional `trace-v1` encoding as well as its message tags.
+Changing that contract requires a new capability name; keep the existing version
+readable while peers still use it.
+The local command uses a same-account Unix socket and does not open another sharing
+instance. Each requesting link owns a trace lease; collector shutdown sends a
+disable request, and connection loss releases the peer lease. Records are attributed
+using channel keys, rather than any identity in a record.
+
+Control-state snapshots are copied and their decision locks released before any
+trace formatting. Capture treats lock contention as a recovery condition, so
+logging must never extend those critical sections. A regression subscriber checks
+that the capture decision lock is available during transition emission.
+
+The trace layer formats bounded fields into a queue; the event tap enqueues only
+copy-only facts and never formats logs or performs I/O. Separate low-priority
+queues and one outstanding trace-frame credit preserve input and heartbeat
+priority. Acknowledgments must match the outstanding sequence. Late records after
+collection stops are acknowledged and discarded. See the [wire contract](docs/protocol.md#developer-tracing)
+and [trust boundary](docs/security-model.md#developer-diagnostics).
+
+Run `just check` to cover dynamic activation, old/new capability combinations,
+private local attachment, collector shutdown, source attribution, queue saturation,
+loss accounting, and stale acknowledgments. `tests/developer_trace.rs` exercises
+activation and collection over encrypted in-memory connections with no native
+capture or injection. Foreground notifications and captured event origins still
+need observations on the affected systems; unit tests do not establish the cause
+of an intermittent focus or control jump.
+
 ## Code
 
 [AGENTS.md](AGENTS.md) contains the rules that matter most for people and coding agents:

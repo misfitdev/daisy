@@ -64,6 +64,32 @@ impl Version {
     }
 }
 
+// The optional tail is valid UTF-8 and stays within the legacy payload limit.
+// Older readers treat it as part of the display version and never advertise it.
+const TRACE_CAPABILITY: &str = "\0caps=trace-v1";
+
+fn handshake_payload(version: &Version, trace: bool) -> Vec<u8> {
+    let mut payload = version.encode();
+    if trace && version.app.len() + TRACE_CAPABILITY.len() <= MAX_APP_VERSION {
+        payload.extend_from_slice(TRACE_CAPABILITY.as_bytes());
+    }
+    payload
+}
+
+fn decode_handshake_payload(bytes: &[u8]) -> Option<(Version, bool)> {
+    let mut version = Version::decode(bytes)?;
+    let trace = if let Some((app, capabilities)) = version.app.split_once('\0') {
+        let trace = capabilities
+            .strip_prefix("caps=")
+            .is_some_and(|caps| caps.split(',').any(|cap| cap == "trace-v1"));
+        version.app = app.to_owned();
+        trace
+    } else {
+        false
+    };
+    Some((version, trace))
+}
+
 /// Two systems run different protocol versions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mismatch {
@@ -141,6 +167,7 @@ pub struct Channel<S> {
     recv_nonce: u64,
     role: Role,
     remote_key: PublicKey,
+    trace_capable: bool,
     handshake_hash: Vec<u8>,
     remote_device: Option<crate::device::PublicKey>,
     buffer: Vec<u8>,
@@ -168,51 +195,61 @@ where
 {
     /// Run the handshake as the side that opened the connection.
     pub async fn initiate(stream: S, identity: &Identity) -> Result<Self, SessionError> {
-        Self::initiate_as(stream, identity, &Version::this_system()).await
+        Self::initiate_negotiated(stream, identity, &Version::this_system(), true).await
     }
 
     /// Run the handshake as the side that accepted the connection.
     pub async fn respond(stream: S, identity: &Identity) -> Result<Self, SessionError> {
-        Self::respond_as(stream, identity, &Version::this_system()).await
+        Self::respond_negotiated(stream, identity, &Version::this_system(), true).await
     }
 
     // Each side's version rides in its first handshake message. Both are
     // compared only once the handshake has authenticated them, and both
     // sides finish it first, so each can explain the mismatch.
-    async fn initiate_as(mut stream: S, identity: &Identity, local: &Version) -> Result<Self, SessionError> {
+    async fn initiate_negotiated(
+        mut stream: S,
+        identity: &Identity,
+        local: &Version,
+        trace: bool,
+    ) -> Result<Self, SessionError> {
         let mut handshake = builder(identity)?.build_initiator()?;
         let mut buffer = vec![0; MAX_FRAME];
 
         // -> e, with this system's version
-        let len = handshake.write_message(&local.encode(), &mut buffer)?;
+        let len = handshake.write_message(&handshake_payload(local, trace), &mut buffer)?;
         write_frame(&mut stream, &buffer[..len]).await?;
         // <- e, ee, s, es, with the peer's version
         let frame = read_frame(&mut stream).await?;
         let len = handshake.read_message(&frame, &mut buffer).map_err(incompatible)?;
-        let peer = Version::decode(&buffer[..len]);
+        let peer = decode_handshake_payload(&buffer[..len]);
         // -> s, se
         let len = handshake.write_message(&[], &mut buffer)?;
         write_frame(&mut stream, &buffer[..len]).await?;
 
-        Self::finish(stream, handshake, Role::Initiator, buffer, peer, local)
+        Self::finish(stream, handshake, Role::Initiator, buffer, peer, local, trace)
     }
 
-    async fn respond_as(mut stream: S, identity: &Identity, local: &Version) -> Result<Self, SessionError> {
+    async fn respond_negotiated(
+        mut stream: S,
+        identity: &Identity,
+        local: &Version,
+        trace: bool,
+    ) -> Result<Self, SessionError> {
         let mut handshake = builder(identity)?.build_responder()?;
         let mut buffer = vec![0; MAX_FRAME];
 
         // -> e, with the peer's version
         let frame = read_frame(&mut stream).await?;
         let len = handshake.read_message(&frame, &mut buffer)?;
-        let peer = Version::decode(&buffer[..len]);
+        let peer = decode_handshake_payload(&buffer[..len]);
         // <- e, ee, s, es, with this system's version
-        let len = handshake.write_message(&local.encode(), &mut buffer)?;
+        let len = handshake.write_message(&handshake_payload(local, trace), &mut buffer)?;
         write_frame(&mut stream, &buffer[..len]).await?;
         // -> s, se
         let frame = read_frame(&mut stream).await?;
         handshake.read_message(&frame, &mut buffer).map_err(incompatible)?;
 
-        Self::finish(stream, handshake, Role::Responder, buffer, peer, local)
+        Self::finish(stream, handshake, Role::Responder, buffer, peer, local, trace)
     }
 
     fn finish(
@@ -220,14 +257,15 @@ where
         handshake: HandshakeState,
         role: Role,
         buffer: Vec<u8>,
-        peer: Option<Version>,
+        peer: Option<(Version, bool)>,
         local: &Version,
+        trace: bool,
     ) -> Result<Self, SessionError> {
         let remote_key = handshake
             .get_remote_static()
             .and_then(PublicKey::from_bytes)
             .ok_or(SessionError::NoRemoteKey)?;
-        let peer = peer.ok_or(SessionError::Incompatible)?;
+        let (peer, remote_trace) = peer.ok_or(SessionError::Incompatible)?;
         if peer.protocol != local.protocol {
             return Err(SessionError::VersionMismatch(Box::new(Mismatch {
                 peer_key: remote_key,
@@ -244,10 +282,26 @@ where
             recv_nonce: 0,
             role,
             remote_key,
+            trace_capable: trace && remote_trace && local.app.len() + TRACE_CAPABILITY.len() <= MAX_APP_VERSION,
             handshake_hash,
             remote_device: None,
             buffer,
         })
+    }
+
+    /// Optional trace messages are legal only after both authenticated handshake
+    /// payloads advertise support. Device proofs bind this negotiation too.
+    pub fn trace_capable(&self) -> bool {
+        self.trace_capable
+    }
+
+    #[cfg(test)]
+    async fn initiate_as(stream: S, identity: &Identity, local: &Version) -> Result<Self, SessionError> {
+        Self::initiate_negotiated(stream, identity, local, false).await
+    }
+    #[cfg(test)]
+    async fn respond_as(stream: S, identity: &Identity, local: &Version) -> Result<Self, SessionError> {
+        Self::respond_negotiated(stream, identity, local, false).await
     }
 
     pub fn role(&self) -> Role {
@@ -731,5 +785,55 @@ mod tests {
 
         let (result, _stream) = tokio::join!(Channel::initiate(a, &initiator), other_version);
         assert!(matches!(result, Err(SessionError::Incompatible)), "{:?}", result.err());
+    }
+    #[tokio::test]
+    async fn trace_requires_both_authenticated_capability_advertisements() {
+        for (left_trace, right_trace) in [(true, true), (true, false), (false, true), (false, false)] {
+            let (a, b) = tokio::io::duplex(2 * MAX_FRAME);
+            let left = Identity::generate().unwrap();
+            let right = Identity::generate().unwrap();
+            let v = Version::this_system();
+            let (a, b) = tokio::join!(
+                Channel::initiate_negotiated(a, &left, &v, left_trace),
+                Channel::respond_negotiated(b, &right, &v, right_trace)
+            );
+            assert_eq!(a.unwrap().trace_capable(), left_trace && right_trace);
+            assert_eq!(b.unwrap().trace_capable(), left_trace && right_trace);
+        }
+    }
+
+    #[test]
+    fn unknown_capability_tails_preserve_the_peer_version_without_enabling_trace() {
+        let version = Version::this_system();
+        for tail in ["", "future=trace-v1", "caps=trace-v2", "caps="] {
+            let mut payload = version.encode();
+            payload.push(0);
+            payload.extend_from_slice(tail.as_bytes());
+            assert_eq!(
+                decode_handshake_payload(&payload),
+                Some((version.clone(), false)),
+                "capability tail: {tail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trace_extension_remains_readable_by_legacy_version_decoder() {
+        let version = Version::this_system();
+        let payload = handshake_payload(&version, true);
+        let legacy = Version::decode(&payload).unwrap();
+        assert_eq!(legacy.protocol, PROTOCOL);
+        assert!(legacy.app.starts_with(&version.app));
+        assert_eq!(decode_handshake_payload(&payload), Some((version, true)));
+        let plain = Version::this_system().encode();
+        assert_eq!(decode_handshake_payload(&plain), Some((Version::this_system(), false)));
+        let long = Version {
+            protocol: PROTOCOL,
+            app: "a".repeat(MAX_APP_VERSION),
+        };
+        assert_eq!(
+            decode_handshake_payload(&handshake_payload(&long, true)),
+            Some((long, false))
+        );
     }
 }

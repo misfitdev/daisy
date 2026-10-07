@@ -12,7 +12,14 @@ A TCP connection, to port 24850 by default. Every frame is a big-endian `u16` le
 
 Every connection starts a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake in which both sides send their long-term keys. The prologue is `daisy` and never changes.
 
-Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 6. Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
+Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 6. Trace-capable releases optionally append `\0caps=trace-v1` to the release text,
+keeping the entire text within the existing 64-byte limit. Older readers accept
+this UTF-8 payload as display-version text. New readers separate the release from
+the capability list. The tail is authenticated by Noise and bound into the device
+proof; omission means no optional capabilities. If the release text leaves no room,
+no capability is advertised. This does not change the required sharing protocol.
+
+Both sides finish the handshake before comparing, so the versions are authenticated and each side can explain a mismatch. Different releases on the same protocol version connect. Different protocol versions do not: each side names both versions and says which system to update, the one on the lower protocol version.
 
 The handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
 
@@ -47,6 +54,9 @@ Messages are encoded with [postcard](https://github.com/jamesmunns/postcard), wh
 | 18 | `Revoke { revocation }` | any | A system a member no longer trusts, signed by that member, passed on |
 | 19 | `DeviceProof { key, signature }` | both, before Hello | Secure Enclave P-256 proof over the Noise handshake hash and connection role |
 | 20 | `Activity { generation }` | system in control | New physical input; refreshes display activity on every unlocked member, at most once per second |
+| 21 | `TraceControl { enabled }` | collector | Optional `trace-v1` request; enables trace events on this authenticated link until disabled or disconnected |
+| 22 | `TraceRecord { record }` | requested peer | Optional bounded diagnostic record, at most 4 KiB as JSON; accepted only on a negotiated trace link |
+| 23 | `TraceAck { sequence }` | collector | Optional acknowledgment of one trace record; only the outstanding sequence releases send credit |
 
 `generation` is the sender's latest claim. Every member orders claims by `(generation, claimant key)` and keeps the greatest, so all agree on one owner whatever order claims arrive in. A system plays input only from the owner at the current generation, so input queued before a handoff never lands after it.
 
@@ -79,6 +89,26 @@ A snapshot holds a `Text` item, with an `Rtf` item when the copy has rich text, 
 | 6 | `PhasedScroll` | trackpad scrolling: `dx`, `dy` in points and `phase`, below |
 
 `Scroll` carries a scroll without a phase, such as a mouse wheel's. `PhasedScroll` carries a trackpad scroll and the momentum after a flick, so the receiver's apps scroll smoothly, coast and rubber-band. Its `phase` follows the same append-only rule: 0 `MayBegin`, 1 `Began`, 2 `Changed`, 3 `Ended`, 4 `Cancelled`, 5 `MomentumBegan`, 6 `Momentum`, 7 `MomentumEnded`. A scroll and its momentum stay on the system that had control when the fingers went down. The receiver replays a scroll only from its beginning, and ends one still under way when control leaves.
+
+## Developer tracing
+
+Only links where both handshake payloads advertised `trace-v1` may send tags
+21–23. Fixed bytes in the protocol tests pin the trace record layout. A changed
+optional layout requires a new capability version, independently of the required
+sharing protocol. The normal trust and device-pinning checks complete before a link joins the
+sharing group. A collector requests each connected peer directly; diagnostic
+records are never relayed or attributed using an identity supplied in the record.
+The collector labels each record with the authenticated sending key.
+
+Trace queues are separate from input and clipboard queues. Enable requests and
+acknowledgments use separate coalesced slots and consume no input queue capacity. Input and heartbeats
+are selected first. At most one trace frame is unacknowledged per link, and stale
+or duplicate acknowledgments release no additional credit. Saturation drops
+traces with loss counters rather than terminating sharing. Disabling collection
+discards already in-flight records while acknowledging them to drain the stream.
+Dropping the requesting link releases its trace lease; tracing remains enabled
+only if another request or local collector is active. Unsupported peers receive
+none of the optional messages and remain connected normally.
 
 ## A group
 
@@ -114,12 +144,12 @@ and decoding against those bytes. Do not regenerate the fixtures to accommodate
 a wire change. These tests protect the encoding; behavior still needs review
 and decision tests when a change affects another member.
 
-Appending an optional variant is compatible only after both releases can
-negotiate support through an authenticated, backward-compatible exchange.
-Protocol 6 currently has no such exchange. Do not send a newly appended variant
-to a protocol-6 peer or infer its support from its release string or Bonjour
-advertisement. Until negotiation exists, a new transmitted variant requires a
-protocol change. Unknown messages remain errors; silently ignoring control or
+Appending an optional variant is compatible only after both releases negotiate
+support through an authenticated, backward-compatible exchange. Developer tracing
+uses the handshake capability tail described above. Never infer support from a
+release number or Bonjour advertisement, and never send an optional variant unless
+both authenticated payloads advertised its capability. A new required message or
+behavior still requires a protocol change. Unknown messages remain errors; silently ignoring control or
 security messages is unsafe.
 
 There is currently no protocol N−1 bridge. Protocol 5 and 6 remain incompatible;
@@ -152,7 +182,8 @@ Sigstore trust roots, the GitHub Actions issuer, and the exact repository,
 release workflow, tag and artifact digest. Automatic update policies are not
 yet exposed.
 
-- Adding a message or event: append a variant and raise `PROTOCOL` in `src/session.rs` before transmitting it, until authenticated capability negotiation exists. An older peer cannot decode an unknown tag and ends the session.
+- Adding an optional message or event: append a variant and negotiate support through an authenticated, backward-compatible capability exchange before transmitting it. An older peer cannot decode an unknown tag and ends the session.
+- Adding a required message or event: append a variant and raise `PROTOCOL` in `src/session.rs` before transmitting it.
 - Anything that changes the meaning of an existing message, or removes or reorders one: raise `PROTOCOL` in `src/session.rs`, so mismatched peers stop at the handshake and say which to update, rather than misbehave.
 
 A physical event on any member claims ownership with a newer generation, sent to every member. The 150 ms settle window limits repeated claims when members are used together; equal generations favor the greater key. Remote injection is suppressed during local physical activity. When the member in control leaves the group, the others take control back locally. A change of driver preserves the arrangement.
