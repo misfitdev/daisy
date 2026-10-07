@@ -12,7 +12,7 @@ Daisy shares your keyboard, mouse, trackpad and clipboard across macOS systems o
 
 - Arrange up to eight systems, with every display placed to match your desk.
 - Use trackpad swipes for Spaces, Mission Control and app windows.
-- Copy and paste text, rich text and images between systems.
+- Copy and paste text, rich text, images, files and folders between systems.
 
 ## Getting started
 

@@ -127,6 +127,23 @@ pub enum Message {
     TraceAck {
         sequence: u64,
     },
+    /// Optional file offers, negotiated independently of clipboard snapshots.
+    FilesOffer {
+        offer: crate::files::Offer,
+    },
+    /// Releases this destination's lease when its promised clipboard changes.
+    FilesRelease {
+        offer: crate::files::OfferId,
+    },
+    /// First bulk-channel message, after fresh device authentication.
+    FilesRequest {
+        offer: crate::files::OfferId,
+        item: u16,
+    },
+    /// Bulk data only; never sent on an input-sharing link.
+    FilesPart {
+        part: crate::files::Part,
+    },
 }
 
 /// A clipboard snapshot is its items, each a `Begin`, its `Chunk`s and an

@@ -57,6 +57,7 @@ impl fmt::Display for PublicKey {
 }
 
 /// This system's long-term key pair.
+#[derive(Clone)]
 pub struct Identity {
     private: [u8; KEY_LEN],
     public: PublicKey,

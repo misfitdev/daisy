@@ -12,7 +12,7 @@ A TCP connection, to port 24850 by default. Every frame is a big-endian `u16` le
 
 Every connection starts a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake in which both sides send their long-term keys. The prologue is `daisy` and never changes.
 
-Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 6. Trace-capable releases optionally append `\0caps=trace-v1` to the release text,
+Each side carries its version in the payload of its first handshake message: the protocol version as two big-endian bytes, then the Daisy release in UTF-8, at most 64 bytes. Every version must read this layout. The current protocol version is 6. Trace-capable releases optionally append `\0caps=trace-v1,files-v1` to the release text,
 keeping the entire text within the existing 64-byte limit. Older readers accept
 this UTF-8 payload as display-version text. New readers separate the release from
 the capability list. The tail is authenticated by Noise and bound into the device
@@ -109,6 +109,27 @@ discards already in-flight records while acknowledging them to drain the stream.
 Dropping the requesting link releases its trace lease; tracing remains enabled
 only if another request or local collector is active. Unsupported peers receive
 none of the optional messages and remain connected normally.
+
+## Copied files
+
+Only links whose authenticated handshake payloads both advertise `files-v1` use tags 24–27. Existing protocol-6 input and clipboard bytes stay unchanged.
+
+| Tag | Message | Connection | Purpose |
+| --- | --- | --- | --- |
+| 24 | `FilesOffer { offer }` | Input | Random 128-bit offer ID, bulk TCP port, item names, directory flags and content sizes |
+| 25 | `FilesRelease { offer }` | Input | Destination releases its offer lease |
+| 26 | `FilesRequest { offer, item }` | Bulk | Request an offered item by ID and zero-based index |
+| 27 | `FilesPart { part }` | Bulk | Stream entries, contents, extended attributes and completion or failure |
+
+A bulk connection performs a new Noise handshake and device proof. Both pinned keys must match an active input-session member. The receiver connects to that member’s input-session address at the advertised bulk port. The sender accepts one item request per connection, only for an original recipient with a live lease. Unknown, expired, released, superseded and out-of-range requests are rejected; no path or enumeration request exists.
+
+Offers go to all currently connected capable members. Later arrivals receive no earlier offer. Each destination has a 15-second idle lease, refreshed by requests and flowing bytes for that offer. Running transfers survive expiry or replacement, but replacement rejects new requests for the old offer. A clipboard change releases the destination’s lease.
+
+`FilesPart` carries `Entry { path, kind, len, mode, compressed }`, `Data { bytes }`, `DataEnd`, `Attribute { name, len }`, `EntryEnd`, `Finished` or `Failed { reason }`. Paths are relative to the requested item; the first entry has an empty path. Kinds are file, directory or a relative symbolic link. An entry’s content ends at `DataEnd`; each following attribute has its own data stream and terminator, then `EntryEnd`. `Finished` is required before publication.
+
+Offers are bounded to 64 items, 100,000 entries and 4 GiB of contents. Paths are at most 4,096 bytes and 128 components deep. Data chunks are at most 16,000 bytes. Extended attributes are bounded to 64 per entry and 32 MiB per item. Declared and decompressed sizes must agree; the receiver caps the zstd window at 8 MiB. Symbolic-link resolution is checked against the complete item manifest before publication. Streaming zstd applies before encryption, with an independent context per file: level 1 above 64 MiB, otherwise level 3. If the first 64 KiB sample does not shrink, contents are sent uncompressed. Input messages are never compressed.
+
+The native clipboard adapter supplies local file URLs when Finder requests them. It may request them before Paste. A pending native request starts a worker and returns without a file URL. Finder’s Paste action becomes available when all items are cached and Daisy republishes their URLs, provided its offer still owns the clipboard. AppKit keeps servicing progress and cancellation. Files and directories are staged under hidden temporary names and published exclusively after contents and metadata complete; the top-level folder is renamed last. Completed cache entries survive clipboard replacement until the next boot so consumers can finish reading returned URLs.
 
 ## A group
 

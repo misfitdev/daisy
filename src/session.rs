@@ -67,6 +67,27 @@ impl Version {
 // The optional tail is valid UTF-8 and stays within the legacy payload limit.
 // Older readers treat it as part of the display version and never advertise it.
 const TRACE_CAPABILITY: &str = "\0caps=trace-v1";
+const FILE_CAPABILITY: &str = ",files-v1";
+
+fn negotiated_payload(version: &Version, trace: bool) -> Vec<u8> {
+    let mut payload = handshake_payload(version, trace);
+    if trace
+        && crate::file_transfer::supported()
+        && version.app.len() + TRACE_CAPABILITY.len() + FILE_CAPABILITY.len() <= MAX_APP_VERSION
+    {
+        payload.extend_from_slice(FILE_CAPABILITY.as_bytes());
+    }
+    payload
+}
+
+fn advertises_files(bytes: &[u8]) -> bool {
+    Version::decode(bytes).is_some_and(|v| {
+        v.app.split_once('\0').is_some_and(|(_, tail)| {
+            tail.strip_prefix("caps=")
+                .is_some_and(|caps| caps.split(',').any(|cap| cap == "files-v1"))
+        })
+    })
+}
 
 fn handshake_payload(version: &Version, trace: bool) -> Vec<u8> {
     let mut payload = version.encode();
@@ -168,6 +189,7 @@ pub struct Channel<S> {
     role: Role,
     remote_key: PublicKey,
     trace_capable: bool,
+    files_capable: bool,
     handshake_hash: Vec<u8>,
     remote_device: Option<crate::device::PublicKey>,
     buffer: Vec<u8>,
@@ -216,17 +238,27 @@ where
         let mut buffer = vec![0; MAX_FRAME];
 
         // -> e, with this system's version
-        let len = handshake.write_message(&handshake_payload(local, trace), &mut buffer)?;
+        let len = handshake.write_message(&negotiated_payload(local, trace), &mut buffer)?;
         write_frame(&mut stream, &buffer[..len]).await?;
         // <- e, ee, s, es, with the peer's version
         let frame = read_frame(&mut stream).await?;
         let len = handshake.read_message(&frame, &mut buffer).map_err(incompatible)?;
+        let peer_files = advertises_files(&buffer[..len]);
         let peer = decode_handshake_payload(&buffer[..len]);
         // -> s, se
         let len = handshake.write_message(&[], &mut buffer)?;
         write_frame(&mut stream, &buffer[..len]).await?;
 
-        Self::finish(stream, handshake, Role::Initiator, buffer, peer, local, trace)
+        Self::finish(
+            stream,
+            handshake,
+            Role::Initiator,
+            buffer,
+            peer,
+            local,
+            trace,
+            peer_files,
+        )
     }
 
     async fn respond_negotiated(
@@ -241,17 +273,28 @@ where
         // -> e, with the peer's version
         let frame = read_frame(&mut stream).await?;
         let len = handshake.read_message(&frame, &mut buffer)?;
+        let peer_files = advertises_files(&buffer[..len]);
         let peer = decode_handshake_payload(&buffer[..len]);
         // <- e, ee, s, es, with this system's version
-        let len = handshake.write_message(&handshake_payload(local, trace), &mut buffer)?;
+        let len = handshake.write_message(&negotiated_payload(local, trace), &mut buffer)?;
         write_frame(&mut stream, &buffer[..len]).await?;
         // -> s, se
         let frame = read_frame(&mut stream).await?;
         handshake.read_message(&frame, &mut buffer).map_err(incompatible)?;
 
-        Self::finish(stream, handshake, Role::Responder, buffer, peer, local, trace)
+        Self::finish(
+            stream,
+            handshake,
+            Role::Responder,
+            buffer,
+            peer,
+            local,
+            trace,
+            peer_files,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish(
         stream: S,
         handshake: HandshakeState,
@@ -260,6 +303,7 @@ where
         peer: Option<(Version, bool)>,
         local: &Version,
         trace: bool,
+        peer_files: bool,
     ) -> Result<Self, SessionError> {
         let remote_key = handshake
             .get_remote_static()
@@ -283,6 +327,7 @@ where
             role,
             remote_key,
             trace_capable: trace && remote_trace && local.app.len() + TRACE_CAPABILITY.len() <= MAX_APP_VERSION,
+            files_capable: peer_files && advertises_files(&negotiated_payload(local, trace)),
             handshake_hash,
             remote_device: None,
             buffer,
@@ -293,6 +338,14 @@ where
     /// payloads advertise support. Device proofs bind this negotiation too.
     pub fn trace_capable(&self) -> bool {
         self.trace_capable
+    }
+
+    pub fn files_capable(&self) -> bool {
+        self.files_capable
+    }
+
+    pub fn stream(&self) -> &S {
+        &self.stream
     }
 
     #[cfg(test)]
@@ -815,6 +868,21 @@ mod tests {
                 "capability tail: {tail:?}"
             );
         }
+    }
+
+    #[test]
+    fn file_capabilities_do_not_change_the_baseline_or_imply_support_from_trace_alone() {
+        let version = Version::this_system();
+        assert!(!advertises_files(&version.encode()));
+        assert!(!advertises_files(&handshake_payload(&version, true)));
+        let payload = negotiated_payload(&version, true);
+        assert!(advertises_files(&payload));
+        assert_eq!(decode_handshake_payload(&payload), Some((version.clone(), true)));
+        assert_eq!(
+            payload,
+            [version.encode(), b"\0caps=trace-v1,files-v1".to_vec()].concat()
+        );
+        assert!(!advertises_files(&negotiated_payload(&version, false)));
     }
 
     #[test]

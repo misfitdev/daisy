@@ -65,7 +65,7 @@ const controls = [
     rows: [
       ["Connections", "Direct TCP between paired peers only (default port 24850, configurable bind address)"],
       ["Data sent", "System name, public key, pairing and liveness messages, display activity updates, input events, control handoffs, opted-in developer diagnostics, and the clipboard when control crosses (switchable)"],
-      ["Data not sent", "No screen capture or user-file contents"],
+      ["Data not sent", "No screen capture; file contents only for copied items requested from a live offer"],
       ["Release requests", "HTTPS to GitHub for release metadata, archives and attestations; no account or access token"],
       ["Developer diagnostics", "Opt-in traces stream only over negotiated authenticated peer sessions, with bounded queues and input priority; local collector and output are private to the account"],
       ["Third parties", "No peer input or clipboard is sent to third parties. No telemetry, analytics or relays"],

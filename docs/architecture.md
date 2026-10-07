@@ -29,6 +29,7 @@ Each member shares its displays and one agreed arrangement: an offset per member
 | Developer diagnostics | `diagnostics`, `macos::diagnostics` | Dynamic trace requests, bounded event capture and encrypted streaming, local collector socket, foreground observations |
 | Latency | `latency` | Round trips per link from heartbeat pings and pongs: a recent average and percentiles |
 | Clipboard | `clipboard` | What to send when control crosses, echo prevention, chunking and reassembly; `macos::pasteboard` reads and writes the pasteboard |
+| Copied files | `files`, `file_transfer`, `file_cache`, `macos::file_pasteboard` | Offer leases, separately authenticated bulk connections, atomic staging, bounded clipboard cache and native progress |
 | Decisions | `input`, `swipe`, `shake`, `control`, `trust`, `install`, `setup` | Routing, edge crossing, held-input release, swipe pacing, pointer-shake recognition, trust duration, moving to Applications and the permission walkthrough |
 | macOS | `macos::*` | Event tap, event posting, pointer pinning, swipe synthesis, Mission Control shortcuts, permissions and moving the app |
 

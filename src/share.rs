@@ -73,6 +73,7 @@ impl Arranging {
 /// What one system's group shares across all its links: one event tap, one
 /// owner of control and one replay of whoever drives this system.
 pub struct Group {
+    pub files: Option<std::sync::Arc<crate::file_transfer::Hub>>,
     /// This system's displays, in its own coordinates, as they change.
     pub displays: tokio::sync::watch::Receiver<Vec<Rect>>,
     pub control: std::sync::Arc<crate::control::SharedControl>,
@@ -138,6 +139,7 @@ where
         done,
     }));
     let group = Group {
+        files: None,
         displays: tokio::sync::watch::channel(vec![layout.screen]).1,
         control: layout.control,
         choices: layout.arranging.choices,
@@ -167,6 +169,7 @@ where
 
 /// One peer's session within the group.
 struct Link {
+    files_capable: bool,
     trace_capable: bool,
     trace_sent: bool,
     trace_request: crate::diagnostics::Lease,
@@ -212,6 +215,11 @@ where
 {
     let mut until = pin!(until);
     let control = group.control;
+    let files = group.files;
+    let mut file_messages = files.as_ref().map(|files| FileMessages {
+        hub: files.clone(),
+        receiver: Some(files.take_messages()),
+    });
     let mut choices = group.choices;
     let mut displays = group.displays;
     let mut locked = group.locked;
@@ -301,8 +309,10 @@ where
                 Membership::Join(joining) => {
                     let key = joining.channel.remote_key();
                     let trace_capable = joining.channel.trace_capable();
+                    let files_capable = joining.channel.files_capable();
                     let (sender, receiver) = joining.channel.split();
                     let link = Link {
+                        files_capable,
                         trace_capable,
                         trace_sent: false,
                         trace_request: crate::diagnostics::hub().lease(),
@@ -359,6 +369,15 @@ where
         }
         tokio::select! {
             _ = trace.changed.notified() => {},
+            message = receive_file_message(&mut file_messages) => {
+                if let Some(message) = message {
+                    for (key, link) in links.iter().filter(|(_, link)| link.files_capable) {
+                        if let Message::FilesOffer { offer } = &message
+                            && !files.as_ref().is_some_and(|files| files.offered_to(*key, offer.id)) { continue; }
+                        if let Err(error) = link.outgoing.send(message.clone()) { ended.push((*key, Err(error))); }
+                    }
+                }
+            },
             change = membership.recv() => match change {
                 Some(change) => waiting.push_back(change),
                 None => std::future::pending::<()>().await,
@@ -410,7 +429,8 @@ where
                             if let Err(error) = link.outgoing.send(message) {
                                 ended.push((to, Err(error)));
                             } else {
-                                link.outgoing.send_clipboard(sharing.crossing());
+                                if let Some(files) = &files { files.crossing(); }
+                        link.outgoing.send_clipboard(sharing.crossing());
                             }
                         }
                         None => {
@@ -443,6 +463,14 @@ where
                 log_transition("incoming", me, Some(peer), &message, &control);
                 let outcome: Result<()> = (|| {
                     match message {
+                        Message::FilesOffer { offer } => {
+                            anyhow::ensure!(link.files_capable, "file capability was not negotiated");
+                            files.as_ref().context("copied-file service unavailable")?.accept(peer, offer)?;
+                        }
+                        Message::FilesRelease { offer } => {
+                            anyhow::ensure!(link.files_capable, "file capability was not negotiated");
+                            if let Some(files) = &files { files.release(peer, offer); }
+                        }
                         Message::TraceControl { enabled } => {
                             anyhow::ensure!(link.trace_capable, "trace capability was not negotiated");
                             link.trace_request.set(enabled);
@@ -524,7 +552,8 @@ where
                                 pointer.yield_control();
                                 crossed = None;
                                 for action in release.target.reclaim() { release.injector.execute(&action); }
-                                link.outgoing.send_clipboard(sharing.crossing());
+                                if let Some(files) = &files { files.crossing(); }
+                        link.outgoing.send_clipboard(sharing.crossing());
                             }
                         }
                         Message::Leave { generation, to, at } => {
@@ -574,7 +603,8 @@ where
                                     other => release.injector.execute(&other),
                                 }
                             }
-                            if crossing { link.outgoing.send_clipboard(sharing.crossing()); }
+                            if crossing { if let Some(files) = &files { files.crossing(); }
+                        link.outgoing.send_clipboard(sharing.crossing()); }
                         }
                         other => bail!("unexpected message in shared session: {other:?}"),
                     }
@@ -593,7 +623,8 @@ where
                             if let Err(error) = next.outgoing.send(Message::Enter { generation, to, at }) {
                                 ended.push((to, Err(error)));
                             } else {
-                                next.outgoing.send_clipboard(sharing.crossing());
+                                if let Some(files) = &files { files.crossing(); }
+                        next.outgoing.send_clipboard(sharing.crossing());
                             }
                         }
                         None => pointer.leave(None),
@@ -659,6 +690,26 @@ where
                 publish(&control, &links, &group.reports);
             }
         }
+    }
+}
+
+struct FileMessages {
+    hub: std::sync::Arc<crate::file_transfer::Hub>,
+    receiver: Option<mpsc::Receiver<Message>>,
+}
+
+impl Drop for FileMessages {
+    fn drop(&mut self) {
+        if let Some(receiver) = self.receiver.take() {
+            self.hub.put_messages(receiver);
+        }
+    }
+}
+
+async fn receive_file_message(messages: &mut Option<FileMessages>) -> Option<Message> {
+    match messages {
+        Some(messages) => messages.receiver.as_mut().unwrap().recv().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1760,6 +1811,7 @@ mod tests {
 
     fn group(control: &Arc<SharedControl>) -> Group {
         Group {
+            files: None,
             displays: watch::channel(vec![SCREEN]).1,
             control: control.clone(),
             choices: watch::channel(None).1,
