@@ -18,6 +18,27 @@ pub const CHUNK: usize = 16_000;
 pub const MAX_ATTRIBUTES: usize = 64;
 pub const MAX_ATTRIBUTE_BYTES: u64 = 32 << 20;
 
+/// Store-backed trust is refreshed at most this far apart during a transfer.
+pub const TRUST_REFRESH: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+pub struct TrustRefresh(std::cell::Cell<Option<Instant>>);
+
+impl TrustRefresh {
+    pub fn check(&self, now: Instant, verify: impl FnOnce() -> Result<()>) -> Result<()> {
+        if self
+            .0
+            .get()
+            .is_some_and(|last| now.duration_since(last) < TRUST_REFRESH)
+        {
+            return Ok(());
+        }
+        verify()?;
+        self.0.set(Some(now));
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     pub name: String,
@@ -382,5 +403,34 @@ mod tests {
             .into_iter()
             .collect();
         assert!(validate_links(&links).is_err());
+    }
+    #[test]
+    fn transfer_trust_refresh_bounds_reads_and_observes_revocation() {
+        let refresh = TrustRefresh::default();
+        let reads = std::cell::Cell::new(0);
+        let now = Instant::now();
+        let trusted = || {
+            reads.set(reads.get() + 1);
+            Ok(())
+        };
+        for _ in 0..500 {
+            refresh.check(now, trusted).unwrap();
+        }
+        refresh
+            .check(now + TRUST_REFRESH - Duration::from_millis(1), trusted)
+            .unwrap();
+        assert_eq!(reads.get(), 1, "chunk reads must reuse the validated trust result");
+        let revoked = || {
+            reads.set(reads.get() + 1);
+            anyhow::bail!("revoked")
+        };
+        assert!(refresh.check(now + TRUST_REFRESH, revoked).is_err());
+        assert!(
+            refresh.check(now + TRUST_REFRESH, revoked).is_err(),
+            "failed checks must not renew the cache"
+        );
+        assert_eq!(reads.get(), 3);
+        refresh.check(now + TRUST_REFRESH, trusted).unwrap();
+        assert_eq!(reads.get(), 4);
     }
 }

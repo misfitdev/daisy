@@ -22,6 +22,7 @@ use crate::identity::{Identity, PublicKey};
 use crate::protocol::Message;
 use crate::session::Channel;
 
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub fn supported() -> bool {
@@ -107,6 +108,22 @@ pub struct Hub {
     crossing: AtomicBool,
 }
 
+async fn accept_connection<T, F, Fut>(mut accept: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    loop {
+        match accept().await {
+            Ok(connection) => return connection,
+            Err(error) => {
+                tracing::warn!(?error, "copied-file listener accept failed");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
 impl Hub {
     pub fn start(
         identity: Identity,
@@ -150,8 +167,10 @@ impl Hub {
             let mut count = None;
             loop {
                 tokio::select! {
-                    accepted = listener.accept() => {
-                        let Ok((stream, _)) = accepted else { break };
+                    accepted = accept_connection(|| listener.accept()) => {
+                        let (stream, address) = accepted;
+                        let source = address.ip().to_canonical();
+                        if !lock(&running.active).values().any(|(ip, _)| ip.to_canonical() == source) { continue; }
                         let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
                         let hub = running.clone();
                         clients.spawn(async move {
@@ -315,6 +334,15 @@ impl Hub {
     }
 
     fn authenticate(&self, channel: &Channel<TcpStream>, expected: Option<PublicKey>) -> Result<()> {
+        self.authenticate_cached(channel, expected, &files::TrustRefresh::default())
+    }
+
+    fn authenticate_cached(
+        &self,
+        channel: &Channel<TcpStream>,
+        expected: Option<PublicKey>,
+        refresh: &files::TrustRefresh,
+    ) -> Result<()> {
         let key = channel.remote_key();
         ensure!(
             expected.is_none_or(|p| p == key),
@@ -325,21 +353,23 @@ impl Hub {
             *self.enabled.borrow() && lock(&self.active).contains_key(&key),
             "file sharing is not active for this peer"
         );
-        let pinned = self
-            .peers
-            .trusted(&key, crate::trust::now())?
-            .context("file requester is not trusted")?;
-        ensure!(
-            pinned.signing.is_some() && pinned.signing == channel.remote_device(),
-            "bulk connection changed device identity"
-        );
-        Ok(())
+        refresh.check(Instant::now(), || {
+            let pinned = self
+                .peers
+                .trusted(&key, crate::trust::now())?
+                .context("file requester is not trusted")?;
+            ensure!(
+                pinned.signing.is_some() && pinned.signing == channel.remote_device(),
+                "bulk connection changed device identity"
+            );
+            Ok(())
+        })
     }
 
     async fn serve(self: &Arc<Self>, stream: TcpStream) -> Result<()> {
         stream.set_nodelay(true)?;
         let hub = self.clone();
-        let (mut channel, peer) = tokio::time::timeout(TIMEOUT, async move {
+        let (mut channel, peer) = tokio::time::timeout(HANDSHAKE_TIMEOUT, async move {
             let mut channel = Channel::respond(stream, &hub.identity).await?;
             channel.authenticate_device(&hub.signer).await?;
             hub.authenticate(&channel, None)?;
@@ -440,6 +470,7 @@ impl Hub {
                 },
             )?;
             let device = channel.remote_device();
+            let refresh = files::TrustRefresh::default();
             receive_item(&self.runtime, &mut channel, offered, destination, progress, || {
                 ensure!(
                     !observe(progress.done.load(Ordering::Relaxed)),
@@ -451,14 +482,17 @@ impl Hub {
                         && lock(&self.active).contains_key(&remote.peer),
                     "file sharing ended"
                 );
-                let trusted = self
-                    .peers
-                    .trusted(&remote.peer, crate::trust::now())?
-                    .context("file-sharing trust ended")?;
-                ensure!(
-                    trusted.signing == device && device.is_some(),
-                    "file-sharing device identity changed"
-                );
+                refresh.check(Instant::now(), || {
+                    let trusted = self
+                        .peers
+                        .trusted(&remote.peer, crate::trust::now())?
+                        .context("file-sharing trust ended")?;
+                    ensure!(
+                        trusted.signing == device && device.is_some(),
+                        "file-sharing device identity changed"
+                    );
+                    Ok(())
+                })?;
                 *lock(&remote.until) = Instant::now() + files::TTL;
                 Ok(())
             })
@@ -710,10 +744,11 @@ fn send_data(
     peer: PublicKey,
     offer: OfferId,
     mut reader: impl Read,
+    refresh: &files::TrustRefresh,
 ) -> Result<()> {
     let mut buffer = vec![0; files::CHUNK];
     loop {
-        hub.authenticate(channel, Some(peer))?;
+        hub.authenticate_cached(channel, Some(peer), refresh)?;
         let length = reader.read(&mut buffer)?;
         if length == 0 {
             break;
@@ -731,9 +766,10 @@ fn send_data(
 }
 
 fn send_item(hub: &Hub, channel: &mut Channel<TcpStream>, peer: PublicKey, offer: OfferId, root: &Root) -> Result<()> {
+    let refresh = files::TrustRefresh::default();
     let mut attribute_bytes = 0u64;
     for entry in &root.entries {
-        hub.authenticate(channel, Some(peer))?;
+        hub.authenticate_cached(channel, Some(peer), &refresh)?;
         if matches!(entry.kind, Kind::Symlink { .. }) {
             send(
                 &hub.runtime,
@@ -761,7 +797,7 @@ fn send_item(hub: &Hub, channel: &mut Channel<TcpStream>, peer: PublicKey, offer
                         len: bytes.len() as u64,
                     },
                 )?;
-                send_data(hub, channel, peer, offer, bytes.as_slice())?;
+                send_data(hub, channel, peer, offer, bytes.as_slice(), &refresh)?;
             }
         } else {
             let file = opened(&root.file, entry)?;
@@ -795,9 +831,10 @@ fn send_item(hub: &Hub, channel: &mut Channel<TcpStream>, peer: PublicKey, offer
                         peer,
                         offer,
                         zstd::stream::read::Encoder::new(reader, level)?,
+                        &refresh,
                     )?;
                 } else {
-                    send_data(hub, channel, peer, offer, reader)?;
+                    send_data(hub, channel, peer, offer, reader, &refresh)?;
                 }
             } else {
                 send(&hub.runtime, channel, Part::DataEnd)?;
@@ -828,7 +865,7 @@ fn send_item(hub: &Hub, channel: &mut Channel<TcpStream>, peer: PublicKey, offer
                         len: bytes.len() as u64,
                     },
                 )?;
-                send_data(hub, channel, peer, offer, bytes.as_slice())?;
+                send_data(hub, channel, peer, offer, bytes.as_slice(), &refresh)?;
             }
         }
         send(&hub.runtime, channel, Part::EntryEnd)?;
@@ -1924,5 +1961,54 @@ mod tests {
             .into_iter()
             .collect();
         validate_staged_links(folder.path(), &safe).unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn transient_accept_errors_retry_with_backoff() {
+        let started = tokio::time::Instant::now();
+        let mut failures = 2;
+        let accepted = accept_connection(|| {
+            let result = if failures > 0 {
+                failures -= 1;
+                Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+            } else {
+                Ok(7)
+            };
+            std::future::ready(result)
+        })
+        .await;
+        assert_eq!(accepted, 7);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unrelated_addresses_cannot_hold_bulk_slots() {
+        use tokio::io::AsyncReadExt;
+        let pair = pair_at(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+        let mut unrelated = Vec::new();
+        for _ in 0..4 {
+            unrelated.push(TcpStream::connect(("127.0.0.1", pair.source.port)).await.unwrap());
+        }
+        for stream in &mut unrelated {
+            let result = tokio::time::timeout(std::time::Duration::from_secs(1), stream.read(&mut [0; 1]))
+                .await
+                .expect("unrelated address held a bulk slot");
+            assert!(
+                matches!(result, Ok(0))
+                    || matches!(result, Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionReset)
+            );
+        }
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let path = source.path().join("file");
+        fs::write(&path, b"connected member").unwrap();
+        pair.source.offer(vec![path]).unwrap();
+        let remote = remote_offer(&pair.source);
+        let hub = pair.destination.clone();
+        let output = destination.path().join("file");
+        tokio::task::spawn_blocking(move || hub.fetch(&remote, 0, &output, &Progress::default(), |_| false))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(destination.path().join("file")).unwrap(), b"connected member");
     }
 }

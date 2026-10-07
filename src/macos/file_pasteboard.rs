@@ -207,9 +207,9 @@ fn publish_urls(job: &Arc<Job>, folder: &std::path::Path) -> Result<()> {
         !job.progress.cancelled.load(Ordering::Acquire),
         "file transfer cancelled"
     );
-    let mut current = lock(clipboard());
-    let Some(current) = current
-        .as_mut()
+    let mut slot = lock(clipboard());
+    let Some(_) = slot
+        .as_ref()
         .filter(|current| Arc::ptr_eq(&current.job, job) && current.count == count())
     else {
         return Ok(());
@@ -226,7 +226,7 @@ fn publish_urls(job: &Arc<Job>, folder: &std::path::Path) -> Result<()> {
         board.writeObjects(&NSArray::from_retained_slice(&urls)),
         "received files could not be put on the clipboard"
     );
-    current.count = count();
+    slot.take();
     Ok(())
 }
 struct PanelIvars {

@@ -34,13 +34,6 @@ impl Clipboard for Pasteboard {
 
     fn read(&self) -> Option<Content> {
         let board = NSPasteboard::generalPasteboard();
-        // File URLs use lazy file promises instead of a text fallback snapshot.
-        if board
-            .types()
-            .is_some_and(|types| types.iter().any(|t| t.to_string() == "public.file-url"))
-        {
-            return None;
-        }
         // SAFETY: AppKit initialises its pasteboard type constants before any
         // code runs and never changes them.
         let (string, rtf, png, tiff) = unsafe {
@@ -73,6 +66,18 @@ impl Clipboard for Pasteboard {
             concealed,
         };
         (!content.is_empty()).then_some(content)
+    }
+
+    fn read_for_peer(&self, files: bool) -> Option<Content> {
+        if files
+            && super::file_pasteboard::available()
+            && NSPasteboard::generalPasteboard()
+                .types()
+                .is_some_and(|types| types.iter().any(|t| t.to_string() == "public.file-url"))
+        {
+            return None;
+        }
+        self.read()
     }
 
     fn write(&mut self, content: &Content) -> i64 {

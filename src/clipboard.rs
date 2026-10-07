@@ -42,6 +42,11 @@ impl Content {
 pub trait Clipboard: Clone + Send + 'static {
     fn change_count(&self) -> i64;
     fn read(&self) -> Option<Content>;
+    /// A peer that receives native files does not also need their text fallback.
+    fn read_for_peer(&self, _files: bool) -> Option<Content> {
+        self.read()
+    }
+
     /// Replaces the clipboard with `content` and returns the new change count.
     fn write(&mut self, content: &Content) -> i64;
 }
@@ -58,7 +63,7 @@ fn limit(kind: ClipboardKind) -> usize {
 #[derive(Debug, Default)]
 pub struct Outbox {
     next_id: u32,
-    sent: Option<i64>,
+    sent: Option<(i64, bool)>,
     written: Option<i64>,
 }
 
@@ -75,10 +80,14 @@ impl Outbox {
     /// Whether the clipboard at `count` is new; if so, records it as sent and
     /// reserves the ids its items will use.
     fn prepare(&mut self, count: i64) -> Option<u32> {
-        if self.sent == Some(count) || self.written == Some(count) {
+        self.prepare_for_peer(count, false)
+    }
+
+    fn prepare_for_peer(&mut self, count: i64, files: bool) -> Option<u32> {
+        if self.sent == Some((count, files)) || self.written == Some(count) {
             return None;
         }
-        self.sent = Some(count);
+        self.sent = Some((count, files));
         let first = self.next_id;
         self.next_id = self.next_id.wrapping_add(ITEM_KINDS);
         Some(first)
@@ -230,12 +239,21 @@ impl<C: Clipboard> Sharing<C> {
     /// and splitting it into parts, to run off the session loop: a large image
     /// takes long enough to read and convert that input would stall behind it.
     pub fn crossing(&mut self) -> Option<impl FnOnce() -> Vec<ClipboardPart> + Send + 'static> {
+        self.crossing_for_peer(false)
+    }
+
+    pub fn crossing_for_peer(&mut self, files: bool) -> Option<impl FnOnce() -> Vec<ClipboardPart> + Send + 'static> {
         if !*self.enabled.borrow() {
             return None;
         }
-        let first = self.outbox.prepare(self.clipboard.change_count())?;
+        let first = self.outbox.prepare_for_peer(self.clipboard.change_count(), files)?;
         let clipboard = self.clipboard.clone();
-        Some(move || clipboard.read().map(|c| parts(first, &c)).unwrap_or_default())
+        Some(move || {
+            clipboard
+                .read_for_peer(files)
+                .map(|c| parts(first, &c))
+                .unwrap_or_default()
+        })
     }
 
     /// Control has crossed to this system; the peer's clipboard follows.
@@ -275,6 +293,7 @@ mod tests {
     struct Fake {
         count: i64,
         content: Option<Content>,
+        file_text: bool,
     }
 
     impl Fake {
@@ -290,6 +309,9 @@ mod tests {
         }
         fn read(&self) -> Option<Content> {
             self.content.clone()
+        }
+        fn read_for_peer(&self, files: bool) -> Option<Content> {
+            if files && self.file_text { None } else { self.read() }
         }
         fn write(&mut self, content: &Content) -> i64 {
             self.copy(content.clone());
@@ -602,5 +624,22 @@ mod tests {
         // the copy is already counted as sent; running the work later still sends it
         assert!(here.crossing().is_none());
         assert!(!read().is_empty());
+    }
+    #[test]
+    fn file_text_fallback_follows_destination_capability_without_losing_snapshot() {
+        let mut clipboard = Fake {
+            file_text: true,
+            ..Fake::default()
+        };
+        clipboard.copy(text("copied-file.txt"));
+        let (_on, enabled) = watch::channel(true);
+        let mut sharing = Sharing::new(clipboard, enabled);
+        assert!(sharing.crossing_for_peer(true).unwrap()().is_empty());
+        assert_eq!(
+            deliver(sharing.crossing_for_peer(false).unwrap()()),
+            Some(text("copied-file.txt"))
+        );
+        assert!(sharing.crossing_for_peer(false).is_none());
+        assert!(sharing.crossing_for_peer(true).unwrap()().is_empty());
     }
 }

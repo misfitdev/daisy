@@ -430,7 +430,7 @@ where
                                 ended.push((to, Err(error)));
                             } else {
                                 if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing());
+                        link.outgoing.send_clipboard(sharing.crossing_for_peer(link.files_capable && files.is_some()));
                             }
                         }
                         None => {
@@ -465,7 +465,12 @@ where
                     match message {
                         Message::FilesOffer { offer } => {
                             anyhow::ensure!(link.files_capable, "file capability was not negotiated");
-                            files.as_ref().context("copied-file service unavailable")?.accept(peer, offer)?;
+                            let id = offer.id;
+                            let accepted = files.as_ref().context("copied-file service unavailable").and_then(|files| files.accept(peer, offer));
+                            if let Err(error) = accepted {
+                                tracing::warn!(peer = %peer, error = format!("{error:#}"), "copied-file offer refused");
+                                link.outgoing.send(Message::FilesRelease { offer: id })?;
+                            }
                         }
                         Message::FilesRelease { offer } => {
                             anyhow::ensure!(link.files_capable, "file capability was not negotiated");
@@ -553,7 +558,7 @@ where
                                 crossed = None;
                                 for action in release.target.reclaim() { release.injector.execute(&action); }
                                 if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing());
+                        link.outgoing.send_clipboard(sharing.crossing_for_peer(link.files_capable && files.is_some()));
                             }
                         }
                         Message::Leave { generation, to, at } => {
@@ -604,7 +609,7 @@ where
                                 }
                             }
                             if crossing { if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing()); }
+                        link.outgoing.send_clipboard(sharing.crossing_for_peer(link.files_capable && files.is_some())); }
                         }
                         other => bail!("unexpected message in shared session: {other:?}"),
                     }
@@ -624,7 +629,7 @@ where
                                 ended.push((to, Err(error)));
                             } else {
                                 if let Some(files) = &files { files.crossing(); }
-                        next.outgoing.send_clipboard(sharing.crossing());
+                        next.outgoing.send_clipboard(sharing.crossing_for_peer(next.files_capable && files.is_some()));
                             }
                         }
                         None => pointer.leave(None),
@@ -3458,5 +3463,62 @@ mod tests {
             );
         });
         assert_eq!(emitted.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+    #[tokio::test]
+    async fn unavailable_file_service_releases_offer_and_keeps_input_link_alive() {
+        for service_available in [false, true] {
+            let (control, _members, mut membership, mut far, _ended, _keys) = group_of(1, None).await;
+            let (_capture, input) = mpsc::channel(16);
+            let (mut pointer, mut injector, mut board) = (Returned::default(), Recorded::default(), no_clipboard());
+            let home = tempfile::tempdir().unwrap();
+            let (_enabled, enabled) = watch::channel(true);
+            let (hub, task) = crate::file_transfer::Hub::start(
+                Identity::generate().unwrap(),
+                crate::device::Signer::generate().unwrap(),
+                crate::peers::PeerStore::open(home.path()).unwrap(),
+                enabled,
+            )
+            .unwrap();
+            let mut configuration = group(&control);
+            if service_available {
+                configuration.files = Some(hub);
+            }
+            let run = run(
+                configuration,
+                VecDeque::new(),
+                &mut membership,
+                input,
+                &mut pointer,
+                &mut injector,
+                &mut board,
+                pending(),
+            );
+            let script = async {
+                let peer = &mut far[0];
+                assert!(matches!(next(peer).await, Message::ControlState { .. }));
+                peer.send(&Message::FilesOffer {
+                    offer: crate::files::Offer {
+                        id: [42; 16],
+                        port: if service_available { 0 } else { 1234 },
+                        items: vec![crate::files::Item {
+                            name: "copied".into(),
+                            directory: false,
+                            bytes: 1,
+                        }],
+                    },
+                })
+                .await
+                .unwrap();
+                assert_eq!(next(peer).await, Message::FilesRelease { offer: [42; 16] });
+                peer.send(&Message::Ping { nonce: 123 }).await.unwrap();
+                assert_eq!(next(peer).await, Message::Pong { nonce: 123 });
+            };
+            tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! { () = script => {}, result = run => panic!("file offer ended input sharing: {result:?}") }
+        })
+        .await
+        .unwrap();
+            task.abort();
+        }
     }
 }
