@@ -122,8 +122,8 @@ from the installed app:
 Daisy verifies the release and its compatibility before stopping the running
 copy. It then restarts with your device identity, paired trust, settings and
 screen arrangement retained. If startup fails, it restores the previous copy.
-The installed app folder must be writable by your account. Choose how updates install under **Updates** in Advanced settings: **Ask before installing**,
-**Auto-install routine updates**, which skips releases that could break compatibility with peers, or **Auto-install every update**. **Check Now** looks for a release immediately. The installer
+The installed app folder must be writable by your account. Under **Updates** in Advanced settings, **Check for updates automatically** is on by default and checks every six hours. While it is on, choose what happens when a release is found: **Ask before installing**,
+**Auto-install routine updates**, which skips releases that could break compatibility with peers, or **Auto-install every update**. Turn it off and Daisy checks only when you click **Check Now**, and installs nothing on its own. While a check runs, the line under the menu reads **Checking**; afterwards it shows what Daisy found and how long ago it last checked successfully, such as "Checked 5 minutes ago". Daisy remembers that time across restarts. The installer
 checks signed compatibility metadata against this system and every connected
 peer before replacing Daisy. Offline peers do not block an update and may need
 to update Daisy before reconnecting. If an incompatible peer disconnects,

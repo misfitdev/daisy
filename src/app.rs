@@ -104,6 +104,13 @@ struct AppDelegateIvars {
     /// Counts toward refreshing peer expiry captions, which otherwise only
     /// change in response to a peer or link event.
     expiry_poll_ticks: Cell<u16>,
+    /// The last successful update check, and whether one is running or the
+    /// latest failed.
+    update_last: RefCell<Option<crate::update::LastCheck>>,
+    update_checking: Cell<bool>,
+    update_failed: Cell<bool>,
+    /// Advances the Checking… animation, one step per poll tick.
+    checking_ticks: Cell<usize>,
 }
 
 define_class!(
@@ -204,6 +211,10 @@ define_class!(
             } else {
                 self.ivars().permission_poll_ticks.set(ticks);
             }
+            if self.ivars().update_checking.get() {
+                self.ivars().checking_ticks.set(self.ivars().checking_ticks.get() + 1);
+                self.refresh_update_status();
+            }
             // 0.1s per tick; expiry captions only need minute-level freshness
             const EXPIRY_REFRESH_TICKS: u16 = 600;
             let main_open = self.ivars().main.get().is_some_and(|views| views.window.isVisible());
@@ -212,6 +223,7 @@ define_class!(
                 if expiry_ticks >= EXPIRY_REFRESH_TICKS {
                     self.ivars().expiry_poll_ticks.set(0);
                     self.rebuild_peers_list();
+                    self.refresh_update_status();
                 } else {
                     self.ivars().expiry_poll_ticks.set(expiry_ticks);
                 }
@@ -399,7 +411,21 @@ define_class!(
 
     #[unsafe(method(checkForUpdatesNow:))]
     fn check_for_updates_now(&self, _sender: Option<&AnyObject>) {
+        self.ivars().update_checking.set(true);
+        self.ivars().checking_ticks.set(0);
+        self.refresh_update_status();
         let _ = self.ivars().controller.send(Command::CheckUpdatesNow);
+    }
+
+    #[unsafe(method(toggleCheckUpdates:))]
+    fn toggle_check_updates(&self, _sender: Option<&AnyObject>) {
+        let on = {
+            let mut settings = self.ivars().settings.borrow_mut();
+            settings.check_updates = !settings.check_updates;
+            settings.check_updates
+        };
+        let _ = self.ivars().controller.send(Command::SetCheckUpdates(on));
+        self.refresh_update_policy();
     }
 
     #[unsafe(method(toggleShareClipboard:))]
@@ -600,6 +626,10 @@ impl AppDelegate {
             setup_asked: Cell::new(false),
             permission_poll_ticks: Cell::new(0),
             expiry_poll_ticks: Cell::new(0),
+            update_last: RefCell::new(None),
+            update_checking: Cell::new(false),
+            update_failed: Cell::new(false),
+            checking_ticks: Cell::new(0),
         });
         // SAFETY: NSObject's initializer has no additional requirements.
         unsafe { msg_send![super(this), init] }
@@ -806,6 +836,7 @@ impl AppDelegate {
         self.refresh_launch_at_login();
         self.refresh_share_clipboard();
         self.refresh_update_policy();
+        self.refresh_update_status();
         self.rebuild_peers_list();
         self.render_status();
     }
@@ -901,6 +932,15 @@ impl AppDelegate {
                 {
                     panel.show(panel::State::Mismatch, false);
                 }
+            }
+            Event::UpdateCheck { checking, failed, last } => {
+                if checking && !self.ivars().update_checking.get() {
+                    self.ivars().checking_ticks.set(0);
+                }
+                self.ivars().update_checking.set(checking);
+                self.ivars().update_failed.set(failed);
+                *self.ivars().update_last.borrow_mut() = last;
+                self.refresh_update_status();
             }
             Event::Notice { title, detail } => {
                 self.show_alert(&title, &detail, NSAlertStyle::Informational);
@@ -1215,15 +1255,41 @@ impl AppDelegate {
         }
     }
 
+    fn refresh_update_status(&self) {
+        let Some(views) = self.ivars().advanced.get() else {
+            return;
+        };
+        let checking = self.ivars().update_checking.get();
+        // 0.1s poll ticks; a dot every 0.4s
+        let text = if checking {
+            crate::update::checking_line(self.ivars().checking_ticks.get() / 4)
+        } else {
+            let now = crate::trust::now();
+            crate::update::status_line(
+                self.ivars().update_last.borrow().as_ref(),
+                self.ivars().update_failed.get(),
+                |at| format_ago(at, now),
+            )
+        };
+        views.update_status.setStringValue(&NSString::from_str(&text));
+        views.check_now.setEnabled(!checking);
+    }
+
     fn refresh_update_policy(&self) {
         if let Some(views) = self.ivars().advanced.get() {
+            let automatic = self.ivars().settings.borrow().check_updates;
+            views.check_updates.set_on(automatic);
+            views.update_policy.setEnabled(automatic);
             let policy = self.ivars().settings.borrow().update_policy;
             if let Some(index) = crate::update::ORDER.iter().position(|candidate| *candidate == policy) {
                 views.update_policy.selectItemAtIndex(index as isize);
             }
-            views
-                .update_caption
-                .setStringValue(&NSString::from_str(policy.caption()));
+            let caption = if automatic {
+                policy.caption()
+            } else {
+                "Daisy checks only when you click Check Now."
+            };
+            views.update_caption.setStringValue(&NSString::from_str(caption));
         }
     }
 
@@ -1364,6 +1430,23 @@ fn expiry_caption(expiry: crate::trust::Expiry) -> String {
         Expiry::SessionEnd => "Until this session ends".to_owned(),
         Expiry::RenewsWhileConnected => "Renews while connected".to_owned(),
     }
+}
+
+/// A past time relative to `now`, such as "5 minutes ago" or "yesterday".
+fn format_ago(at: crate::trust::Timestamp, now: crate::trust::Timestamp) -> String {
+    // the line refreshes once a minute, so seconds would go stale
+    if now.saturating_sub(at) < 60 {
+        return "just now".to_owned();
+    }
+    let formatter = objc2_foundation::NSRelativeDateTimeFormatter::new();
+    formatter.setDateTimeStyle(objc2_foundation::NSRelativeDateTimeFormatterStyle::Named);
+    formatter.setUnitsStyle(objc2_foundation::NSRelativeDateTimeFormatterUnitsStyle::Full);
+    formatter
+        .localizedStringForDate_relativeToDate(
+            &NSDate::dateWithTimeIntervalSince1970(at as f64),
+            &NSDate::dateWithTimeIntervalSince1970(now as f64),
+        )
+        .to_string()
 }
 
 fn format_timestamp(at: crate::trust::Timestamp) -> String {

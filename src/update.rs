@@ -197,31 +197,143 @@ pub fn check(repository: &str) -> Result<Vec<Release>> {
         .context("reading the releases feed")
 }
 
-/// Checks for a newer release every `interval`, starting immediately, and
-/// publishes the newest one found. A failed check is logged and leaves the
-/// last successful result in place rather than clearing it.
+/// The result of one check of the releases feed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked {
+    /// The newest release, when it is newer than this one.
+    Found(Option<Release>),
+    Failed,
+}
+
+/// Progress of the update checker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckEvent {
+    Started,
+    Finished(Checked),
+}
+
+/// The last successful check, kept across launches so the Updates panel can
+/// say when Daisy last looked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastCheck {
+    pub at: crate::trust::Timestamp,
+    /// The newer release found then, if any.
+    pub available: Option<String>,
+}
+
+impl LastCheck {
+    pub fn of(found: Option<&Release>, at: crate::trust::Timestamp) -> Self {
+        Self {
+            at,
+            available: found.map(|release| release.tag_name.trim_start_matches('v').to_owned()),
+        }
+    }
+}
+
+const LAST_CHECK_FILE: &str = "last-update-check.toml";
+
+/// The record of the last successful check in `home`, if there is one.
+pub fn load_last_check(home: &std::path::Path) -> Option<LastCheck> {
+    let text = std::fs::read_to_string(home.join(LAST_CHECK_FILE)).ok()?;
+    toml::from_str(&text).ok()
+}
+
+pub fn save_last_check(home: &std::path::Path, last: &LastCheck) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = home.join(LAST_CHECK_FILE);
+    let temporary = path.with_extension("tmp");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)
+        .with_context(|| format!("creating {}", temporary.display()))?;
+    file.write_all(toml::to_string(last)?.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, &path).with_context(|| format!("saving {}", path.display()))
+}
+
+/// The gray status line in the Updates panel. `ago` renders a past time
+/// relative to now, such as "5 minutes ago" or "yesterday".
+pub fn status_line(last: Option<&LastCheck>, failed: bool, ago: impl Fn(crate::trust::Timestamp) -> String) -> String {
+    match (last, failed) {
+        (None, false) => "Not checked yet.".to_owned(),
+        (None, true) => "Could not check for updates.".to_owned(),
+        (Some(last), true) => format!("Could not check for updates. Last checked {}.", ago(last.at)),
+        (Some(last), false) => match &last.available {
+            None => format!("Daisy is up to date. Checked {}.", ago(last.at)),
+            Some(version) => format!("Daisy {version} is available. Checked {}.", ago(last.at)),
+        },
+    }
+}
+
+/// The animated "Checking" line: no dots, then one, two and three, repeating.
+pub fn checking_line(step: usize) -> String {
+    format!("Checking{}", ".".repeat(step % 4))
+}
+
+/// Checks the releases feed when `recheck` is notified and, while
+/// `automatic` is on, at start and every `interval`; turning `automatic` on
+/// checks immediately. Each check is announced as it starts and finishes,
+/// including failures.
 pub fn watch(
     repository: &'static str,
     current: Version,
     interval: Duration,
+    automatic: watch::Receiver<bool>,
     recheck: std::sync::Arc<tokio::sync::Notify>,
-) -> watch::Receiver<Option<Release>> {
-    let (sender, receiver) = watch::channel(None);
+) -> tokio::sync::mpsc::UnboundedReceiver<CheckEvent> {
+    watch_with(move || check(repository), current, interval, automatic, recheck)
+}
+
+fn watch_with(
+    fetch: impl Fn() -> Result<Vec<Release>> + Clone + Send + 'static,
+    current: Version,
+    interval: Duration,
+    mut automatic: watch::Receiver<bool>,
+    recheck: std::sync::Arc<tokio::sync::Notify>,
+) -> tokio::sync::mpsc::UnboundedReceiver<CheckEvent> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
+        let mut on = *automatic.borrow_and_update();
+        let mut due = on;
         loop {
-            let current = current.clone();
-            match tokio::task::spawn_blocking(move || check(repository)).await {
-                Ok(Ok(releases)) => {
-                    if let Some(release) = newer_release(&current, &releases) {
-                        sender.send_replace(Some(release));
+            if !due {
+                tokio::select! {
+                    () = tokio::time::sleep(interval), if on => {}
+                    () = recheck.notified() => {}
+                    changed = automatic.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        let now = *automatic.borrow_and_update();
+                        due = now && !on;
+                        on = now;
+                        continue;
                     }
                 }
-                Ok(Err(error)) => tracing::warn!(error = ?error, "could not check for updates"),
-                Err(error) => tracing::warn!(error = ?error, "update check task failed"),
             }
-            tokio::select! {
-                () = tokio::time::sleep(interval) => {}
-                () = recheck.notified() => {}
+            due = false;
+            if sender.send(CheckEvent::Started).is_err() {
+                return;
+            }
+            let current = current.clone();
+            let fetch = fetch.clone();
+            let checked = match tokio::task::spawn_blocking(fetch).await {
+                Ok(Ok(releases)) => Checked::Found(newer_release(&current, &releases)),
+                Ok(Err(error)) => {
+                    tracing::warn!(error = ?error, "could not check for updates");
+                    Checked::Failed
+                }
+                Err(error) => {
+                    tracing::warn!(error = ?error, "update check task failed");
+                    Checked::Failed
+                }
+            };
+            if sender.send(CheckEvent::Finished(checked)).is_err() {
+                return;
             }
         }
     });
@@ -231,6 +343,95 @@ pub fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn checks_follow_the_automatic_switch_and_check_now() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let fetch = move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        };
+        let hour = Duration::from_secs(3600);
+        let (switch, automatic) = watch::channel(false);
+        let recheck = Arc::new(tokio::sync::Notify::new());
+        let mut results = watch_with(fetch, Version::new(1, 0, 0), hour, automatic, recheck.clone());
+
+        tokio::time::sleep(3 * hour).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "off means no scheduled checks");
+
+        recheck.notify_one();
+        assert_eq!(
+            results.recv().await,
+            Some(CheckEvent::Started),
+            "a check announces that it started"
+        );
+        assert_eq!(
+            results.recv().await,
+            Some(CheckEvent::Finished(Checked::Found(None))),
+            "Check Now reports its result"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        switch.send_replace(true);
+        results.recv().await.unwrap();
+        results.recv().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "turning on checks immediately");
+        tokio::time::sleep(hour).await;
+        results.recv().await.unwrap();
+        results.recv().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "on checks every interval");
+    }
+
+    #[test]
+    fn status_line_says_what_was_found_and_when() {
+        let ago = |at: u64| format!("at {at}");
+        assert_eq!(status_line(None, false, ago), "Not checked yet.");
+        assert_eq!(status_line(None, true, ago), "Could not check for updates.");
+        let current = LastCheck { at: 5, available: None };
+        assert_eq!(
+            status_line(Some(&current), false, ago),
+            "Daisy is up to date. Checked at 5."
+        );
+        assert_eq!(
+            status_line(Some(&current), true, ago),
+            "Could not check for updates. Last checked at 5."
+        );
+        let release = Release {
+            tag_name: "v0.9.0".to_owned(),
+            html_url: String::new(),
+            draft: false,
+            prerelease: false,
+        };
+        let newer = LastCheck::of(Some(&release), 7);
+        assert_eq!(
+            status_line(Some(&newer), false, ago),
+            "Daisy 0.9.0 is available. Checked at 7."
+        );
+    }
+
+    #[test]
+    fn checking_line_grows_then_starts_over() {
+        let lines: Vec<String> = (0..5).map(checking_line).collect();
+        assert_eq!(
+            lines,
+            ["Checking", "Checking.", "Checking..", "Checking...", "Checking"]
+        );
+    }
+
+    #[test]
+    fn last_check_survives_a_restart() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(load_last_check(home.path()), None);
+        let last = LastCheck {
+            at: 1_791_000_000,
+            available: Some("0.9.0".to_owned()),
+        };
+        save_last_check(home.path(), &last).unwrap();
+        assert_eq!(load_last_check(home.path()), Some(last));
+    }
 
     #[test]
     fn automatic_update_policies_follow_semver_boundaries() {

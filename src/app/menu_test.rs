@@ -62,6 +62,7 @@ pub(super) fn run() {
     unsafe { app.endModalSession(session) };
 
     peer_row_dialogs_are_sheets(mtm, &target, home.path());
+    update_controls_report_and_follow_the_switch(mtm, &target);
 }
 
 /// An app-modal alert from a peer row can end up off screen while it holds
@@ -201,4 +202,67 @@ fn has_text(view: &objc2_app_kit::NSView, text: &str) -> bool {
             .is_some_and(|field| !field.isHidden() && field.stringValue().to_string() == text)
             || has_text(&child, text)
     })
+}
+
+/// Check Now must show that it is working and what it found, and turning
+/// off automatic checks must disable the policy menu.
+fn update_controls_report_and_follow_the_switch(mtm: objc2_foundation::MainThreadMarker, target: &super::AppDelegate) {
+    use objc2::{DefinedClass, sel};
+    use objc2_app_kit::NSApplication;
+
+    target
+        .ivars()
+        .advanced
+        .set(super::window::AdvancedViews::new(mtm, target))
+        .ok()
+        .expect("the test sets the Advanced sheet once");
+    target.refresh_update_policy();
+    let views = target.ivars().advanced.get().unwrap();
+    let app = NSApplication::sharedApplication(mtm);
+    assert!(
+        views.update_policy.isEnabled(),
+        "the menu is enabled while checks are automatic"
+    );
+
+    // SAFETY: Daisy implements these actions with an optional sender.
+    assert!(unsafe { app.sendAction_to_from(sel!(toggleCheckUpdates:), Some(target), None) });
+    assert!(
+        !views.update_policy.isEnabled(),
+        "turning automatic checks off disables the menu"
+    );
+    // SAFETY: as above.
+    assert!(unsafe { app.sendAction_to_from(sel!(toggleCheckUpdates:), Some(target), None) });
+    assert!(views.update_policy.isEnabled(), "turning them back on enables it");
+
+    // SAFETY: as above.
+    assert!(unsafe { app.sendAction_to_from(sel!(checkForUpdatesNow:), Some(target), None) });
+    let status = || views.update_status.stringValue().to_string();
+    assert_eq!(status(), "Checking", "Check Now shows that it started");
+    assert!(!views.check_now.isEnabled(), "Check Now waits for the running check");
+    target.ivars().checking_ticks.set(4 * 2);
+    target.refresh_update_status();
+    assert_eq!(status(), "Checking..", "the dots grow while the check runs");
+
+    let at = crate::trust::now() - 5 * 60;
+    target.handle_event(crate::controller::Event::UpdateCheck {
+        checking: false,
+        failed: false,
+        last: Some(crate::update::LastCheck { at, available: None }),
+    });
+    assert!(
+        status().starts_with("Daisy is up to date. Checked ") && !status().contains("just now"),
+        "the result says how long ago the check ran, got {:?}",
+        status()
+    );
+    target.handle_event(crate::controller::Event::UpdateCheck {
+        checking: false,
+        failed: true,
+        last: Some(crate::update::LastCheck { at, available: None }),
+    });
+    assert!(
+        status().starts_with("Could not check for updates. Last checked "),
+        "a failed check keeps the last good time, got {:?}",
+        status()
+    );
+    assert!(views.check_now.isEnabled(), "Check Now is available again");
 }
