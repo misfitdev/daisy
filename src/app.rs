@@ -33,12 +33,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionKey, NSAboutPanelOptionVersion, NSAccessibility, NSAlert,
     NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSButton, NSColor, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSPopUpButton, NSSquareStatusItemLength,
-    NSStatusBar, NSStatusItem, NSWindow, NSWindowDelegate, NSWorkspace,
+    NSButton, NSColor, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSModalResponse, NSPopUpButton,
+    NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSWindow, NSWindowDelegate, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSDate, NSDateFormatter, NSDateFormatterStyle, NSDictionary, NSNotification, NSObject,
@@ -459,6 +459,9 @@ define_class!(
             else {
                 return;
             };
+            let Some(window) = sender.window() else {
+                return;
+            };
             let alert = NSAlert::new(self.mtm());
             alert.setMessageText(&NSString::from_str(&format!("Forget {}?", peer.name)));
             alert.setInformativeText(&NSString::from_str(
@@ -467,11 +470,15 @@ define_class!(
             alert.setAlertStyle(NSAlertStyle::Informational);
             alert.addButtonWithTitle(&NSString::from_str("Forget Peer"));
             alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-            if alert.runModal() == NSAlertFirstButtonReturn {
-                let _ = self.ivars().controller.send(Command::Forget {
-                    selector: peer.key.to_hex(),
-                });
-            }
+            let this = self.retain();
+            let handler = block2::RcBlock::new(move |response: NSModalResponse| {
+                if response == NSAlertFirstButtonReturn {
+                    let _ = this.ivars().controller.send(Command::Forget {
+                        selector: peer.key.to_hex(),
+                    });
+                }
+            });
+            alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
         }
 
         #[unsafe(method(changeTrust:))]
@@ -482,20 +489,24 @@ define_class!(
             else {
                 return;
             };
-            let chosen = trust_form::ask(
-                self.mtm(),
-                self,
-                &format!("Remember {} until?", peer.name),
-                "Save",
-                Some("Cancel"),
+            let Some(window) = sender.window() else {
+                return;
+            };
+            let this = self.retain();
+            let key = peer.key;
+            trust_form::present(
+                &window,
+                Retained::into_super(self.retain()),
+                format!("Remember {} until?", peer.name).into(),
                 peer.policy,
+                crate::trust::Choice::of(peer.policy),
+                std::rc::Rc::new(move |policy| {
+                    let _ = this.ivars().controller.send(Command::SetTrust {
+                        selector: key.to_hex(),
+                        policy,
+                    });
+                }),
             );
-            if let Some(chosen) = chosen.filter(|chosen| *chosen != peer.policy) {
-                let _ = self.ivars().controller.send(Command::SetTrust {
-                    selector: peer.key.to_hex(),
-                    policy: chosen,
-                });
-            }
         }
 
         // Radio buttons need a shared action to act as one group.
