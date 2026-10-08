@@ -15,7 +15,7 @@ just              # list the tasks
 
 ## Build and run a local app
 
-Running the app or CLI with a persistent device identity requires a signed `Daisy.app` with an embedded provisioning profile for `dev.misfit.daisy`. Set `DAISY_PROVISIONING_PROFILE` to the profile’s path. `just app` defaults to a Developer ID Application certificate; set `DAISY_SIGN_IDENTITY` to select another certificate authorized by the profile. See [release setup](docs/releasing.md#one-time-setup) for the profile requirements. Unlock this system before creating or rotating its device key.
+Running the app or CLI with a persistent device identity requires a signed `Daisy.app` with an embedded provisioning profile for `dev.misfit.daisy`. Set `DAISY_PROVISIONING_PROFILE` to the profile’s path. With the profile set, `just app` defaults to a Developer ID Application certificate; set `DAISY_SIGN_IDENTITY` to select another certificate authorized by the profile. See [release setup](docs/releasing.md#one-time-setup) for the profile requirements. Unlock this system before creating or rotating its device key.
 
 ```bash
 export DAISY_PROVISIONING_PROFILE=/path/to/Daisy.provisioningprofile
@@ -26,7 +26,7 @@ just app
 
 Without `DAISY_PROVISIONING_PROFILE`, `just app` signs ad hoc. An ad hoc bundle exercises the interface, but cannot create the persistent Keychain device identity.
 
-To try the interface without permissions or pairing, run `just dev`. It starts an ad hoc `Daisy.app` on a throwaway data folder with sample peers, so buttons such as **Remember until…** and the trash can change only that copy. Close Set Up Daisy and choose **Open Daisy** from the menu bar.
+To try the interface without permissions or pairing, run `just dev`. It starts an ad hoc `Daisy.app` on a throwaway data folder with sample peers, so buttons such as **Remember until…** change only that copy. Close Set Up Daisy and choose **Open Daisy** from the menu bar. Forgetting a peer signs a revocation with the device identity, so in this build it reports that the peer could not be forgotten and keeps it.
 
 ## Check a change
 

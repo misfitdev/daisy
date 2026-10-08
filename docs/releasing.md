@@ -133,8 +133,8 @@ python3 tools/homebrew-cask.py target/dist/Daisy-0.6.0-macos-arm64.dmg target/di
 Homebrew's livecheck still watches for new stable releases for its own
 metadata, but `update-homebrew` is what actually advances the pinned version
 and SHA-256 in the tap.
-Advanced settings offers three update policies: notify only, install all stable
-updates, or install minor and patch updates. Protocol-changing installs require
+Advanced settings offers three update policies: ask before installing,
+auto-install routine updates (the same major version), or auto-install every update. Protocol-changing installs require
 signed compatibility metadata that supports this system and every currently
 connected peer. Offline peers do not block installation and may need Daisy
 updated before reconnecting. If an incompatible active peer disconnects,

@@ -10,6 +10,7 @@ events for swipes. Read this before changing anything.
 just              # list recipes
 just check        # clippy -D warnings, rustfmt --check, cargo test
 just app <args>   # build, sign and run Daisy.app
+just dev          # run an ad hoc Daisy.app on throwaway sample peers
 just screenshot   # redraw the website's window screenshot after UI changes
 just package      # create the release zip and DMG; notarize when credentials are set
 ```
@@ -23,9 +24,12 @@ is a separate action from generating the release recipe. See `docs/releasing.md`
 
 Running the app or CLI with a persistent device identity requires an embedded
 provisioning profile for `dev.misfit.daisy`. Set `DAISY_PROVISIONING_PROFILE` to
-its path and use a certificate it authorizes; `just app` defaults to Developer ID
-Application. Unit tests use software keys and require no profile. Ad hoc bundles
-cannot create a persistent Keychain device identity. See `docs/releasing.md`.
+its path and use a certificate it authorizes; with a profile set, `just app`
+defaults to Developer ID Application, and without one it signs ad hoc. Unit tests
+use software keys and require no profile. Ad hoc bundles cannot create a
+persistent Keychain device identity, so they cannot forget peers or pair. `just dev`
+runs an ad hoc build on throwaway sample peers for interface work. See
+`docs/releasing.md`.
 
 `just check` is the gate. It must exit 0 before anything is committed, and
 its own exit status counts. Never pipe it through a command that can hide a

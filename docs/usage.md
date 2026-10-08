@@ -88,9 +88,9 @@ Pairing one member admits a system to the whole group. See [group trust and intr
 
 ## Trust and paired peers
 
-Under **Peers**, click a peer's trust-duration button, such as **Until unused 4 days…**, to change its policy. Hover over its name to see the key fingerprint.
+Under **Peers**, click a peer's **Remember until…** button to change how long this system trusts it. The gray line under the button shows when that trust ends. Hover over its name to see the key fingerprint.
 
-[Manage trust](trust.md) explains expiration, group access and forgetting. **Forget…** removes the peer and its introduced systems from the whole group. Use **Stop Sharing** for a temporary stop that retains peers.
+[Manage trust](trust.md) explains expiration, group access and forgetting. The trash can beside a peer forgets it, after you confirm, and removes its introduced systems from the whole group. Use **Stop Sharing** for a temporary stop that retains peers.
 
 ## Troubleshooting
 
@@ -122,8 +122,8 @@ from the installed app:
 Daisy verifies the release and its compatibility before stopping the running
 copy. It then restarts with your device identity, paired trust, settings and
 screen arrangement retained. If startup fails, it restores the previous copy.
-The installed app folder must be writable by your account. Automatic update policy is controlled in Advanced settings: notify only,
-install all stable updates, or install minor and patch updates. The installer
+The installed app folder must be writable by your account. Choose how updates install under **Updates** in Advanced settings: **Ask before installing**,
+**Auto-install routine updates**, which skips releases that could break compatibility with peers, or **Auto-install every update**. **Check Now** looks for a release immediately. The installer
 checks signed compatibility metadata against this system and every connected
 peer before replacing Daisy. Offline peers do not block an update and may need
 to update Daisy before reconnecting. If an incompatible peer disconnects,
