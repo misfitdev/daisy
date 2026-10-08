@@ -26,7 +26,7 @@ just app
 
 Without `DAISY_PROVISIONING_PROFILE`, `just app` signs ad hoc. An ad hoc bundle exercises the interface, but cannot create the persistent Keychain device identity.
 
-To try the interface without permissions or pairing, run `just dev`. It starts an ad hoc `Daisy.app` on a throwaway data folder with sample peers, so buttons such as **Remember until…** change only that copy. Close Set Up Daisy and choose **Open Daisy** from the menu bar. Forgetting a peer signs a revocation with the device identity, so in this build it reports that the peer could not be forgotten and keeps it.
+To try the interface without permissions or pairing, run `just dev`. It starts an ad hoc `Daisy.app` on a throwaway data folder with sample peers, so buttons such as **Remember…** change only that copy. Close Set Up Daisy and choose **Open Daisy** from the menu bar. Forgetting a peer signs a revocation with the device identity, so in this build it reports that the peer could not be forgotten and keeps it.
 
 ## Check a change
 

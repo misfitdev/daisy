@@ -5,7 +5,7 @@ Choose the symptom below. If input is going somewhere unexpected, press **Contro
 ## Systems keep looking
 
 1. **Check:** Both systems show that sharing is on. If either says **Not Sharing**, click **Start Sharing** there.
-2. **Try:** On one system, click **+** beside **Peers**, enter the other's local name or IP address, then **Save and Connect**. Find its IP address in that system's network settings. The attempt starts immediately; leave existing sharing running.
+2. **Try:** On one system, click **+** beside **Peers**, enter the other's local name or IP address, then **Connect**. Find its IP address in that system's network settings. The attempt starts immediately; leave existing sharing running.
 3. **Expect:** A new peer asks for its pairing code; a paired peer connects without one. The title becomes **Connected**.
 
 If the address fails, continue with [An address cannot be reached](#an-address-cannot-be-reached). A successful address connection does not establish why automatic discovery failed; networks can restrict Bonjour even when direct TCP works.
@@ -13,7 +13,7 @@ If the address fails, continue with [An address cannot be reached](#an-address-c
 ## An address cannot be reached
 
 1. **Check:** The address belongs to the peer's active network connection, the peer is awake and sharing, and both systems can reach each other. Guest or isolated networks may prevent this.
-2. **Try:** Correct the saved address with **+** and **Save and Connect**. If you administer the network, check that firewall policy allows TCP port 24850, or the custom port you configured.
+2. **Try:** Correct the saved address with **+** and **Connect**. If you administer the network, check that firewall policy allows TCP port 24850, or the custom port you configured.
 3. **Expect:** Daisy reaches the peer and either connects or asks for pairing. An initial failed address attempt reports its error; submit the corrected address to try again.
 
 A `.local` name can follow address changes where local name resolution works. If it does not resolve on your network, use the current IP address.

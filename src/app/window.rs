@@ -104,14 +104,12 @@ pub struct MainViews {
 #[derive(Clone, PartialEq, Eq)]
 pub struct PeerRow {
     pub name: String,
-    /// Who introduced it and how its link is doing.
+    /// Who introduced it, how its link is doing and when trust in it ends.
     pub detail: String,
     /// Shown on hover and to VoiceOver, so it is not mistaken for a code.
     pub fingerprint: String,
-    /// What VoiceOver hears for the trust button; its face reads "Remember until…".
+    /// What VoiceOver hears for the trust button; its face reads "Remember…".
     pub trust: String,
-    /// The gray caption under the trust button: when it lapses, or why it does not.
-    pub expires: String,
 }
 
 impl MainViews {
@@ -227,26 +225,27 @@ impl MainViews {
                 "Key fingerprint {}",
                 peer.fingerprint
             ))));
-            name.setFrame(rect(16.0, y + 7.0, 200.0, 18.0));
-            self.peers.addSubview(&name);
-            let detail = label(&peer.detail, 11.0, false, mtm);
-            detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
-            detail.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-            detail.setFrame(rect(16.0, y + 26.0, GROUP_WIDTH - 340.0, 16.0));
-            self.peers.addSubview(&detail);
-            let trust = button("Remember until…", sel!(changeTrust:), target, mtm);
+            let trust = button("Remember…", sel!(changeTrust:), target, mtm);
             trust.setTag(index as isize);
             trust.setAccessibilityLabel(Some(&NSString::from_str(&format!(
                 "Remember {}: {}",
                 peer.name, peer.trust
             ))));
-            trust.setFrame(rect(GROUP_WIDTH - 316.0, y + 4.0, 210.0, 22.0));
+            trust.sizeToFit();
+            let trust_width = trust.frame().size.width;
+            let trust_x = GROUP_WIDTH - 48.0 - 8.0 - trust_width;
+            trust.setFrameOrigin(NSPoint::new(trust_x, y + (PEER_ROW - trust.frame().size.height) / 2.0));
             self.peers.addSubview(&trust);
-            let expires = label(&peer.expires, 11.0, false, mtm);
-            expires.setTextColor(Some(&NSColor::secondaryLabelColor()));
-            expires.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-            expires.setFrame(rect(GROUP_WIDTH - 316.0, y + 26.0, 210.0, 16.0));
-            self.peers.addSubview(&expires);
+            let text_width = trust_x - 16.0 - 12.0;
+            name.setFrame(rect(16.0, y + 7.0, text_width, 18.0));
+            name.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            self.peers.addSubview(&name);
+            let detail = label(&peer.detail, 11.0, false, mtm);
+            detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            detail.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            detail.setToolTip(Some(&NSString::from_str(&peer.detail)));
+            detail.setFrame(rect(16.0, y + 26.0, text_width, 16.0));
+            self.peers.addSubview(&detail);
             let forget = icon_button(
                 "trash",
                 &format!("Forget {}", peer.name),
@@ -517,7 +516,7 @@ pub fn escape_key(action: Sel, target: &AnyObject, mtm: MainThreadMarker) -> Ret
     escape
 }
 
-fn label(text: &str, size: f64, bold: bool, mtm: MainThreadMarker) -> Retained<NSTextField> {
+pub(super) fn label(text: &str, size: f64, bold: bool, mtm: MainThreadMarker) -> Retained<NSTextField> {
     let label = NSTextField::labelWithString(&NSString::from_str(text), mtm);
     let font = if bold {
         NSFont::boldSystemFontOfSize(size)
@@ -528,7 +527,7 @@ fn label(text: &str, size: f64, bold: bool, mtm: MainThreadMarker) -> Retained<N
     label
 }
 
-fn button(title: &str, action: Sel, target: &AnyObject, mtm: MainThreadMarker) -> Retained<NSButton> {
+pub(super) fn button(title: &str, action: Sel, target: &AnyObject, mtm: MainThreadMarker) -> Retained<NSButton> {
     // SAFETY: target implements action and outlives the window
     unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(target), Some(action), mtm) }
 }
@@ -557,6 +556,6 @@ fn icon_button(
     button
 }
 
-fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
+pub(super) fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
 }

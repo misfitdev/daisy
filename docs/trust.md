@@ -10,7 +10,7 @@ Paired systems recognize each other using their network and Secure Enclave devic
 
 ## Change how long trust lasts
 
-Open Daisy and find the peer under **Peers**. Click its **Remember until…** button, choose an option and click **Save**. The new duration starts from that moment.
+Open Daisy and find the peer under **Peers**. Click its **Remember…** button, choose an option and click **Save**. The new duration starts from that moment.
 
 | Choice | Trust ends when |
 |---|---|

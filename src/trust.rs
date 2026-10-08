@@ -18,7 +18,7 @@ const MAX_IDLE_HOURS: u32 = MAX_DAYS * 24;
 /// How long a "just this once" peer may reconnect after an unexpected drop.
 pub const ONCE_GRACE: Duration = Duration::from_secs(60);
 /// The longest deadline `--trust <N>d` accepts, about ten years.
-const MAX_DAYS: u32 = 3650;
+pub const MAX_DAYS: u32 = 3650;
 const DAY: u64 = 24 * 60 * 60;
 
 /// Seconds since the Unix epoch.

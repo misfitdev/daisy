@@ -58,10 +58,9 @@ pub fn save(path: &Path) -> Result<()> {
     views.show_peers(
         &[PeerRow {
             name: "Studio".to_owned(),
-            detail: "Connected, 4 ms".to_owned(),
+            detail: "Connected, 4 ms · Renews while connected".to_owned(),
             fingerprint: String::new(),
             trust: "Until unused for 4 days".to_owned(),
-            expires: "Resets while connected".to_owned(),
         }],
         as_target(&target),
     );

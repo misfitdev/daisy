@@ -18,7 +18,7 @@ Choose **Open Daisy** from the menu-bar flower to open its window. Command-W or 
 
 ## Connect by address
 
-If automatic discovery does not find a peer, click **+** beside **Peers**, enter its local name or IP address, then click **Save and Connect**. The peer must be sharing. Daisy saves the address and starts connecting immediately, keeping existing connections and automatic discovery active.
+If automatic discovery does not find a peer, click **+** beside **Peers**, enter its local name or IP address, then click **Connect**. The peer must be sharing. Daisy saves the address and starts connecting immediately, keeping existing connections and automatic discovery active.
 
 Both systems must be reachable over TCP port 24850, the default. For a new peer, enter its pairing code when prompted. For a paired peer, Daisy checks the saved identity and trust before connecting.
 
@@ -88,7 +88,7 @@ Pairing one member admits a system to the whole group. See [group trust and intr
 
 ## Trust and paired peers
 
-Under **Peers**, click a peer's **Remember until…** button to change how long this system trusts it. The gray line under the button shows when that trust ends. Hover over its name to see the key fingerprint.
+Under **Peers**, click a peer's **Remember…** button to change how long this system trusts it. The gray line under its name shows its connection and when that trust ends. Hover over its name to see the key fingerprint.
 
 [Manage trust](trust.md) explains expiration, group access and forgetting. The trash can beside a peer forgets it, after you confirm, and removes its introduced systems from the whole group. Use **Stop Sharing** for a temporary stop that retains peers.
 
