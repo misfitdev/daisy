@@ -22,7 +22,13 @@ export DAISY_PROVISIONING_PROFILE=/path/to/Daisy.provisioningprofile
 just app
 ```
 
-`just check` uses software signing keys in unit tests and needs no signing credentials. An ad hoc bundle can exercise the interface, but cannot create the persistent Keychain device identity.
+`just check` uses software signing keys in unit tests and needs no signing credentials.
+
+Without `DAISY_PROVISIONING_PROFILE`, `just app` signs ad hoc. An ad hoc bundle exercises the interface, but cannot create the persistent Keychain device identity. Give it its own data folder so it cannot change the installed app's peers:
+
+```bash
+just app --home "$(mktemp -d)"
+```
 
 ## Check a change
 

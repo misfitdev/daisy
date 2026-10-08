@@ -39,11 +39,13 @@ update:
 # macOS files permissions under this ID; changing it means granting them again
 bundle_id := "dev.misfit.daisy"
 app := "target/Daisy.app"
-# DAISY_SIGN_IDENTITY, or the first Apple Development identity
-sign_identity := '''${DAISY_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/"Developer ID Application/ {print $2; exit}')}'''
+# DAISY_SIGN_IDENTITY; otherwise ad hoc without DAISY_PROVISIONING_PROFILE,
+# or the first Developer ID Application identity with it
+sign_identity := '''${DAISY_SIGN_IDENTITY:-$([ -z "${DAISY_PROVISIONING_PROFILE:-}" ] && echo - || security find-identity -v -p codesigning | awk '/"Developer ID Application/ {print $2; exit}')}'''
 
-# Build Daisy.app and sign it: Developer ID Application by default, or the
-# identity in DAISY_SIGN_IDENTITY ("-" signs ad hoc, as CI does)
+# Build Daisy.app and sign it with DAISY_SIGN_IDENTITY, or ad hoc ("-", as CI
+# does) when DAISY_PROVISIONING_PROFILE is unset. Ad hoc builds cannot create
+# a persistent device identity.
 bundle:
     #!/usr/bin/env bash
     set -euo pipefail
