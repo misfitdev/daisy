@@ -126,6 +126,33 @@ fn peer_row_dialogs_are_sheets(
         std::fs::read_to_string(&peers_file).is_ok_and(|text| text.contains("trust = \"forever\""))
     });
 
+    let main = super::window::MainViews::new(mtm, target);
+    target
+        .ivars()
+        .main
+        .set(main)
+        .ok()
+        .expect("the test sets the main window once");
+    // SAFETY: Daisy implements addPeerByAddress: with an optional sender.
+    assert!(unsafe {
+        NSApplication::sharedApplication(mtm).sendAction_to_from(sel!(addPeerByAddress:), Some(target), None)
+    });
+    let main = &target.ivars().main.get().unwrap().window;
+    let sheet = main
+        .attachedSheet()
+        .expect("adding a peer must ask on a sheet over the main window");
+    click(&sheet, "Connect");
+    assert!(
+        main.attachedSheet().is_some(),
+        "an empty address must keep the sheet open"
+    );
+    assert!(
+        has_text(&sheet.contentView().unwrap(), "Enter a local name or IP address."),
+        "an empty address must say what is missing"
+    );
+    click(&sheet, "Cancel");
+    wait_for("Cancel to close the sheet", || main.attachedSheet().is_none());
+
     let (_window, sheet) = open(sel!(forgetPeer:));
     click(&sheet, "Forget Peer");
     // test builds have no device identity to sign the revocation, so the
@@ -165,4 +192,13 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
         objc2_foundation::NSRunLoop::currentRunLoop()
             .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05));
     }
+}
+
+fn has_text(view: &objc2_app_kit::NSView, text: &str) -> bool {
+    view.subviews().iter().any(|child| {
+        child
+            .downcast_ref::<objc2_app_kit::NSTextField>()
+            .is_some_and(|field| !field.isHidden() && field.stringValue().to_string() == text)
+            || has_text(&child, text)
+    })
 }

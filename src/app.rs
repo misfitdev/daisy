@@ -8,6 +8,8 @@ mod menu;
 mod panel;
 #[path = "app/screenshot.rs"]
 pub mod screenshot;
+#[path = "app/sheet.rs"]
+mod sheet;
 #[path = "app/switch.rs"]
 mod switch;
 #[path = "app/trust.rs"]
@@ -41,8 +43,8 @@ use objc2_app_kit::{
     NSSquareStatusItemLength, NSStatusBar, NSStatusItem, NSWindow, NSWindowDelegate, NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSDate, NSDateFormatter, NSDateFormatterStyle, NSDictionary, NSNotification, NSObject,
-    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer, NSURL,
+    MainThreadMarker, NSData, NSDate, NSDateFormatter, NSDictionary, NSNotification, NSObject, NSObjectProtocol,
+    NSPoint, NSRect, NSSize, NSString, NSTimer, NSURL,
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
@@ -237,29 +239,9 @@ define_class!(
 
         #[unsafe(method(addPeerByAddress:))]
         fn add_peer_by_address(&self, _sender: Option<&AnyObject>) {
-            let alert = NSAlert::new(self.mtm());
-            alert.setMessageText(&NSString::from_str("Add peer by address"));
-            alert.setInformativeText(&NSString::from_str("Enter the peer's local name or IP address."));
-            let field = objc2_app_kit::NSTextField::textFieldWithString(&NSString::from_str(""), self.mtm());
-            field.setPlaceholderString(Some(&NSString::from_str("Name or IP address")));
-            field.setAccessibilityLabel(Some(&NSString::from_str("Peer address")));
-            field.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(300.0, 26.0)));
-            alert.setAccessoryView(Some(&field));
-            alert.window().setInitialFirstResponder(Some(&field));
-            alert.addButtonWithTitle(&NSString::from_str("Save and Connect"));
-            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-        let settings = loop {
-                if alert.runModal() != NSAlertFirstButtonReturn {
-                    return;
-                }
-            let address = field.stringValue().to_string();
-            let current = self.ivars().settings.borrow().last_session.clone();
-            if let Some(settings) = crate::setup::connect_by_address(&current, &address) {
-                break settings;
-                }
-                alert.setInformativeText(&NSString::from_str("Enter a local name or IP address before connecting."));
-            };
-        self.connect_address(settings);
+            if let Some(views) = self.ivars().main.get() {
+                self.ask_peer_address(&views.window);
+            }
         }
 
         #[unsafe(method(addSystem:))]
@@ -494,24 +476,13 @@ define_class!(
             };
             let this = self.retain();
             let key = peer.key;
-            trust_form::present(
-                &window,
-                Retained::into_super(self.retain()),
-                format!("Remember {} until?", peer.name).into(),
-                peer.policy,
-                crate::trust::Choice::of(peer.policy),
-                std::rc::Rc::new(move |policy| {
-                    let _ = this.ivars().controller.send(Command::SetTrust {
-                        selector: key.to_hex(),
-                        policy,
-                    });
-                }),
-            );
+            trust_form::present(&window, &format!("Remember {} until?", peer.name), peer.policy, move |policy| {
+                let _ = this.ivars().controller.send(Command::SetTrust {
+                    selector: key.to_hex(),
+                    policy,
+                });
+            });
         }
-
-        // Radio buttons need a shared action to act as one group.
-        #[unsafe(method(trustKind:))]
-        fn trust_kind(&self, _sender: Option<&AnyObject>) {}
 
         #[unsafe(method(setUpPermissions:))]
         fn set_up_permissions(&self, _sender: Option<&AnyObject>) {
@@ -1121,6 +1092,34 @@ impl AppDelegate {
         }
     }
 
+    /// Asks on a sheet over `window` for a peer's address, then connects to it.
+    fn ask_peer_address(&self, window: &NSWindow) {
+        let mtm = self.mtm();
+        let sheet = sheet::Sheet::new(mtm);
+        let field = objc2_app_kit::NSTextField::textFieldWithString(&NSString::from_str(""), mtm);
+        field.setPlaceholderString(Some(&NSString::from_str("Name or IP address")));
+        field.setAccessibilityLabel(Some(&NSString::from_str("Peer address")));
+        field.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(340.0, 24.0)));
+        let this = self.retain();
+        let input = field.clone();
+        sheet.present(
+            window,
+            "Add peer by address",
+            "Enter the peer's local name or IP address.",
+            &field,
+            Some(&field),
+            "Connect",
+            move || {
+                let address = input.stringValue().to_string();
+                let current = this.ivars().settings.borrow().last_session.clone();
+                let settings = crate::setup::connect_by_address(&current, &address)
+                    .ok_or_else(|| "Enter a local name or IP address.".to_owned())?;
+                this.connect_address(settings);
+                Ok(())
+            },
+        );
+    }
+
     fn connect_address(&self, settings: SessionSettings) {
         self.apply_settings(&settings);
         let _ = self.ivars().controller.send(Command::ConnectByAddress(settings));
@@ -1197,10 +1196,13 @@ impl AppDelegate {
                 let live = links.get(&peer.key).is_some();
                 window::PeerRow {
                     name: peer.name.clone(),
-                    detail: peer_detail(introducer, links.get(&peer.key)),
+                    detail: format!(
+                        "{} · {}",
+                        peer_detail(introducer, links.get(&peer.key)),
+                        expiry_caption(peer.policy.expiry(peer.paired_at, peer.last_seen, live, now))
+                    ),
                     fingerprint: peer.key.fingerprint(),
                     trust: peer.policy.label(),
-                    expires: expiry_caption(peer.policy.expiry(peer.paired_at, peer.last_seen, live, now)),
                 }
             })
             .collect();
@@ -1357,18 +1359,21 @@ fn expiry_caption(expiry: crate::trust::Expiry) -> String {
     use crate::trust::Expiry;
     match expiry {
         Expiry::Expired => "Expired".to_owned(),
-        Expiry::At(at) => format!("Expires {}", format_timestamp(at)),
-        Expiry::Never => "Forever".to_owned(),
-        Expiry::SessionEnd => "Ends with this session".to_owned(),
-        Expiry::RenewsWhileConnected => "Resets while connected".to_owned(),
+        Expiry::At(at) => format!("Until {}", format_timestamp(at)),
+        Expiry::Never => "Remembered forever".to_owned(),
+        Expiry::SessionEnd => "Until this session ends".to_owned(),
+        Expiry::RenewsWhileConnected => "Renews while connected".to_owned(),
     }
 }
 
 fn format_timestamp(at: crate::trust::Timestamp) -> String {
     let date = NSDate::dateWithTimeIntervalSince1970(at as f64);
     let formatter = NSDateFormatter::new();
-    formatter.setDateStyle(NSDateFormatterStyle::MediumStyle);
-    formatter.setTimeStyle(NSDateFormatterStyle::ShortStyle);
+    let this_year = NSDateFormatter::new();
+    this_year.setLocalizedDateFormatFromTemplate(&NSString::from_str("y"));
+    let same_year = this_year.stringFromDate(&date) == this_year.stringFromDate(&NSDate::new());
+    let template = if same_year { "MMMdjmm" } else { "yMMMdjmm" };
+    formatter.setLocalizedDateFormatFromTemplate(&NSString::from_str(template));
     formatter.stringFromDate(&date).to_string()
 }
 
