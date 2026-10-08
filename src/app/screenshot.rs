@@ -61,6 +61,7 @@ pub fn save(path: &Path) -> Result<()> {
             detail: "Connected, 4 ms".to_owned(),
             fingerprint: String::new(),
             trust: "Until unused for 4 days".to_owned(),
+            expires: "Resets while connected".to_owned(),
         }],
         as_target(&target),
     );

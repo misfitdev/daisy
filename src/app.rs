@@ -41,8 +41,8 @@ use objc2_app_kit::{
     NSStatusItem, NSWindow, NSWindowDelegate, NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    NSString, NSTimer, NSURL,
+    MainThreadMarker, NSData, NSDate, NSDateFormatter, NSDateFormatterStyle, NSDictionary, NSNotification, NSObject,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer, NSURL,
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
@@ -462,7 +462,7 @@ define_class!(
             let chosen = trust_form::ask(
                 self.mtm(),
                 self,
-                &format!("Trust {} for how long?", peer.name),
+                &format!("Remember {} until?", peer.name),
                 "Save",
                 Some("Cancel"),
                 peer.policy,
@@ -1150,6 +1150,7 @@ impl AppDelegate {
         };
         let peers = self.ivars().peers.borrow();
         let links = self.ivars().links.borrow();
+        let now = crate::trust::now();
         let rows: Vec<window::PeerRow> = peers
             .iter()
             .map(|peer| {
@@ -1157,11 +1158,17 @@ impl AppDelegate {
                     .introduced_by
                     .and_then(|key| peers.iter().find(|other| other.key == key))
                     .map(|other| other.name.as_str());
+                let live = links.get(&peer.key).is_some();
                 window::PeerRow {
                     name: peer.name.clone(),
                     detail: peer_detail(introducer, links.get(&peer.key)),
                     fingerprint: peer.key.fingerprint(),
                     trust: peer.policy.label(),
+                    expires: expiry_caption(
+                        peer.policy,
+                        peer.policy.expires_at(peer.paired_at, peer.last_seen, live),
+                        now,
+                    ),
                 }
             })
             .collect();
@@ -1307,6 +1314,37 @@ fn peer_detail(introducer: Option<&str>, link: Option<&Link>) -> String {
         None => parts.push("Not connected".to_owned()),
     }
     parts.join(" · ")
+}
+
+/// The line under the trust button: when it lapses, or why it does not.
+fn expiry_caption(
+    policy: crate::trust::Policy,
+    expires_at: Option<crate::trust::Timestamp>,
+    now: crate::trust::Timestamp,
+) -> String {
+    use crate::trust::Policy;
+    if let Some(at) = expires_at {
+        return if at <= now {
+            "Expired".to_owned()
+        } else {
+            format!("Expires {}", format_timestamp(at))
+        };
+    }
+    match policy {
+        Policy::Forever => "Forever".to_owned(),
+        Policy::Once => "Ends with this session".to_owned(),
+        Policy::Idle(_) => "Resets while connected".to_owned(),
+        // Days always resolves to Some above: its deadline runs from pairing, not from a session.
+        Policy::Days(_) => String::new(),
+    }
+}
+
+fn format_timestamp(at: crate::trust::Timestamp) -> String {
+    let date = NSDate::dateWithTimeIntervalSince1970(at as f64);
+    let formatter = NSDateFormatter::new();
+    formatter.setDateStyle(NSDateFormatterStyle::MediumStyle);
+    formatter.setTimeStyle(NSDateFormatterStyle::ShortStyle);
+    formatter.stringFromDate(&date).to_string()
 }
 
 /// What the window and menu say about the session.

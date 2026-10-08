@@ -7,8 +7,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSBackingStoreType, NSBezierPath, NSBox, NSBoxType, NSButton, NSColor, NSFont, NSImage,
-    NSImageView, NSLineBreakMode, NSResponder, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSAccessibility, NSBackingStoreType, NSBezelStyle, NSBezierPath, NSBox, NSBoxType, NSButton, NSCellImagePosition,
+    NSColor, NSFont, NSImage, NSImageView, NSLineBreakMode, NSResponder, NSTextField, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
@@ -104,7 +105,10 @@ pub struct PeerRow {
     pub detail: String,
     /// Shown on hover and to VoiceOver, so it is not mistaken for a code.
     pub fingerprint: String,
+    /// What VoiceOver hears for the trust button; its face reads "Remember until…".
     pub trust: String,
+    /// The gray caption under the trust button: when it lapses, or why it does not.
+    pub expires: String,
 }
 
 impl MainViews {
@@ -222,18 +226,28 @@ impl MainViews {
             detail.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
             detail.setFrame(rect(16.0, y + 26.0, GROUP_WIDTH - 340.0, 16.0));
             self.peers.addSubview(&detail);
-            let trust = button(&format!("{}…", peer.trust), sel!(changeTrust:), target, mtm);
+            let trust = button("Remember until…", sel!(changeTrust:), target, mtm);
             trust.setTag(index as isize);
             trust.setAccessibilityLabel(Some(&NSString::from_str(&format!(
-                "Trust {}: {}",
+                "Remember {}: {}",
                 peer.name, peer.trust
             ))));
-            trust.setFrame(rect(GROUP_WIDTH - 316.0, y + (PEER_ROW - 28.0) / 2.0, 210.0, 28.0));
+            trust.setFrame(rect(GROUP_WIDTH - 316.0, y + 4.0, 210.0, 22.0));
             self.peers.addSubview(&trust);
-            let forget = button("Forget…", sel!(forgetPeer:), target, mtm);
+            let expires = label(&peer.expires, 11.0, false, mtm);
+            expires.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            expires.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            expires.setFrame(rect(GROUP_WIDTH - 316.0, y + 26.0, 210.0, 16.0));
+            self.peers.addSubview(&expires);
+            let forget = icon_button(
+                "trash",
+                &format!("Forget {}", peer.name),
+                sel!(forgetPeer:),
+                target,
+                mtm,
+            );
             forget.setTag(index as isize);
-            forget.setAccessibilityLabel(Some(&NSString::from_str(&format!("Forget {}", peer.name))));
-            forget.setFrame(rect(GROUP_WIDTH - 100.0, y + (PEER_ROW - 28.0) / 2.0, 84.0, 28.0));
+            forget.setFrame(rect(GROUP_WIDTH - 48.0, y + (PEER_ROW - 28.0) / 2.0, 28.0, 28.0));
             self.peers.addSubview(&forget);
         }
         if !peers.is_empty() {
@@ -472,6 +486,30 @@ fn label(text: &str, size: f64, bold: bool, mtm: MainThreadMarker) -> Retained<N
 fn button(title: &str, action: Sel, target: &AnyObject, mtm: MainThreadMarker) -> Retained<NSButton> {
     // SAFETY: target implements action and outlives the window
     unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(target), Some(action), mtm) }
+}
+
+/// A borderless, icon-only button, e.g. the trash icon beside a peer.
+fn icon_button(
+    symbol: &str,
+    accessibility: &str,
+    action: Sel,
+    target: &AnyObject,
+    mtm: MainThreadMarker,
+) -> Retained<NSButton> {
+    let button = button("", action, target, mtm);
+    if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str(symbol),
+        Some(&NSString::from_str(accessibility)),
+    ) {
+        button.setImage(Some(&image));
+    }
+    button.setImagePosition(NSCellImagePosition::ImageOnly);
+    button.setBezelStyle(NSBezelStyle::Circular);
+    button.setBordered(false);
+    button.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+    button.setAccessibilityLabel(Some(&NSString::from_str(accessibility)));
+    button.setToolTip(Some(&NSString::from_str(accessibility)));
+    button
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {

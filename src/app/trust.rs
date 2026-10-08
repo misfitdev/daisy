@@ -27,7 +27,7 @@ pub fn ask(
     loop {
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(title));
-        alert.setInformativeText(&NSString::from_str("When trust ends, pair again to connect."));
+        alert.setInformativeText(&NSString::from_str("When this ends, pair again to connect."));
         alert.addButtonWithTitle(&NSString::from_str(confirm));
         if let Some(cancel) = cancel {
             alert.addButtonWithTitle(&NSString::from_str(cancel));
@@ -78,14 +78,14 @@ impl Form {
             Choice::Unused { amount, days } => (amount, days),
             _ => (4, true),
         };
-        let session = radio("This session", 64.0, choice == Choice::Session);
-        let forever = radio("Until I forget", 36.0, choice == Choice::Forever);
-        let unused = radio("Until unused for", 6.0, matches!(choice, Choice::Unused { .. }));
+        let session = radio("End of session", 64.0, choice == Choice::Session);
+        let forever = radio("Forever", 36.0, choice == Choice::Forever);
+        let unused = radio("Duration", 6.0, matches!(choice, Choice::Unused { .. }));
         unused.setFrame(frame(0.0, 6.0, 132.0, 22.0));
 
         let number = NSTextField::textFieldWithString(&NSString::from_str(&amount.to_string()), mtm);
         number.setFrame(frame(136.0, 4.0, 52.0, 24.0));
-        number.setAccessibilityLabel(Some(&NSString::from_str("Unused for how long")));
+        number.setAccessibilityLabel(Some(&NSString::from_str("Duration amount")));
         view.addSubview(&number);
         let unit =
             NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), frame(194.0, 2.0, 96.0, 28.0), false);
