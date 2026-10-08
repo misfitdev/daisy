@@ -153,33 +153,20 @@ Daisy stages and verifies the replacement while the current copy keeps running. 
 
 ## Homebrew
 
-Each release includes a `daisy.rb` cask that installs the
-same signed and notarized app. You can use it in a local tap without a published
-Daisy tap. Create the local tap once:
-
 ```bash
-brew tap-new --no-git local/daisy
-mkdir -p "$(brew --repository local/daisy)/Casks"
+brew install --cask misfitdev/tap/daisy
 ```
 
-Download the recipe for the version you want and install it:
+This taps `misfitdev/homebrew-tap` automatically and installs the same signed
+and notarized app as the DMG. To upgrade, quit Daisy, then run:
 
 ```bash
-curl --fail --location https://github.com/misfitdev/daisy/releases/download/v0.7.0/daisy.rb \
-  --output "$(brew --repository local/daisy)/Casks/daisy.rb"
-brew install --cask local/daisy/daisy
-```
-
-For a later release, download its recipe from that release's tag using the same
-command with the new version. Quit Daisy, then run:
-
-```bash
-brew upgrade --cask local/daisy/daisy
+brew upgrade --cask misfitdev/tap/daisy
 ```
 
 Reopen Daisy afterward. See [update compatibility](#update-daisy) if a peer reports a protocol mismatch.
-Homebrew verifies the DMG's SHA-256 during cask installation; it does not grant Accessibility or Input Monitoring. When an automatic-update policy is selected in Advanced settings, Daisy can update its running app, including a Homebrew-installed copy. To update manually instead, use the latest release cask recipe and run `brew upgrade` as above.
-`brew uninstall --cask local/daisy/daisy` removes the app while retaining
+Homebrew verifies the DMG's SHA-256 during cask installation; it does not grant Accessibility or Input Monitoring. When an automatic-update policy is selected in Advanced settings, Daisy can update its running app, including a Homebrew-installed copy. To update manually instead, run `brew upgrade` as above.
+`brew uninstall --cask misfitdev/tap/daisy` removes the app while retaining
 settings, device identity, and paired peers. If Daisy was installed manually,
 quit it and remove the existing app from Applications before installing the cask.
 

@@ -153,6 +153,40 @@ jobs:
             --notes-file notes.md \
             --verify-tag
 
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Check out the tap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: misfitdev/homebrew-tap
+          path: tap
+          persist-credentials: false
+
+      - name: Push the cask
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          mkdir -p tap/Casks
+          cp dist/daisy.rb tap/Casks/daisy.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/daisy.rb
+          if git diff --cached --quiet; then
+            echo "cask unchanged"
+            exit 0
+          fi
+          git commit -m "daisy $GITHUB_REF_NAME"
+          git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/misfitdev/homebrew-tap.git"
+          git push
+
   site:
     needs: release
     runs-on: ubuntu-latest

@@ -102,30 +102,33 @@ Both should report `source=Notarized Developer ID`.
 
 ## Homebrew cask
 
-The release workflow generates `daisy.rb` from the final signed and notarized
-DMG and includes it in the release assets. Its version and SHA-256 come from
-that DMG; never substitute an unsigned build's hash. The cask requires Apple
-silicon and macOS 26 or later, installs `Daisy.app`, and leaves device identity,
-peer trust, and settings intact when uninstalled.
+Its version and SHA-256 come from the final signed and notarized DMG; never
+substitute an unsigned build's hash. The cask requires Apple silicon and
+macOS 26 or later, installs `Daisy.app`, and leaves device identity, peer
+trust, and settings intact when uninstalled.
 
-To generate it locally after packaging:
+The release workflow generates and publishes the cask itself: the
+`update-homebrew` job pushes `Casks/daisy.rb` to
+[`misfitdev/homebrew-tap`](https://github.com/misfitdev/homebrew-tap) after
+every release, authenticating with the `HOMEBREW_TAP_TOKEN` repository
+secret (a fine-grained PAT scoped to Contents: write on that repo only).
+Users install and upgrade with:
+
+```bash
+brew install --cask misfitdev/tap/daisy
+brew update
+brew upgrade --cask misfitdev/tap/daisy
+```
+
+To generate the cask locally, e.g. to check its contents before a release:
 
 ```bash
 python3 tools/homebrew-cask.py target/dist/Daisy-0.6.0-macos-arm64.dmg target/dist/daisy.rb
 ```
 
-Publish the generated file as `Casks/daisy.rb` in a Homebrew tap. For a tap
-named `misfitdev/homebrew-daisy`, users install and upgrade with:
-
-```bash
-brew install --cask misfitdev/daisy/daisy
-brew update
-brew upgrade --cask misfitdev/daisy/daisy
-```
-
-These commands require the tap to be published. After each stable release,
-update its cask using that release's generated `daisy.rb`. Homebrew's livecheck
-detects new stable releases, but does not update the tap's recipe itself.
+Homebrew's livecheck still watches for new stable releases for its own
+metadata, but `update-homebrew` is what actually advances the pinned version
+and SHA-256 in the tap.
 Advanced settings offers three update policies: notify only, install all stable
 updates, or install minor and patch updates. Protocol-changing installs require
 signed compatibility metadata that supports this system and every currently
@@ -133,10 +136,8 @@ connected peer. Offline peers do not block installation and may need Daisy
 updated before reconnecting. If an incompatible active peer disconnects,
 Daisy retries compatibility against the remaining group.
 Accessibility and Input Monitoring still require approval in System Settings.
-Users can also install the release's recipe through a local tap; see
-[Homebrew installation](usage.md#homebrew). The generated recipe is release
-metadata; the DMG and ZIP are the assets covered by the existing provenance
-and artifact attestations.
+The cask is release metadata; the DMG and ZIP are the assets covered by the
+existing provenance and artifact attestations.
 
 ## Website CI and deployment
 
