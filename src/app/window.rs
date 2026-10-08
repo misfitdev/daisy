@@ -8,7 +8,7 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAccessibility, NSBackingStoreType, NSBezelStyle, NSBezierPath, NSBox, NSBoxType, NSButton, NSCellImagePosition,
-    NSColor, NSFont, NSImage, NSImageView, NSLineBreakMode, NSResponder, NSTextField, NSView, NSWindow,
+    NSColor, NSFont, NSImage, NSImageView, NSLineBreakMode, NSPopUpButton, NSResponder, NSTextField, NSView, NSWindow,
     NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
@@ -293,7 +293,9 @@ pub struct AdvancedViews {
     pub always: Retained<Switch>,
     pub clipboard: Retained<Switch>,
     pub login: Retained<Switch>,
-    pub update_policy: Retained<NSButton>,
+    pub update_policy: Retained<NSPopUpButton>,
+    /// The gray line explaining the current policy's consequence.
+    pub update_caption: Retained<NSTextField>,
     /// For Accessibility and Input Monitoring: shown when allowed, and the
     /// button that sets it up when not.
     permission_rows: [(Retained<NSView>, Retained<NSButton>); 2],
@@ -334,21 +336,55 @@ impl AdvancedViews {
         let clipboard = switch(true, "Share clipboard when control moves", sel!(toggleShareClipboard:));
         let login = switch(true, "Open at login", sel!(toggleLaunchAtLogin:));
         let always = switch(false, "Always discoverable", sel!(toggleAlwaysDiscoverable:));
-        let update_policy = button("Notify only", sel!(cycleUpdatePolicy:), target, mtm);
-        update_policy.setAccessibilityLabel(Some(&NSString::from_str("Automatic updates policy")));
-        update_policy.setToolTip(Some(&NSString::from_str("Click to choose the next update policy")));
-        update_policy.setFrameSize(NSSize::new(210.0, 28.0));
         rows(
             &options,
             &[
                 ("Share clipboard when control moves", &**clipboard),
                 ("Open at login", &**login),
                 ("Always discoverable", &**always),
-                ("Automatic updates", &*update_policy),
             ],
             mtm,
         );
         y += options.frame().size.height + MARGIN;
+
+        let updates_heading = label("Updates", 13.0, true, mtm);
+        updates_heading.setFrame(rect(MARGIN, y, width, 18.0));
+        root.addSubview(&updates_heading);
+        y += 18.0 + 6.0;
+
+        const UPDATES_HEIGHT: f64 = 64.0;
+        let updates = Panel::new(
+            mtm,
+            rect(MARGIN, y, width, UPDATES_HEIGHT),
+            Some(NSColor::quaternarySystemFillColor()),
+            10.0,
+        );
+        root.addSubview(&updates);
+
+        let update_policy =
+            NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), rect(16.0, 9.0, 260.0, 24.0), false);
+        for policy in crate::update::ORDER {
+            update_policy.addItemWithTitle(&NSString::from_str(policy.label()));
+        }
+        // SAFETY: target implements selectUpdatePolicy: and outlives the window
+        unsafe {
+            update_policy.setTarget(Some(target));
+            update_policy.setAction(Some(sel!(selectUpdatePolicy:)));
+        }
+        update_policy.setAccessibilityLabel(Some(&NSString::from_str("Automatic updates")));
+        updates.addSubview(&update_policy);
+
+        let check_now = button("Check Now", sel!(checkForUpdatesNow:), target, mtm);
+        check_now.setFrame(rect(width - 16.0 - 90.0, 9.0, 90.0, 24.0));
+        updates.addSubview(&check_now);
+
+        let update_caption = label("", 11.0, false, mtm);
+        update_caption.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        update_caption.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        update_caption.setFrame(rect(16.0, UPDATES_HEIGHT - 9.0 - 16.0, width - 32.0, 16.0));
+        updates.addSubview(&update_caption);
+
+        y += UPDATES_HEIGHT + MARGIN;
 
         let permissions_heading = label("Permissions", 13.0, true, mtm);
         permissions_heading.setFrame(rect(MARGIN, y, width, 18.0));
@@ -404,6 +440,7 @@ impl AdvancedViews {
             clipboard,
             login,
             update_policy,
+            update_caption,
             permission_rows,
         }
     }

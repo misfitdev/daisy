@@ -37,8 +37,8 @@ use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel
 use objc2_app_kit::{
     NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionKey, NSAboutPanelOptionVersion, NSAccessibility, NSAlert,
     NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSButton, NSColor, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar,
-    NSStatusItem, NSWindow, NSWindowDelegate, NSWorkspace,
+    NSButton, NSColor, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSPopUpButton, NSSquareStatusItemLength,
+    NSStatusBar, NSStatusItem, NSWindow, NSWindowDelegate, NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSDate, NSDateFormatter, NSDateFormatterStyle, NSDictionary, NSNotification, NSObject,
@@ -99,6 +99,9 @@ struct AppDelegateIvars {
     /// Whether the person was sent to System Settings for that step.
     setup_asked: Cell<bool>,
     permission_poll_ticks: Cell<u8>,
+    /// Counts toward refreshing peer expiry captions, which otherwise only
+    /// change in response to a peer or link event.
+    expiry_poll_ticks: Cell<u16>,
 }
 
 define_class!(
@@ -198,6 +201,18 @@ define_class!(
                 self.refresh_permissions();
             } else {
                 self.ivars().permission_poll_ticks.set(ticks);
+            }
+            // 0.1s per tick; expiry captions only need minute-level freshness
+            const EXPIRY_REFRESH_TICKS: u16 = 600;
+            let main_open = self.ivars().main.get().is_some_and(|views| views.window.isVisible());
+            if main_open {
+                let expiry_ticks = self.ivars().expiry_poll_ticks.get() + 1;
+                if expiry_ticks >= EXPIRY_REFRESH_TICKS {
+                    self.ivars().expiry_poll_ticks.set(0);
+                    self.rebuild_peers_list();
+                } else {
+                    self.ivars().expiry_poll_ticks.set(expiry_ticks);
+                }
             }
         }
 
@@ -387,14 +402,22 @@ define_class!(
         }
 
 
-    #[unsafe(method(cycleUpdatePolicy:))]
-    fn cycle_update_policy(&self, _sender: &NSButton) {
-        let mut settings = self.ivars().settings.borrow_mut();
-        settings.update_policy = settings.update_policy.next();
-        let policy = settings.update_policy;
-        drop(settings);
+    #[unsafe(method(selectUpdatePolicy:))]
+    fn select_update_policy(&self, sender: &NSPopUpButton) {
+        let Some(policy) = usize::try_from(sender.indexOfSelectedItem())
+            .ok()
+            .and_then(|index| crate::update::ORDER.get(index).copied())
+        else {
+            return;
+        };
+        self.ivars().settings.borrow_mut().update_policy = policy;
         let _ = self.ivars().controller.send(Command::SetUpdatePolicy(policy));
         self.refresh_update_policy();
+    }
+
+    #[unsafe(method(checkForUpdatesNow:))]
+    fn check_for_updates_now(&self, _sender: Option<&AnyObject>) {
+        let _ = self.ivars().controller.send(Command::CheckUpdatesNow);
     }
 
     #[unsafe(method(toggleShareClipboard:))]
@@ -594,6 +617,7 @@ impl AppDelegate {
             setup_step: Cell::new(None),
             setup_asked: Cell::new(false),
             permission_poll_ticks: Cell::new(0),
+            expiry_poll_ticks: Cell::new(0),
         });
         // SAFETY: NSObject's initializer has no additional requirements.
         unsafe { msg_send![super(this), init] }
@@ -1183,9 +1207,13 @@ impl AppDelegate {
 
     fn refresh_update_policy(&self) {
         if let Some(views) = self.ivars().advanced.get() {
-            views.update_policy.setTitle(&NSString::from_str(
-                self.ivars().settings.borrow().update_policy.label(),
-            ));
+            let policy = self.ivars().settings.borrow().update_policy;
+            if let Some(index) = crate::update::ORDER.iter().position(|candidate| *candidate == policy) {
+                views.update_policy.selectItemAtIndex(index as isize);
+            }
+            views
+                .update_caption
+                .setStringValue(&NSString::from_str(policy.caption()));
         }
     }
 

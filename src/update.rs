@@ -23,19 +23,23 @@ pub enum Policy {
 }
 
 impl Policy {
+    /// Shown on the policy picker, in `ORDER`.
     pub fn label(self) -> &'static str {
         match self {
-            Self::NotifyOnly => "Notify only",
-            Self::InstallAll => "Install all updates",
-            Self::InstallMinorAndPatch => "Install minor and patch updates",
+            Self::NotifyOnly => "Ask before installing",
+            Self::InstallMinorAndPatch => "Auto-install routine updates",
+            Self::InstallAll => "Auto-install every update",
         }
     }
 
-    pub fn next(self) -> Self {
+    /// The gray line under the picker: what this policy actually does,
+    /// in terms of the consequence a person cares about rather than
+    /// semver tiers.
+    pub fn caption(self) -> &'static str {
         match self {
-            Self::NotifyOnly => Self::InstallAll,
-            Self::InstallAll => Self::InstallMinorAndPatch,
-            Self::InstallMinorAndPatch => Self::NotifyOnly,
+            Self::NotifyOnly => "You'll be notified; nothing installs on its own.",
+            Self::InstallMinorAndPatch => "Skips releases that could break compatibility with peers.",
+            Self::InstallAll => "Includes releases that could require every connected peer to update too.",
         }
     }
 
@@ -49,6 +53,9 @@ impl Policy {
             }
     }
 }
+
+/// The policy picker's items, in display order.
+pub const ORDER: [Policy; 3] = [Policy::NotifyOnly, Policy::InstallMinorAndPatch, Policy::InstallAll];
 
 /// Daisy's own repository, queried for its releases feed.
 pub const REPOSITORY: &str = "misfitdev/daisy";
@@ -193,7 +200,12 @@ pub fn check(repository: &str) -> Result<Vec<Release>> {
 /// Checks for a newer release every `interval`, starting immediately, and
 /// publishes the newest one found. A failed check is logged and leaves the
 /// last successful result in place rather than clearing it.
-pub fn watch(repository: &'static str, current: Version, interval: Duration) -> watch::Receiver<Option<Release>> {
+pub fn watch(
+    repository: &'static str,
+    current: Version,
+    interval: Duration,
+    recheck: std::sync::Arc<tokio::sync::Notify>,
+) -> watch::Receiver<Option<Release>> {
     let (sender, receiver) = watch::channel(None);
     tokio::spawn(async move {
         loop {
@@ -207,7 +219,10 @@ pub fn watch(repository: &'static str, current: Version, interval: Duration) -> 
                 Ok(Err(error)) => tracing::warn!(error = ?error, "could not check for updates"),
                 Err(error) => tracing::warn!(error = ?error, "update check task failed"),
             }
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                () = tokio::time::sleep(interval) => {}
+                () = recheck.notified() => {}
+            }
         }
     });
     receiver

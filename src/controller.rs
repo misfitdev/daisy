@@ -115,6 +115,9 @@ pub enum Command {
     /// Turn clipboard sharing on or off, including for a running session.
     SetClipboard(bool),
     SetUpdatePolicy(crate::update::Policy),
+    /// Check for a new release right now, instead of waiting for the next
+    /// periodic check.
+    CheckUpdatesNow,
     /// Accept a new system for `ADD_SYSTEM_WINDOW`.
     AddSystem,
     /// Stop accepting a new system early.
@@ -289,6 +292,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let mut stored = settings.clone();
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
     let (update_policy, update_policy_rx) = watch::channel(stored.update_policy);
+    let recheck_updates = std::sync::Arc::new(tokio::sync::Notify::new());
     let active_protocols = std::sync::Arc::new(ActiveProtocols::default());
     // always advertised while sharing; the advertisement names no one
     let (_discoverable, discoverable) = watch::channel(true);
@@ -331,6 +335,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
         events.clone(),
         update_policy_rx,
         active_protocols.clone(),
+        recheck_updates.clone(),
     ));
 
     let mut session: Option<tokio::task::JoinHandle<()>> = None;
@@ -485,6 +490,9 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     );
                 }
             }
+            Command::CheckUpdatesNow => {
+                recheck_updates.notify_one();
+            }
             Command::AddSystem => {
                 listen.send_replace(Listening::For(ADD_SYSTEM_WINDOW));
             }
@@ -621,9 +629,15 @@ async fn update_worker(
     events: Sender<Event>,
     mut policy: watch::Receiver<crate::update::Policy>,
     protocols: std::sync::Arc<ActiveProtocols>,
+    recheck: std::sync::Arc<tokio::sync::Notify>,
 ) {
     let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("package version is semver");
-    let mut releases = crate::update::watch(crate::update::REPOSITORY, current.clone(), crate::update::INTERVAL);
+    let mut releases = crate::update::watch(
+        crate::update::REPOSITORY,
+        current.clone(),
+        crate::update::INTERVAL,
+        recheck,
+    );
     let mut latest: Option<crate::update::Release> = None;
     let mut handled: Option<(String, crate::update::Policy)> = None;
     let mut protocol_changes = protocols.revision.subscribe();

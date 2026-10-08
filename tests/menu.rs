@@ -3,7 +3,7 @@
 #[cfg(target_os = "macos")]
 pub use daisy::{
     COMMIT, control, controller, identity, input, install, layout, macos, pairing, peers, permissions, service, setup,
-    share, trust,
+    share, trust, update,
 };
 
 #[cfg(target_os = "macos")]
