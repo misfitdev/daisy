@@ -103,6 +103,48 @@ app *args: bundle
     # it has its own permissions, and stops when Ctrl-C stops the launcher
     "{{app}}/Contents/MacOS/daisy" {{args}}
 
+# Run an ad hoc Daisy.app on throwaway data with sample peers, to try the
+# interface without permissions, pairing or this system's real peers
+dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DAISY_SIGN_IDENTITY=- {{just_executable()}} bundle
+    home="$(mktemp -d)"
+    mkdir -p "$home/trust-v5"
+    now="$(date +%s)"
+    studio="$(printf '11%.0s' {1..32})"
+    cat > "$home/trust-v5/peers.toml" <<EOF
+    [[peer]]
+    key = "$studio"
+    name = "Studio"
+    trust = "idle"
+    paired_at = $((now - 86400))
+    last_seen = $((now - 3600))
+    side = "Right"
+    side_chosen = 0
+
+    [[peer]]
+    key = "$(printf '22%.0s' {1..32})"
+    name = "Laptop"
+    trust = "30d"
+    paired_at = $((now - 86400))
+    last_seen = $now
+    side = "Left"
+    side_chosen = 0
+
+    [[peer]]
+    key = "$(printf '33%.0s' {1..32})"
+    name = "Desk"
+    trust = "forever"
+    paired_at = $now
+    last_seen = $now
+    side = "Left"
+    side_chosen = 0
+    introduced_by = "$studio"
+    EOF
+    echo "sample data in $home; close Set Up Daisy and choose Open Daisy from the menu bar" >&2
+    "{{app}}/Contents/MacOS/daisy" --home "$home"
+
 dist := "target/dist"
 
 # Zip the signed app and build a DMG for release; both are notarized and
