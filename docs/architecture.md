@@ -99,6 +99,7 @@ The command-line `connect` command runs `service::connect` as a loop. Once a ses
 - `trust-v5/arrangement.toml`: the newest group arrangement it saw.
 - `stats.toml`: each running link's round trips, for `daisy stats`.
 - `settings.toml`: the menu-bar app's last connection, control and trust choices, written atomically with mode `0600`.
+- `last-update-check.toml`: when the last successful update check ran and the newer release it found, if any, written atomically with mode `0600`.
 
 `trust-v5/peers.toml` is the trust authority. Every change locks it, rereads it and writes it atomically. An active session watches the paired key, so a change from the menu-bar app or another process revokes control promptly. The UI aborts its current task immediately when its **Forget** action is used; the file watcher remains the external-edit backstop.
 

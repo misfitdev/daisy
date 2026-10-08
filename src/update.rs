@@ -205,29 +205,86 @@ pub enum Checked {
     Failed,
 }
 
-impl Checked {
-    /// What the Updates panel says about this check.
-    pub fn summary(&self) -> String {
-        match self {
-            Checked::Found(None) => "Daisy is up to date.".to_owned(),
-            Checked::Found(Some(release)) => {
-                format!("Daisy {} is available.", release.tag_name.trim_start_matches('v'))
-            }
-            Checked::Failed => "Could not check for updates.".to_owned(),
+/// Progress of the update checker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckEvent {
+    Started,
+    Finished(Checked),
+}
+
+/// The last successful check, kept across launches so the Updates panel can
+/// say when Daisy last looked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastCheck {
+    pub at: crate::trust::Timestamp,
+    /// The newer release found then, if any.
+    pub available: Option<String>,
+}
+
+impl LastCheck {
+    pub fn of(found: Option<&Release>, at: crate::trust::Timestamp) -> Self {
+        Self {
+            at,
+            available: found.map(|release| release.tag_name.trim_start_matches('v').to_owned()),
         }
     }
 }
 
+const LAST_CHECK_FILE: &str = "last-update-check.toml";
+
+/// The record of the last successful check in `home`, if there is one.
+pub fn load_last_check(home: &std::path::Path) -> Option<LastCheck> {
+    let text = std::fs::read_to_string(home.join(LAST_CHECK_FILE)).ok()?;
+    toml::from_str(&text).ok()
+}
+
+pub fn save_last_check(home: &std::path::Path, last: &LastCheck) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = home.join(LAST_CHECK_FILE);
+    let temporary = path.with_extension("tmp");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)
+        .with_context(|| format!("creating {}", temporary.display()))?;
+    file.write_all(toml::to_string(last)?.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, &path).with_context(|| format!("saving {}", path.display()))
+}
+
+/// The gray status line in the Updates panel. `ago` renders a past time
+/// relative to now, such as "5 minutes ago" or "yesterday".
+pub fn status_line(last: Option<&LastCheck>, failed: bool, ago: impl Fn(crate::trust::Timestamp) -> String) -> String {
+    match (last, failed) {
+        (None, false) => "Not checked yet.".to_owned(),
+        (None, true) => "Could not check for updates.".to_owned(),
+        (Some(last), true) => format!("Could not check for updates. Last checked {}.", ago(last.at)),
+        (Some(last), false) => match &last.available {
+            None => format!("Daisy is up to date. Checked {}.", ago(last.at)),
+            Some(version) => format!("Daisy {version} is available. Checked {}.", ago(last.at)),
+        },
+    }
+}
+
+/// The animated "Checking" line: no dots, then one, two and three, repeating.
+pub fn checking_line(step: usize) -> String {
+    format!("Checking{}", ".".repeat(step % 4))
+}
+
 /// Checks the releases feed when `recheck` is notified and, while
 /// `automatic` is on, at start and every `interval`; turning `automatic` on
-/// checks immediately. Every result is published, including failures.
+/// checks immediately. Each check is announced as it starts and finishes,
+/// including failures.
 pub fn watch(
     repository: &'static str,
     current: Version,
     interval: Duration,
     automatic: watch::Receiver<bool>,
     recheck: std::sync::Arc<tokio::sync::Notify>,
-) -> tokio::sync::mpsc::UnboundedReceiver<Checked> {
+) -> tokio::sync::mpsc::UnboundedReceiver<CheckEvent> {
     watch_with(move || check(repository), current, interval, automatic, recheck)
 }
 
@@ -237,7 +294,7 @@ fn watch_with(
     interval: Duration,
     mut automatic: watch::Receiver<bool>,
     recheck: std::sync::Arc<tokio::sync::Notify>,
-) -> tokio::sync::mpsc::UnboundedReceiver<Checked> {
+) -> tokio::sync::mpsc::UnboundedReceiver<CheckEvent> {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         let mut on = *automatic.borrow_and_update();
@@ -259,6 +316,9 @@ fn watch_with(
                 }
             }
             due = false;
+            if sender.send(CheckEvent::Started).is_err() {
+                return;
+            }
             let current = current.clone();
             let fetch = fetch.clone();
             let checked = match tokio::task::spawn_blocking(fetch).await {
@@ -272,7 +332,7 @@ fn watch_with(
                     Checked::Failed
                 }
             };
-            if sender.send(checked).is_err() {
+            if sender.send(CheckEvent::Finished(checked)).is_err() {
                 return;
             }
         }
@@ -305,33 +365,72 @@ mod tests {
         recheck.notify_one();
         assert_eq!(
             results.recv().await,
-            Some(Checked::Found(None)),
+            Some(CheckEvent::Started),
+            "a check announces that it started"
+        );
+        assert_eq!(
+            results.recv().await,
+            Some(CheckEvent::Finished(Checked::Found(None))),
             "Check Now reports its result"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         switch.send_replace(true);
         results.recv().await.unwrap();
+        results.recv().await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2, "turning on checks immediately");
         tokio::time::sleep(hour).await;
+        results.recv().await.unwrap();
         results.recv().await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 3, "on checks every interval");
     }
 
     #[test]
-    fn check_summaries_name_the_result() {
-        let release = |tag: &str| Release {
-            tag_name: tag.to_owned(),
+    fn status_line_says_what_was_found_and_when() {
+        let ago = |at: u64| format!("at {at}");
+        assert_eq!(status_line(None, false, ago), "Not checked yet.");
+        assert_eq!(status_line(None, true, ago), "Could not check for updates.");
+        let current = LastCheck { at: 5, available: None };
+        assert_eq!(
+            status_line(Some(&current), false, ago),
+            "Daisy is up to date. Checked at 5."
+        );
+        assert_eq!(
+            status_line(Some(&current), true, ago),
+            "Could not check for updates. Last checked at 5."
+        );
+        let release = Release {
+            tag_name: "v0.9.0".to_owned(),
             html_url: String::new(),
             draft: false,
             prerelease: false,
         };
-        assert_eq!(Checked::Found(None).summary(), "Daisy is up to date.");
+        let newer = LastCheck::of(Some(&release), 7);
         assert_eq!(
-            Checked::Found(Some(release("v0.8.3"))).summary(),
-            "Daisy 0.8.3 is available."
+            status_line(Some(&newer), false, ago),
+            "Daisy 0.9.0 is available. Checked at 7."
         );
-        assert_eq!(Checked::Failed.summary(), "Could not check for updates.");
+    }
+
+    #[test]
+    fn checking_line_grows_then_starts_over() {
+        let lines: Vec<String> = (0..5).map(checking_line).collect();
+        assert_eq!(
+            lines,
+            ["Checking", "Checking.", "Checking..", "Checking...", "Checking"]
+        );
+    }
+
+    #[test]
+    fn last_check_survives_a_restart() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(load_last_check(home.path()), None);
+        let last = LastCheck {
+            at: 1_791_000_000,
+            available: Some("0.9.0".to_owned()),
+        };
+        save_last_check(home.path(), &last).unwrap();
+        assert_eq!(load_last_check(home.path()), Some(last));
     }
 
     #[test]

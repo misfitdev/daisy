@@ -236,18 +236,33 @@ fn update_controls_report_and_follow_the_switch(mtm: objc2_foundation::MainThrea
 
     // SAFETY: as above.
     assert!(unsafe { app.sendAction_to_from(sel!(checkForUpdatesNow:), Some(target), None) });
-    assert_eq!(views.update_status.stringValue().to_string(), "Checking…");
+    let status = || views.update_status.stringValue().to_string();
+    assert_eq!(status(), "Checking", "Check Now shows that it started");
     assert!(!views.check_now.isEnabled(), "Check Now waits for the running check");
-    target.handle_event(crate::controller::Event::UpdateChecked(
-        "Daisy is up to date.".to_owned(),
-    ));
+    target.ivars().checking_ticks.set(4 * 2);
+    target.refresh_update_status();
+    assert_eq!(status(), "Checking..", "the dots grow while the check runs");
+
+    let at = crate::trust::now() - 5 * 60;
+    target.handle_event(crate::controller::Event::UpdateCheck {
+        checking: false,
+        failed: false,
+        last: Some(crate::update::LastCheck { at, available: None }),
+    });
     assert!(
-        views
-            .update_status
-            .stringValue()
-            .to_string()
-            .starts_with("Daisy is up to date. Checked "),
-        "the result replaces Checking…"
+        status().starts_with("Daisy is up to date. Checked ") && !status().contains("just now"),
+        "the result says how long ago the check ran, got {:?}",
+        status()
+    );
+    target.handle_event(crate::controller::Event::UpdateCheck {
+        checking: false,
+        failed: true,
+        last: Some(crate::update::LastCheck { at, available: None }),
+    });
+    assert!(
+        status().starts_with("Could not check for updates. Last checked "),
+        "a failed check keeps the last good time, got {:?}",
+        status()
     );
     assert!(views.check_now.isEnabled(), "Check Now is available again");
 }

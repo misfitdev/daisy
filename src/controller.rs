@@ -212,8 +212,13 @@ pub enum Event {
     },
     /// Where every member's displays sit, while the group runs.
     Arranged(crate::share::Layout),
-    /// An update check finished, with what the Updates panel should say.
-    UpdateChecked(String),
+    /// The update checker's state, for the Updates panel.
+    UpdateCheck {
+        checking: bool,
+        /// The most recent check failed.
+        failed: bool,
+        last: Option<crate::update::LastCheck>,
+    },
 }
 
 pub struct Handle {
@@ -668,17 +673,36 @@ async fn update_worker(
         recheck,
     );
     let mut latest: Option<crate::update::Release> = None;
+    let mut last_check = crate::update::load_last_check(&home);
+    let _ = events.send(Event::UpdateCheck {
+        checking: false,
+        failed: false,
+        last: last_check.clone(),
+    });
     let mut handled: Option<(String, crate::update::Policy)> = None;
     let mut protocol_changes = protocols.revision.subscribe();
     let (completion_tx, mut completion_rx) = tokio_mpsc::unbounded_channel::<(u64, bool)>();
     let mut installing = false;
     loop {
         tokio::select! {
-            checked = releases.recv() => {
-                let Some(checked) = checked else { return; };
-                let _ = events.send(Event::UpdateChecked(checked.summary()));
-                if let crate::update::Checked::Found(found) = checked {
-                    latest = found;
+            progress = releases.recv() => {
+                let Some(progress) = progress else { return; };
+                let (checking, failed) = match progress {
+                    crate::update::CheckEvent::Started => (true, false),
+                    crate::update::CheckEvent::Finished(crate::update::Checked::Failed) => (false, true),
+                    crate::update::CheckEvent::Finished(crate::update::Checked::Found(found)) => {
+                        let checked = crate::update::LastCheck::of(found.as_ref(), crate::trust::now());
+                        if let Err(error) = crate::update::save_last_check(&home, &checked) {
+                            tracing::warn!(error = ?error, "the last update check could not be saved");
+                        }
+                        last_check = Some(checked);
+                        latest = found;
+                        (false, false)
+                    }
+                };
+                let _ = events.send(Event::UpdateCheck { checking, failed, last: last_check.clone() });
+                if checking {
+                    continue;
                 }
             }
             changed = automatic.changed() => {
@@ -1178,6 +1202,37 @@ fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_last_update_check_is_reported_after_a_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let saved = crate::update::LastCheck {
+            at: 1_791_000_000,
+            available: None,
+        };
+        crate::update::save_last_check(home.path(), &saved).unwrap();
+        let (events, received) = mpsc::channel();
+        let (_policy, policy) = watch::channel(crate::update::Policy::NotifyOnly);
+        // automatic checks off, so nothing reaches the network
+        let (_automatic, automatic) = watch::channel(false);
+        let worker = tokio::spawn(update_worker(
+            home.path().to_owned(),
+            events,
+            policy,
+            automatic,
+            std::sync::Arc::new(ActiveProtocols::default()),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        ));
+        let first = tokio::task::spawn_blocking(move || received.recv_timeout(std::time::Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .unwrap();
+        worker.abort();
+        assert!(
+            matches!(first, Event::UpdateCheck { checking: false, failed: false, last: Some(ref last) } if *last == saved),
+            "the first event must report the saved check"
+        );
+    }
 
     #[test]
     fn active_mesh_changes_advance_the_update_eligibility_revision() {
