@@ -947,6 +947,7 @@ impl AppDelegate {
             _ => {
                 self.ivars().links.borrow_mut().clear();
                 *self.ivars().arranged.borrow_mut() = None;
+                self.rebuild_peers_list();
             }
         }
         if !matches!(status, Status::Connected { .. }) {
@@ -1188,11 +1189,7 @@ impl AppDelegate {
                     detail: peer_detail(introducer, links.get(&peer.key)),
                     fingerprint: peer.key.fingerprint(),
                     trust: peer.policy.label(),
-                    expires: expiry_caption(
-                        peer.policy,
-                        peer.policy.expires_at(peer.paired_at, peer.last_seen, live),
-                        now,
-                    ),
+                    expires: expiry_caption(peer.policy.expiry(peer.paired_at, peer.last_seen, live, now)),
                 }
             })
             .collect();
@@ -1345,25 +1342,14 @@ fn peer_detail(introducer: Option<&str>, link: Option<&Link>) -> String {
 }
 
 /// The line under the trust button: when it lapses, or why it does not.
-fn expiry_caption(
-    policy: crate::trust::Policy,
-    expires_at: Option<crate::trust::Timestamp>,
-    now: crate::trust::Timestamp,
-) -> String {
-    use crate::trust::Policy;
-    if let Some(at) = expires_at {
-        return if at <= now {
-            "Expired".to_owned()
-        } else {
-            format!("Expires {}", format_timestamp(at))
-        };
-    }
-    match policy {
-        Policy::Forever => "Forever".to_owned(),
-        Policy::Once => "Ends with this session".to_owned(),
-        Policy::Idle(_) => "Resets while connected".to_owned(),
-        // Days always resolves to Some above: its deadline runs from pairing, not from a session.
-        Policy::Days(_) => String::new(),
+fn expiry_caption(expiry: crate::trust::Expiry) -> String {
+    use crate::trust::Expiry;
+    match expiry {
+        Expiry::Expired => "Expired".to_owned(),
+        Expiry::At(at) => format!("Expires {}", format_timestamp(at)),
+        Expiry::Never => "Forever".to_owned(),
+        Expiry::SessionEnd => "Ends with this session".to_owned(),
+        Expiry::RenewsWhileConnected => "Resets while connected".to_owned(),
     }
 }
 
