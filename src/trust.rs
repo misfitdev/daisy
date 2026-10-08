@@ -72,6 +72,33 @@ impl Policy {
             .is_some_and(|expires_at| now >= expires_at)
     }
 
+    /// What the caption under a peer's trust button reports.
+    pub fn expiry(self, paired_at: Timestamp, last_seen: Timestamp, live: bool, now: Timestamp) -> Expiry {
+        match self.expires_at(paired_at, last_seen, live) {
+            Some(at) if now >= at => Expiry::Expired,
+            Some(at) => Expiry::At(at),
+            None => match self {
+                Policy::Once => Expiry::SessionEnd,
+                Policy::Idle(_) => Expiry::RenewsWhileConnected,
+                Policy::Forever | Policy::Days(_) => Expiry::Never,
+            },
+        }
+    }
+}
+
+/// When trust in a peer lapses, as a person reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expiry {
+    Expired,
+    At(Timestamp),
+    Never,
+    /// Once trust holds through the session and its reconnect grace.
+    SessionEnd,
+    /// Idle trust whose clock restarts when the session ends.
+    RenewsWhileConnected,
+}
+
+impl Policy {
     /// The short form shown beside a peer in Daisy's window.
     pub fn label(self) -> String {
         let count = |amount: u32, unit: &str| format!("{amount} {unit}{}", if amount == 1 { "" } else { "s" });
@@ -358,6 +385,37 @@ mod tests {
         assert_eq!(Policy::Idle(1).label(), "Until unused for 1 hour");
         assert_eq!(Policy::Idle(30).label(), "Until unused for 30 hours");
         assert_eq!(Policy::Days(30).label(), "For 30 days");
+    }
+
+    #[test]
+    fn expiry_reports_deadlines_and_their_absence() {
+        let seen = PAIRED + 5 * HOUR;
+        assert_eq!(Policy::Forever.expiry(PAIRED, seen, false, seen), Expiry::Never);
+        assert_eq!(Policy::Once.expiry(PAIRED, seen, true, seen), Expiry::SessionEnd);
+        assert_eq!(
+            Policy::Idle(12).expiry(PAIRED, seen, true, seen),
+            Expiry::RenewsWhileConnected
+        );
+        assert_eq!(
+            Policy::Idle(12).expiry(PAIRED, seen, false, seen),
+            Expiry::At(seen + 12 * HOUR)
+        );
+        assert_eq!(
+            Policy::Idle(12).expiry(PAIRED, seen, false, seen + 12 * HOUR - 1),
+            Expiry::At(seen + 12 * HOUR)
+        );
+        assert_eq!(
+            Policy::Idle(12).expiry(PAIRED, seen, false, seen + 12 * HOUR),
+            Expiry::Expired
+        );
+        assert_eq!(
+            Policy::Days(30).expiry(PAIRED, seen, true, seen),
+            Expiry::At(PAIRED + 30 * DAY)
+        );
+        assert_eq!(
+            Policy::Days(30).expiry(PAIRED, seen, true, PAIRED + 30 * DAY),
+            Expiry::Expired
+        );
     }
 
     #[test]

@@ -37,12 +37,12 @@ use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel
 use objc2_app_kit::{
     NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionKey, NSAboutPanelOptionVersion, NSAccessibility, NSAlert,
     NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSButton, NSColor, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar,
-    NSStatusItem, NSWindow, NSWindowDelegate, NSWorkspace,
+    NSButton, NSColor, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSPopUpButton, NSSquareStatusItemLength,
+    NSStatusBar, NSStatusItem, NSWindow, NSWindowDelegate, NSWorkspace,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    NSString, NSTimer, NSURL,
+    MainThreadMarker, NSData, NSDate, NSDateFormatter, NSDateFormatterStyle, NSDictionary, NSNotification, NSObject,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer, NSURL,
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
@@ -99,6 +99,9 @@ struct AppDelegateIvars {
     /// Whether the person was sent to System Settings for that step.
     setup_asked: Cell<bool>,
     permission_poll_ticks: Cell<u8>,
+    /// Counts toward refreshing peer expiry captions, which otherwise only
+    /// change in response to a peer or link event.
+    expiry_poll_ticks: Cell<u16>,
 }
 
 define_class!(
@@ -198,6 +201,18 @@ define_class!(
                 self.refresh_permissions();
             } else {
                 self.ivars().permission_poll_ticks.set(ticks);
+            }
+            // 0.1s per tick; expiry captions only need minute-level freshness
+            const EXPIRY_REFRESH_TICKS: u16 = 600;
+            let main_open = self.ivars().main.get().is_some_and(|views| views.window.isVisible());
+            if main_open {
+                let expiry_ticks = self.ivars().expiry_poll_ticks.get() + 1;
+                if expiry_ticks >= EXPIRY_REFRESH_TICKS {
+                    self.ivars().expiry_poll_ticks.set(0);
+                    self.rebuild_peers_list();
+                } else {
+                    self.ivars().expiry_poll_ticks.set(expiry_ticks);
+                }
             }
         }
 
@@ -387,14 +402,22 @@ define_class!(
         }
 
 
-    #[unsafe(method(cycleUpdatePolicy:))]
-    fn cycle_update_policy(&self, _sender: &NSButton) {
-        let mut settings = self.ivars().settings.borrow_mut();
-        settings.update_policy = settings.update_policy.next();
-        let policy = settings.update_policy;
-        drop(settings);
+    #[unsafe(method(selectUpdatePolicy:))]
+    fn select_update_policy(&self, sender: &NSPopUpButton) {
+        let Some(policy) = usize::try_from(sender.indexOfSelectedItem())
+            .ok()
+            .and_then(|index| crate::update::ORDER.get(index).copied())
+        else {
+            return;
+        };
+        self.ivars().settings.borrow_mut().update_policy = policy;
         let _ = self.ivars().controller.send(Command::SetUpdatePolicy(policy));
         self.refresh_update_policy();
+    }
+
+    #[unsafe(method(checkForUpdatesNow:))]
+    fn check_for_updates_now(&self, _sender: Option<&AnyObject>) {
+        let _ = self.ivars().controller.send(Command::CheckUpdatesNow);
     }
 
     #[unsafe(method(toggleShareClipboard:))]
@@ -462,7 +485,7 @@ define_class!(
             let chosen = trust_form::ask(
                 self.mtm(),
                 self,
-                &format!("Trust {} for how long?", peer.name),
+                &format!("Remember {} until?", peer.name),
                 "Save",
                 Some("Cancel"),
                 peer.policy,
@@ -594,6 +617,7 @@ impl AppDelegate {
             setup_step: Cell::new(None),
             setup_asked: Cell::new(false),
             permission_poll_ticks: Cell::new(0),
+            expiry_poll_ticks: Cell::new(0),
         });
         // SAFETY: NSObject's initializer has no additional requirements.
         unsafe { msg_send![super(this), init] }
@@ -923,6 +947,7 @@ impl AppDelegate {
             _ => {
                 self.ivars().links.borrow_mut().clear();
                 *self.ivars().arranged.borrow_mut() = None;
+                self.rebuild_peers_list();
             }
         }
         if !matches!(status, Status::Connected { .. }) {
@@ -1150,6 +1175,7 @@ impl AppDelegate {
         };
         let peers = self.ivars().peers.borrow();
         let links = self.ivars().links.borrow();
+        let now = crate::trust::now();
         let rows: Vec<window::PeerRow> = peers
             .iter()
             .map(|peer| {
@@ -1157,11 +1183,13 @@ impl AppDelegate {
                     .introduced_by
                     .and_then(|key| peers.iter().find(|other| other.key == key))
                     .map(|other| other.name.as_str());
+                let live = links.get(&peer.key).is_some();
                 window::PeerRow {
                     name: peer.name.clone(),
                     detail: peer_detail(introducer, links.get(&peer.key)),
                     fingerprint: peer.key.fingerprint(),
                     trust: peer.policy.label(),
+                    expires: expiry_caption(peer.policy.expiry(peer.paired_at, peer.last_seen, live, now)),
                 }
             })
             .collect();
@@ -1176,9 +1204,13 @@ impl AppDelegate {
 
     fn refresh_update_policy(&self) {
         if let Some(views) = self.ivars().advanced.get() {
-            views.update_policy.setTitle(&NSString::from_str(
-                self.ivars().settings.borrow().update_policy.label(),
-            ));
+            let policy = self.ivars().settings.borrow().update_policy;
+            if let Some(index) = crate::update::ORDER.iter().position(|candidate| *candidate == policy) {
+                views.update_policy.selectItemAtIndex(index as isize);
+            }
+            views
+                .update_caption
+                .setStringValue(&NSString::from_str(policy.caption()));
         }
     }
 
@@ -1307,6 +1339,26 @@ fn peer_detail(introducer: Option<&str>, link: Option<&Link>) -> String {
         None => parts.push("Not connected".to_owned()),
     }
     parts.join(" · ")
+}
+
+/// The line under the trust button: when it lapses, or why it does not.
+fn expiry_caption(expiry: crate::trust::Expiry) -> String {
+    use crate::trust::Expiry;
+    match expiry {
+        Expiry::Expired => "Expired".to_owned(),
+        Expiry::At(at) => format!("Expires {}", format_timestamp(at)),
+        Expiry::Never => "Forever".to_owned(),
+        Expiry::SessionEnd => "Ends with this session".to_owned(),
+        Expiry::RenewsWhileConnected => "Resets while connected".to_owned(),
+    }
+}
+
+fn format_timestamp(at: crate::trust::Timestamp) -> String {
+    let date = NSDate::dateWithTimeIntervalSince1970(at as f64);
+    let formatter = NSDateFormatter::new();
+    formatter.setDateStyle(NSDateFormatterStyle::MediumStyle);
+    formatter.setTimeStyle(NSDateFormatterStyle::ShortStyle);
+    formatter.stringFromDate(&date).to_string()
 }
 
 /// What the window and menu say about the session.
