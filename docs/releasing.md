@@ -10,7 +10,8 @@ Release CI reads the profile from the `DEVELOPER_ID_PROFILE_BASE64` repository s
 
 ## One-time setup
 
-The workflow needs six repository secrets:
+The workflow needs seven repository secrets (or org-level secrets scoped to
+this repository):
 
 | Secret | What it contains |
 |---|---|
@@ -20,13 +21,15 @@ The workflow needs six repository secrets:
 | `NOTARY_KEY_ID` | App Store Connect API key ID |
 | `NOTARY_ISSUER_ID` | Issuer ID shown with that key |
 | `NOTARY_KEY` | Contents of the key's `.p8` file |
+| `HOMEBREW_TAP_TOKEN` | Fine-grained GitHub PAT, scoped to Contents: write on `misfitdev/homebrew-tap` only |
 
 Create them:
 
 1. In Xcode, open Settings → Accounts → Manage Certificates → **+** → Developer ID Application. Export it from Keychain Access under My Certificates so the private key is included, as a password-protected `.p12`.
 2. In Apple Developer Certificates, Identifiers & Profiles, create a Developer ID provisioning profile for `dev.misfit.daisy` and the signing certificate. Daisy uses the app’s default Keychain access group; no separate Keychain Sharing capability or user-presence requirement is needed. Download the profile.
 3. In App Store Connect, open Users and Access → Integrations → Team Keys → **+**, with the Developer role. Download the `.p8`; it can only be downloaded once.
-4. From a terminal authenticated to GitHub as a repository administrator:
+4. At github.com/settings/personal-access-tokens, create a fine-grained PAT scoped to the `misfitdev/homebrew-tap` repository only, with Contents: write permission.
+5. From a terminal authenticated to GitHub as a repository administrator:
 
 ```bash
 base64 -i DeveloperID.p12 | gh secret set DEVELOPER_ID_P12 -R misfitdev/daisy
@@ -35,6 +38,7 @@ gh secret set DEVELOPER_ID_P12_PASSWORD -R misfitdev/daisy
 gh secret set NOTARY_KEY_ID -R misfitdev/daisy
 gh secret set NOTARY_ISSUER_ID -R misfitdev/daisy
 gh secret set NOTARY_KEY -R misfitdev/daisy < AuthKey_XXXXXXXXXX.p8
+gh secret set HOMEBREW_TAP_TOKEN -R misfitdev/daisy
 ```
 
 Delete the local `.p12` and `.p8` after the secrets are stored.
