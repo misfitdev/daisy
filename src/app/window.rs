@@ -93,12 +93,15 @@ pub struct MainViews {
     peers_heading: Retained<NSTextField>,
     add_peer: Retained<NSButton>,
     peers: Retained<Panel>,
+    /// Rows last drawn, so an unchanged refresh leaves buttons in place.
+    shown_peers: RefCell<Option<Vec<PeerRow>>>,
     buttons: Retained<Panel>,
     pub start: Retained<NSButton>,
     pub stop: Retained<NSButton>,
 }
 
 /// One paired peer, as its row shows it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PeerRow {
     pub name: String,
     /// Who introduced it and how its link is doing.
@@ -184,6 +187,7 @@ impl MainViews {
             peers_heading,
             add_peer,
             peers,
+            shown_peers: RefCell::new(None),
             buttons,
             start,
             stop,
@@ -196,6 +200,10 @@ impl MainViews {
 
     /// One row per peer, each with its trust and Forget buttons.
     pub fn show_peers(&self, peers: &[PeerRow], target: &AnyObject) {
+        if self.shown_peers.borrow().as_deref() == Some(peers) {
+            return;
+        }
+        *self.shown_peers.borrow_mut() = Some(peers.to_vec());
         let mtm = self.window.mtm();
         self.peers.clear();
         if peers.is_empty() {

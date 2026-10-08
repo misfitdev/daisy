@@ -39,11 +39,13 @@ update:
 # macOS files permissions under this ID; changing it means granting them again
 bundle_id := "dev.misfit.daisy"
 app := "target/Daisy.app"
-# DAISY_SIGN_IDENTITY, or the first Apple Development identity
-sign_identity := '''${DAISY_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/"Developer ID Application/ {print $2; exit}')}'''
+# DAISY_SIGN_IDENTITY; otherwise ad hoc without DAISY_PROVISIONING_PROFILE,
+# or the first Developer ID Application identity with it
+sign_identity := '''${DAISY_SIGN_IDENTITY:-$([ -z "${DAISY_PROVISIONING_PROFILE:-}" ] && echo - || security find-identity -v -p codesigning | awk '/"Developer ID Application/ {print $2; exit}')}'''
 
-# Build Daisy.app and sign it: Developer ID Application by default, or the
-# identity in DAISY_SIGN_IDENTITY ("-" signs ad hoc, as CI does)
+# Build Daisy.app and sign it with DAISY_SIGN_IDENTITY, or ad hoc ("-", as CI
+# does) when DAISY_PROVISIONING_PROFILE is unset. Ad hoc builds cannot create
+# a persistent device identity.
 bundle:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -100,6 +102,48 @@ app *args: bundle
     # run from a terminal, the app's binary relaunches itself as the app, so
     # it has its own permissions, and stops when Ctrl-C stops the launcher
     "{{app}}/Contents/MacOS/daisy" {{args}}
+
+# Run an ad hoc Daisy.app on throwaway data with sample peers, to try the
+# interface without permissions, pairing or this system's real peers
+dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DAISY_SIGN_IDENTITY=- {{just_executable()}} bundle
+    home="$(mktemp -d)"
+    mkdir -p "$home/trust-v5"
+    now="$(date +%s)"
+    studio="$(printf '11%.0s' {1..32})"
+    cat > "$home/trust-v5/peers.toml" <<EOF
+    [[peer]]
+    key = "$studio"
+    name = "Studio"
+    trust = "idle"
+    paired_at = $((now - 86400))
+    last_seen = $((now - 3600))
+    side = "Right"
+    side_chosen = 0
+
+    [[peer]]
+    key = "$(printf '22%.0s' {1..32})"
+    name = "Laptop"
+    trust = "30d"
+    paired_at = $((now - 86400))
+    last_seen = $now
+    side = "Left"
+    side_chosen = 0
+
+    [[peer]]
+    key = "$(printf '33%.0s' {1..32})"
+    name = "Desk"
+    trust = "forever"
+    paired_at = $now
+    last_seen = $now
+    side = "Left"
+    side_chosen = 0
+    introduced_by = "$studio"
+    EOF
+    echo "sample data in $home; close Set Up Daisy and choose Open Daisy from the menu bar" >&2
+    "{{app}}/Contents/MacOS/daisy" --home "$home"
 
 dist := "target/dist"
 

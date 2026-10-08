@@ -1,47 +1,53 @@
 //! Choosing how long this system trusts a peer.
 
+use std::rc::Rc;
+
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{MainThreadOnly, sel};
+use objc2::{MainThreadOnly, Message, sel};
 use objc2_app_kit::{
     NSAccessibility, NSAlert, NSAlertFirstButtonReturn, NSButton, NSControlStateValueOff, NSControlStateValueOn,
-    NSPopUpButton, NSTextField, NSView,
+    NSModalResponse, NSPopUpButton, NSTextField, NSView, NSWindow,
 };
-use objc2_foundation::{MainThreadMarker, NSString};
+use objc2_foundation::{MainThreadMarker, NSObject, NSString};
 
 use super::frame;
 use crate::trust::{Choice, Policy};
 
-/// Asks how long to trust `peer`, starting from `current`. `None` when
-/// cancelled. Radio buttons send `trustKind:` to `target`, which AppKit
-/// needs to group them.
-pub fn ask(
-    mtm: MainThreadMarker,
-    target: &AnyObject,
-    title: &str,
-    confirm: &str,
-    cancel: Option<&str>,
+/// Asks on a sheet over `window` how long to trust a peer, starting from
+/// `current`, and calls `chosen` once a different policy is saved. An
+/// invalid duration asks again. Radio buttons send `trustKind:` to
+/// `target`, which AppKit needs to group them.
+pub fn present(
+    window: &NSWindow,
+    target: Retained<NSObject>,
+    title: Rc<str>,
     current: Policy,
-) -> Option<Policy> {
-    let mut choice = Choice::of(current);
-    loop {
-        let alert = NSAlert::new(mtm);
-        alert.setMessageText(&NSString::from_str(title));
-        alert.setInformativeText(&NSString::from_str("When this ends, pair again to connect."));
-        alert.addButtonWithTitle(&NSString::from_str(confirm));
-        if let Some(cancel) = cancel {
-            alert.addButtonWithTitle(&NSString::from_str(cancel));
+    choice: Choice,
+    chosen: Rc<dyn Fn(Policy)>,
+) {
+    let mtm = window.mtm();
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(&title));
+    alert.setInformativeText(&NSString::from_str("When this ends, pair again to connect."));
+    alert.addButtonWithTitle(&NSString::from_str("Save"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    let form = Form::new(mtm, &target, choice);
+    alert.setAccessoryView(Some(&form.view));
+    let parent = window.retain();
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        if response != NSAlertFirstButtonReturn {
+            return;
         }
-        let form = Form::new(mtm, target, choice);
-        alert.setAccessoryView(Some(&form.view));
-        if alert.runModal() != NSAlertFirstButtonReturn {
-            return None;
+        let picked = form.choice();
+        match picked.confirmed(current) {
+            Some(policy) if policy != current => chosen(policy),
+            Some(_) => {}
+            None => present(&parent, target.clone(), title.clone(), current, picked, chosen.clone()),
         }
-        choice = form.choice();
-        if let Some(policy) = choice.confirmed(current) {
-            return Some(policy);
-        }
-    }
+    });
+    alert.beginSheetModalForWindow_completionHandler(window, Some(&handler));
 }
 
 struct Form {
