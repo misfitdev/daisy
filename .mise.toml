@@ -14,4 +14,4 @@ actionlint = "1.7.12"
 pinact = "5.0.0"
 
 # site/ (Astro, GitHub Pages)
-node = "24.21.0"
+node = "26.11.1"
