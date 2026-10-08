@@ -300,9 +300,13 @@ pub struct AdvancedViews {
     pub always: Retained<Switch>,
     pub clipboard: Retained<Switch>,
     pub login: Retained<Switch>,
+    pub check_updates: Retained<Switch>,
     pub update_policy: Retained<NSPopUpButton>,
     /// The gray line explaining the current policy's consequence.
     pub update_caption: Retained<NSTextField>,
+    pub check_now: Retained<NSButton>,
+    /// The gray line with the last check's result.
+    pub update_status: Retained<NSTextField>,
     /// For Accessibility and Input Monitoring: shown when allowed, and the
     /// button that sets it up when not.
     permission_rows: [(Retained<NSView>, Retained<NSButton>); 2],
@@ -359,7 +363,8 @@ impl AdvancedViews {
         root.addSubview(&updates_heading);
         y += 18.0 + 6.0;
 
-        const UPDATES_HEIGHT: f64 = 64.0;
+        // a switch row, then the policy menu and Check Now, then two gray lines
+        const UPDATES_HEIGHT: f64 = ROW + 9.0 + 24.0 + 6.0 + 16.0 + 2.0 + 16.0 + 10.0;
         let updates = Panel::new(
             mtm,
             rect(MARGIN, y, width, UPDATES_HEIGHT),
@@ -368,8 +373,18 @@ impl AdvancedViews {
         );
         root.addSubview(&updates);
 
+        let check_updates = switch(true, "Check for updates automatically", sel!(toggleCheckUpdates:));
+        let automatic = label("Check for updates automatically", 13.0, false, mtm);
+        automatic.setFrame(rect(16.0, (ROW - 18.0) / 2.0, width - 180.0, 18.0));
+        updates.addSubview(&automatic);
+        let size = check_updates.frame().size;
+        check_updates.setFrameOrigin(NSPoint::new(width - 16.0 - size.width, (ROW - size.height) / 2.0));
+        updates.addSubview(&check_updates);
+        separator(&updates, ROW, mtm);
+
+        let mut row = ROW + 9.0;
         let update_policy =
-            NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), rect(16.0, 9.0, 260.0, 24.0), false);
+            NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), rect(16.0, row, 260.0, 24.0), false);
         for policy in crate::update::ORDER {
             update_policy.addItemWithTitle(&NSString::from_str(policy.label()));
         }
@@ -378,18 +393,24 @@ impl AdvancedViews {
             update_policy.setTarget(Some(target));
             update_policy.setAction(Some(sel!(selectUpdatePolicy:)));
         }
-        update_policy.setAccessibilityLabel(Some(&NSString::from_str("Automatic updates")));
+        update_policy.setAccessibilityLabel(Some(&NSString::from_str("When an update is found")));
         updates.addSubview(&update_policy);
 
         let check_now = button("Check Now", sel!(checkForUpdatesNow:), target, mtm);
-        check_now.setFrame(rect(width - 16.0 - 90.0, 9.0, 90.0, 24.0));
+        check_now.setFrame(rect(width - 16.0 - 96.0, row, 96.0, 24.0));
         updates.addSubview(&check_now);
+        row += 24.0 + 6.0;
 
-        let update_caption = label("", 11.0, false, mtm);
-        update_caption.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        update_caption.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-        update_caption.setFrame(rect(16.0, UPDATES_HEIGHT - 9.0 - 16.0, width - 32.0, 16.0));
-        updates.addSubview(&update_caption);
+        let gray = |row: f64| {
+            let line = label("", 11.0, false, mtm);
+            line.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            line.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            line.setFrame(rect(16.0, row, width - 32.0, 16.0));
+            updates.addSubview(&line);
+            line
+        };
+        let update_caption = gray(row);
+        let update_status = gray(row + 16.0 + 2.0);
 
         y += UPDATES_HEIGHT + MARGIN;
 
@@ -446,8 +467,11 @@ impl AdvancedViews {
             always,
             clipboard,
             login,
+            check_updates,
             update_policy,
             update_caption,
+            check_now,
+            update_status,
             permission_rows,
         }
     }

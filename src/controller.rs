@@ -76,6 +76,10 @@ pub struct AppSettings {
     /// What to do when a verified compatible release is available.
     #[serde(default)]
     pub update_policy: crate::update::Policy,
+    /// Check for releases on a schedule; when off, only Check Now checks
+    /// and nothing is announced or installed on its own.
+    #[serde(default = "default_check_updates")]
+    pub check_updates: bool,
 }
 
 impl Default for AppSettings {
@@ -86,11 +90,16 @@ impl Default for AppSettings {
             always_discoverable: false,
             sharing: false,
             update_policy: crate::update::Policy::default(),
+            check_updates: default_check_updates(),
         }
     }
 }
 
 fn default_share_clipboard() -> bool {
+    true
+}
+
+fn default_check_updates() -> bool {
     true
 }
 
@@ -115,6 +124,8 @@ pub enum Command {
     /// Turn clipboard sharing on or off, including for a running session.
     SetClipboard(bool),
     SetUpdatePolicy(crate::update::Policy),
+    /// Turn scheduled update checks on or off.
+    SetCheckUpdates(bool),
     /// Check for a new release right now, instead of waiting for the next
     /// periodic check.
     CheckUpdatesNow,
@@ -201,6 +212,8 @@ pub enum Event {
     },
     /// Where every member's displays sit, while the group runs.
     Arranged(crate::share::Layout),
+    /// An update check finished, with what the Updates panel should say.
+    UpdateChecked(String),
 }
 
 pub struct Handle {
@@ -292,6 +305,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let mut stored = settings.clone();
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
     let (update_policy, update_policy_rx) = watch::channel(stored.update_policy);
+    let (check_updates, check_updates_rx) = watch::channel(stored.check_updates);
     let recheck_updates = std::sync::Arc::new(tokio::sync::Notify::new());
     let active_protocols = std::sync::Arc::new(ActiveProtocols::default());
     // always advertised while sharing; the advertisement names no one
@@ -334,6 +348,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
         home.clone(),
         events.clone(),
         update_policy_rx,
+        check_updates_rx,
         active_protocols.clone(),
         recheck_updates.clone(),
     ));
@@ -490,6 +505,18 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     );
                 }
             }
+            Command::SetCheckUpdates(on) => {
+                stored.check_updates = on;
+                check_updates.send_replace(on);
+                if let Err(error) = save_settings(&home, &stored) {
+                    tracing::error!(error = ?error, "update check setting could not be saved");
+                    let _ = send_problem(
+                        &events,
+                        "Update setting could not be saved",
+                        "Check that Daisy can write its data folder, then try again.".to_owned(),
+                    );
+                }
+            }
             Command::CheckUpdatesNow => {
                 recheck_updates.notify_one();
             }
@@ -628,6 +655,7 @@ async fn update_worker(
     home: PathBuf,
     events: Sender<Event>,
     mut policy: watch::Receiver<crate::update::Policy>,
+    mut automatic: watch::Receiver<bool>,
     protocols: std::sync::Arc<ActiveProtocols>,
     recheck: std::sync::Arc<tokio::sync::Notify>,
 ) {
@@ -636,6 +664,7 @@ async fn update_worker(
         crate::update::REPOSITORY,
         current.clone(),
         crate::update::INTERVAL,
+        automatic.clone(),
         recheck,
     );
     let mut latest: Option<crate::update::Release> = None;
@@ -645,9 +674,15 @@ async fn update_worker(
     let mut installing = false;
     loop {
         tokio::select! {
-            changed = releases.changed() => {
+            checked = releases.recv() => {
+                let Some(checked) = checked else { return; };
+                let _ = events.send(Event::UpdateChecked(checked.summary()));
+                if let crate::update::Checked::Found(found) = checked {
+                    latest = found;
+                }
+            }
+            changed = automatic.changed() => {
                 if changed.is_err() { return; }
-                latest = releases.borrow().clone();
             }
             changed = policy.changed() => {
                 if changed.is_err() { return; }
@@ -673,7 +708,7 @@ async fn update_worker(
             continue;
         };
         let selected_policy = *policy.borrow();
-        if installing {
+        if installing || !*automatic.borrow() {
             continue;
         }
         let key = (version.to_string(), selected_policy);
@@ -1261,6 +1296,7 @@ mod tests {
             always_discoverable: true,
             sharing: true,
             update_policy: crate::update::Policy::InstallAll,
+            check_updates: false,
         };
         save_settings(directory.path(), &settings).unwrap();
         assert_eq!(load_settings(directory.path()).unwrap(), settings);

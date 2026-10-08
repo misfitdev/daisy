@@ -399,7 +399,22 @@ define_class!(
 
     #[unsafe(method(checkForUpdatesNow:))]
     fn check_for_updates_now(&self, _sender: Option<&AnyObject>) {
+        if let Some(views) = self.ivars().advanced.get() {
+            views.check_now.setEnabled(false);
+            views.update_status.setStringValue(&NSString::from_str("Checking…"));
+        }
         let _ = self.ivars().controller.send(Command::CheckUpdatesNow);
+    }
+
+    #[unsafe(method(toggleCheckUpdates:))]
+    fn toggle_check_updates(&self, _sender: Option<&AnyObject>) {
+        let on = {
+            let mut settings = self.ivars().settings.borrow_mut();
+            settings.check_updates = !settings.check_updates;
+            settings.check_updates
+        };
+        let _ = self.ivars().controller.send(Command::SetCheckUpdates(on));
+        self.refresh_update_policy();
     }
 
     #[unsafe(method(toggleShareClipboard:))]
@@ -902,6 +917,15 @@ impl AppDelegate {
                     panel.show(panel::State::Mismatch, false);
                 }
             }
+            Event::UpdateChecked(summary) => {
+                if let Some(views) = self.ivars().advanced.get() {
+                    views.check_now.setEnabled(true);
+                    views.update_status.setStringValue(&NSString::from_str(&format!(
+                        "{summary} Checked {}.",
+                        format_time(crate::trust::now())
+                    )));
+                }
+            }
             Event::Notice { title, detail } => {
                 self.show_alert(&title, &detail, NSAlertStyle::Informational);
             }
@@ -1217,13 +1241,19 @@ impl AppDelegate {
 
     fn refresh_update_policy(&self) {
         if let Some(views) = self.ivars().advanced.get() {
+            let automatic = self.ivars().settings.borrow().check_updates;
+            views.check_updates.set_on(automatic);
+            views.update_policy.setEnabled(automatic);
             let policy = self.ivars().settings.borrow().update_policy;
             if let Some(index) = crate::update::ORDER.iter().position(|candidate| *candidate == policy) {
                 views.update_policy.selectItemAtIndex(index as isize);
             }
-            views
-                .update_caption
-                .setStringValue(&NSString::from_str(policy.caption()));
+            let caption = if automatic {
+                policy.caption()
+            } else {
+                "Daisy checks only when you click Check Now."
+            };
+            views.update_caption.setStringValue(&NSString::from_str(caption));
         }
     }
 
@@ -1364,6 +1394,14 @@ fn expiry_caption(expiry: crate::trust::Expiry) -> String {
         Expiry::SessionEnd => "Until this session ends".to_owned(),
         Expiry::RenewsWhileConnected => "Renews while connected".to_owned(),
     }
+}
+
+fn format_time(at: crate::trust::Timestamp) -> String {
+    let formatter = NSDateFormatter::new();
+    formatter.setLocalizedDateFormatFromTemplate(&NSString::from_str("jmm"));
+    formatter
+        .stringFromDate(&NSDate::dateWithTimeIntervalSince1970(at as f64))
+        .to_string()
 }
 
 fn format_timestamp(at: crate::trust::Timestamp) -> String {

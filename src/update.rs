@@ -197,31 +197,83 @@ pub fn check(repository: &str) -> Result<Vec<Release>> {
         .context("reading the releases feed")
 }
 
-/// Checks for a newer release every `interval`, starting immediately, and
-/// publishes the newest one found. A failed check is logged and leaves the
-/// last successful result in place rather than clearing it.
+/// The result of one check of the releases feed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked {
+    /// The newest release, when it is newer than this one.
+    Found(Option<Release>),
+    Failed,
+}
+
+impl Checked {
+    /// What the Updates panel says about this check.
+    pub fn summary(&self) -> String {
+        match self {
+            Checked::Found(None) => "Daisy is up to date.".to_owned(),
+            Checked::Found(Some(release)) => {
+                format!("Daisy {} is available.", release.tag_name.trim_start_matches('v'))
+            }
+            Checked::Failed => "Could not check for updates.".to_owned(),
+        }
+    }
+}
+
+/// Checks the releases feed when `recheck` is notified and, while
+/// `automatic` is on, at start and every `interval`; turning `automatic` on
+/// checks immediately. Every result is published, including failures.
 pub fn watch(
     repository: &'static str,
     current: Version,
     interval: Duration,
+    automatic: watch::Receiver<bool>,
     recheck: std::sync::Arc<tokio::sync::Notify>,
-) -> watch::Receiver<Option<Release>> {
-    let (sender, receiver) = watch::channel(None);
+) -> tokio::sync::mpsc::UnboundedReceiver<Checked> {
+    watch_with(move || check(repository), current, interval, automatic, recheck)
+}
+
+fn watch_with(
+    fetch: impl Fn() -> Result<Vec<Release>> + Clone + Send + 'static,
+    current: Version,
+    interval: Duration,
+    mut automatic: watch::Receiver<bool>,
+    recheck: std::sync::Arc<tokio::sync::Notify>,
+) -> tokio::sync::mpsc::UnboundedReceiver<Checked> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
+        let mut on = *automatic.borrow_and_update();
+        let mut due = on;
         loop {
-            let current = current.clone();
-            match tokio::task::spawn_blocking(move || check(repository)).await {
-                Ok(Ok(releases)) => {
-                    if let Some(release) = newer_release(&current, &releases) {
-                        sender.send_replace(Some(release));
+            if !due {
+                tokio::select! {
+                    () = tokio::time::sleep(interval), if on => {}
+                    () = recheck.notified() => {}
+                    changed = automatic.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        let now = *automatic.borrow_and_update();
+                        due = now && !on;
+                        on = now;
+                        continue;
                     }
                 }
-                Ok(Err(error)) => tracing::warn!(error = ?error, "could not check for updates"),
-                Err(error) => tracing::warn!(error = ?error, "update check task failed"),
             }
-            tokio::select! {
-                () = tokio::time::sleep(interval) => {}
-                () = recheck.notified() => {}
+            due = false;
+            let current = current.clone();
+            let fetch = fetch.clone();
+            let checked = match tokio::task::spawn_blocking(fetch).await {
+                Ok(Ok(releases)) => Checked::Found(newer_release(&current, &releases)),
+                Ok(Err(error)) => {
+                    tracing::warn!(error = ?error, "could not check for updates");
+                    Checked::Failed
+                }
+                Err(error) => {
+                    tracing::warn!(error = ?error, "update check task failed");
+                    Checked::Failed
+                }
+            };
+            if sender.send(checked).is_err() {
+                return;
             }
         }
     });
@@ -231,6 +283,56 @@ pub fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn checks_follow_the_automatic_switch_and_check_now() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let fetch = move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        };
+        let hour = Duration::from_secs(3600);
+        let (switch, automatic) = watch::channel(false);
+        let recheck = Arc::new(tokio::sync::Notify::new());
+        let mut results = watch_with(fetch, Version::new(1, 0, 0), hour, automatic, recheck.clone());
+
+        tokio::time::sleep(3 * hour).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "off means no scheduled checks");
+
+        recheck.notify_one();
+        assert_eq!(
+            results.recv().await,
+            Some(Checked::Found(None)),
+            "Check Now reports its result"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        switch.send_replace(true);
+        results.recv().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "turning on checks immediately");
+        tokio::time::sleep(hour).await;
+        results.recv().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "on checks every interval");
+    }
+
+    #[test]
+    fn check_summaries_name_the_result() {
+        let release = |tag: &str| Release {
+            tag_name: tag.to_owned(),
+            html_url: String::new(),
+            draft: false,
+            prerelease: false,
+        };
+        assert_eq!(Checked::Found(None).summary(), "Daisy is up to date.");
+        assert_eq!(
+            Checked::Found(Some(release("v0.8.3"))).summary(),
+            "Daisy 0.8.3 is available."
+        );
+        assert_eq!(Checked::Failed.summary(), "Could not check for updates.");
+    }
 
     #[test]
     fn automatic_update_policies_follow_semver_boundaries() {

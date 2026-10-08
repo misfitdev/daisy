@@ -134,7 +134,9 @@ Homebrew's livecheck still watches for new stable releases for its own
 metadata, but `update-homebrew` is what actually advances the pinned version
 and SHA-256 in the tap.
 Advanced settings offers three update policies: ask before installing,
-auto-install routine updates (the same major version), or auto-install every update. Protocol-changing installs require
+auto-install routine updates (the same major version), or auto-install every update.
+They apply while **Check for updates automatically** is on; with it off, Daisy
+checks only on **Check Now** and announces or installs nothing on its own. Protocol-changing installs require
 signed compatibility metadata that supports this system and every currently
 connected peer. Offline peers do not block installation and may need Daisy
 updated before reconnecting. If an incompatible active peer disconnects,
