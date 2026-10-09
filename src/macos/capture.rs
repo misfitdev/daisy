@@ -686,7 +686,16 @@ mod tests {
             CGEventSetIntegerValueField(event, kCGEventSourceUserData, DAISY_EVENT_MARKER);
             assert!(handle(&context, kCGEventKeyDown, event));
             CFRelease(event.cast_const());
+
+            // the do-nothing modifier event that keeps an idle peer's screen saver off
+            let event = CGEventCreate(std::ptr::null_mut());
+            assert!(!event.is_null());
+            CGEventSetType(event, kCGEventFlagsChanged);
+            CGEventSetIntegerValueField(event, kCGEventSourceUserData, DAISY_EVENT_MARKER);
+            assert!(handle(&context, kCGEventFlagsChanged, event));
+            CFRelease(event.cast_const());
         }
+        assert_eq!(control.physical_activity(), None, "Daisy's own events are not activity");
         assert!(!lock(&control.state).owns());
         assert!(input.try_recv().is_err());
     }
