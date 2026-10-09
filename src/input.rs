@@ -301,25 +301,32 @@ impl Driver {
         })
     }
 
+    /// A modifier key changed. Which modifiers are held is read from the
+    /// event's flags rather than toggled per event: the event tap can miss
+    /// a change, and a toggle would then stay inverted until the session
+    /// ends.
     pub fn modifiers(&mut self, code: u16, flags: u64) -> Route {
         if !self.remote {
-            if self.orphaned_modifiers.remove(&code) {
+            let was_held = self.local_modifiers.contains(&code) || self.orphaned_modifiers.contains(&code);
+            let down = held_after(code, flags, was_held);
+            if self.orphaned_modifiers.remove(&code) && !down {
                 return Route::Drop;
             }
-            if modifier_mask(code).is_some() && !self.local_modifiers.remove(&code) {
-                self.local_modifiers.insert(code);
+            held_now(&mut self.local_modifiers, code, down, flags);
+            return Route::Local;
+        }
+        if self.local_modifiers.contains(&code) {
+            let down = held_after(code, flags, true);
+            if !down {
+                self.local_modifiers.remove(&code);
+                return Route::Local;
             }
-            return Route::Local;
         }
-        if self.local_modifiers.remove(&code) {
-            return Route::Local;
-        }
-        if self.orphaned_modifiers.remove(&code) {
+        if self.orphaned_modifiers.remove(&code) && !held_after(code, flags, true) {
             return Route::Drop;
         }
-        if modifier_mask(code).is_some() && !self.remote_modifiers.remove(&code) {
-            self.remote_modifiers.insert(code);
-        }
+        let down = held_after(code, flags, self.remote_modifiers.contains(&code));
+        held_now(&mut self.remote_modifiers, code, down, flags);
         Route::Forward(InputEvent::Modifiers { code, flags })
     }
 
@@ -579,11 +586,8 @@ impl Target {
                 }]
             }
             InputEvent::Modifiers { code, flags } => {
-                if modifier_mask(code).is_some() && modifier_is_down(code, flags) {
-                    self.modifiers.insert(code);
-                } else {
-                    self.modifiers.remove(&code);
-                }
+                let down = held_after(code, flags, self.modifiers.contains(&code));
+                held_now(&mut self.modifiers, code, down, flags);
                 self.flags = flags;
                 vec![Action::Modifiers { code, flags }]
             }
@@ -653,6 +657,15 @@ impl Target {
 
 /// Modifier transitions remain authoritative when a key event omits a held
 /// modifier from its flags. Forwarded keys must carry the complete chord.
+/// Brings `held` in line with a modifier event's flags: `code` is held when
+/// `down`, and any other modifier the flags no longer show is released.
+fn held_now(held: &mut BTreeSet<u16>, code: u16, down: bool, flags: u64) {
+    held.retain(|other| *other != code && modifier_is_down(*other, flags));
+    if down {
+        held.insert(code);
+    }
+}
+
 fn with_held_modifiers(flags: u64, held: &BTreeSet<u16>) -> u64 {
     held.iter()
         .fold(flags, |flags, code| flags | modifier_mask(*code).unwrap_or(0))
@@ -698,7 +711,20 @@ impl Action {
 /// Whether this modifier is held in a captured flag state. Side-specific bits
 /// distinguish releasing one key while the other key of the same kind stays down.
 pub fn modifier_is_down(code: u16, flags: u64) -> bool {
-    let side = match code {
+    if let Some((own, other)) = side_bits(code)
+        && flags & (own | other) != 0
+    {
+        return flags & own != 0;
+    }
+    if code == 57 {
+        return flags & 0x0001_0000 != 0;
+    }
+    modifier_mask(code).is_some_and(|mask| flags & mask != 0)
+}
+
+/// The device-dependent bits for this modifier key and its left/right twin.
+fn side_bits(code: u16) -> Option<(u64, u64)> {
+    match code {
         55 => Some((0x0000_0008, 0x0000_0010)),
         54 => Some((0x0000_0010, 0x0000_0008)),
         56 => Some((0x0000_0002, 0x0000_0004)),
@@ -708,16 +734,22 @@ pub fn modifier_is_down(code: u16, flags: u64) -> bool {
         58 => Some((0x0000_0020, 0x0000_0040)),
         61 => Some((0x0000_0040, 0x0000_0020)),
         _ => None,
+    }
+}
+
+/// Whether `code` is held after its own modifier event. Without left/right
+/// bits, releasing one of a pair still shows the pair's flag, so then the
+/// event can only flip what was recorded for that key.
+fn held_after(code: u16, flags: u64, was_held: bool) -> bool {
+    let Some(mask) = modifier_mask(code) else {
+        return false;
     };
-    if let Some((own, other)) = side
-        && flags & (own | other) != 0
-    {
-        return flags & own != 0;
+    let ambiguous = side_bits(code).is_some_and(|(own, other)| flags & (own | other) == 0) && flags & mask != 0;
+    if ambiguous {
+        !was_held
+    } else {
+        modifier_is_down(code, flags)
     }
-    if code == 57 {
-        return flags & 0x0001_0000 != 0;
-    }
-    modifier_mask(code).is_some_and(|mask| flags & mask != 0)
 }
 
 /// The modifier flag a modifier key sets, from CGEventTypes.h. Caps Lock is
@@ -1056,6 +1088,49 @@ mod tests {
         assert_eq!(tags, [0, 1, 2, 3, 4, 5, 6, 7]);
     }
     const A_KEY: u16 = 0;
+
+    /// The forwarded flags of a plain key typed after `modifiers` events.
+    fn typed_flags(source: &mut Driver, modifiers: &[(u16, u64)]) -> u64 {
+        for &(code, flags) in modifiers {
+            source.modifiers(code, flags);
+        }
+        let Route::Forward(InputEvent::Key { flags, .. }) = source.key(0, true, false, 0) else {
+            panic!("a key typed on a peer must forward");
+        };
+        flags
+    }
+
+    #[test]
+    fn a_missed_modifier_press_does_not_stick_on_later_keys() {
+        // Command went down while the event tap could not record it; only
+        // its release, carrying no modifier flags, is seen
+        let mut source = entered_driver();
+        assert_eq!(typed_flags(&mut source, &[(COMMAND_KEY, 0)]) & COMMAND_FLAG, 0);
+    }
+
+    #[test]
+    fn a_missed_modifier_release_clears_on_the_next_modifier_change() {
+        let shift = 0x0002_0000;
+        let mut source = entered_driver();
+        let flags = typed_flags(&mut source, &[(COMMAND_KEY, COMMAND_FLAG), (56, shift)]);
+        assert_eq!(
+            flags & COMMAND_FLAG,
+            0,
+            "Command's release was missed, and Shift's flags show it up"
+        );
+        assert_ne!(flags & shift, 0, "Shift is held");
+    }
+
+    #[test]
+    fn a_missed_local_modifier_press_does_not_send_its_release_here_later() {
+        let mut source = driver(Side::Left);
+        source.modifiers(COMMAND_KEY, 0);
+        assert!(matches!(source.motion((0.0, 250.0), (-3.0, 0.0)), Route::Enter { .. }));
+        assert!(
+            matches!(source.modifiers(COMMAND_KEY, COMMAND_FLAG), Route::Forward(_)),
+            "a Command press after crossing belongs to the peer"
+        );
+    }
 
     fn entered_driver() -> Driver {
         let mut driver = driver(Side::Left);
