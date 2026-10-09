@@ -38,7 +38,7 @@ Changes apply across the group and are saved. If two systems change the arrangem
 
 Move the pointer off a display toward a peer's display to use that system. You can cross any nearby edge or corner; crossing between this system's own displays stays local. Small gaps are allowed. See [crossing geometry](architecture.md#session-flow) for the exact rules.
 
-Using a system's own keyboard or trackpad takes control there immediately. Resting a hand on a trackpad does not; moving the pointer, clicking, typing, scrolling or swiping does. Momentum scrolling stays on the system where the flick began. Control never crosses while a mouse button is held or onto a locked system; unlock it there first.
+Using a system's own keyboard or trackpad takes control there immediately. Momentum scrolling stays on the system where the flick began. Control never crosses while a mouse button is held or onto a locked system; unlock it there first.
 
 **Control-Option-Command-Escape** returns control to the system you are at and centers its pointer on the main display. Disconnecting or stopping sharing also releases held remote input.
 
