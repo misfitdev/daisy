@@ -232,8 +232,9 @@ pub struct Sharing<C> {
     enabled: watch::Receiver<bool>,
     outbox: Outbox,
     inbox: Inbox,
-    /// Control just crossed to this system, so one snapshot from the peer is due.
-    expecting: bool,
+    /// Control just crossed to this system, so one snapshot is due: from this
+    /// peer, or from whichever peer had control when that is not known.
+    expecting: Option<Option<PublicKey>>,
     /// A due snapshot is arriving from this peer; parts from any other are
     /// ignored until it is done.
     receiving: Option<PublicKey>,
@@ -246,7 +247,7 @@ impl<C: Clipboard> Sharing<C> {
             enabled,
             outbox: Outbox::default(),
             inbox: Inbox::default(),
-            expecting: false,
+            expecting: None,
             receiving: None,
         }
     }
@@ -284,8 +285,10 @@ impl<C: Clipboard> Sharing<C> {
     }
 
     /// Control has crossed to this system; the peer's clipboard follows.
-    pub fn expect_snapshot(&mut self) {
-        self.expecting = true;
+    /// Control crossed here from `from`, or from an unknown peer when it was
+    /// taken by using this system; that peer's clipboard follows.
+    pub fn expect_snapshot(&mut self, from: Option<PublicKey>) {
+        self.expecting = Some(from);
         // a snapshot still arriving from an earlier crossing never finished,
         // perhaps because its sender disconnected; it must not block this one
         self.receiving = None;
@@ -300,10 +303,13 @@ impl<C: Clipboard> Sharing<C> {
             Some(sender) if sender != from => return,
             Some(_) => {}
             None => {
-                if !(self.expecting && matches!(part, ClipboardPart::Begin { .. })) {
+                let due = self
+                    .expecting
+                    .is_some_and(|sender| sender.is_none_or(|sender| sender == from));
+                if !(due && matches!(part, ClipboardPart::Begin { .. })) {
                     return;
                 }
-                self.expecting = false;
+                self.expecting = None;
                 self.receiving = Some(from);
             }
         }
@@ -626,7 +632,7 @@ mod tests {
     fn a_copy_crosses_and_is_not_echoed_back() {
         let (mut here, _on_here) = sharing(Some(text("copied here")));
         let (mut there, _on_there) = sharing(None);
-        there.expect_snapshot();
+        there.expect_snapshot(None);
         for part in outgoing(&mut here) {
             there.receive(peer(), part);
         }
@@ -640,7 +646,7 @@ mod tests {
         on_here.send_replace(false);
         assert!(outgoing(&mut here).is_empty());
         let (mut other, _on) = sharing(Some(text("from the peer")));
-        here.expect_snapshot();
+        here.expect_snapshot(None);
         for part in outgoing(&mut other) {
             here.receive(peer(), part);
         }
@@ -661,7 +667,7 @@ mod tests {
     fn only_one_snapshot_is_accepted_per_crossing() {
         let (mut here, _on) = sharing(Some(text("mine")));
         let (mut other, _on_other) = sharing(Some(text("first")));
-        here.expect_snapshot();
+        here.expect_snapshot(None);
         for part in outgoing(&mut other) {
             here.receive(peer(), part);
         }
@@ -717,7 +723,7 @@ mod tests {
         let (origin, next) = (system(1), system(2));
         let (mut there, _on_there) = sharing(Some(text("copied on the first system")));
         let (mut here, _on_here) = sharing(None);
-        here.expect_snapshot();
+        here.expect_snapshot(None);
         for part in there.crossing(system(3)).map(|read| read()).unwrap_or_default() {
             here.receive(origin, part);
         }
@@ -736,7 +742,7 @@ mod tests {
         let (mut there, _on_there) = sharing(Some(text("copied on the sender")));
         let (mut other, _on_other) = sharing(Some(text("from someone else")));
         let (mut here, _on_here) = sharing(None);
-        here.expect_snapshot();
+        here.expect_snapshot(None);
         let mut theirs = there.crossing(system(4)).map(|read| read()).unwrap_or_default();
         let done = theirs.pop().unwrap();
         for part in theirs {
@@ -762,17 +768,33 @@ mod tests {
         let (mut there, _on_there) = sharing(Some(text("never finished")));
         let (mut other, _on_other) = sharing(Some(text("copied on the next peer")));
         let (mut here, _on_here) = sharing(None);
-        here.expect_snapshot();
+        here.expect_snapshot(None);
         let mut unfinished = there.crossing(system(4)).map(|read| read()).unwrap_or_default();
         unfinished.pop();
         for part in unfinished {
             here.receive(gone, part);
         }
         // the first peer disconnected; control later crosses here from another
-        here.expect_snapshot();
+        here.expect_snapshot(None);
         for part in other.crossing(system(4)).map(|read| read()).unwrap_or_default() {
             here.receive(next, part);
         }
         assert_eq!(here.clipboard.content, Some(text("copied on the next peer")));
+    }
+
+    #[test]
+    fn a_late_snapshot_from_another_peer_cannot_take_a_crossing_s_place() {
+        let (entered_from, late) = (system(1), system(2));
+        let (mut there, _on_there) = sharing(Some(text("from the peer control came from")));
+        let (mut other, _on_other) = sharing(Some(text("late from someone else")));
+        let (mut here, _on_here) = sharing(None);
+        here.expect_snapshot(Some(entered_from));
+        for part in other.crossing(system(4)).map(|read| read()).unwrap_or_default() {
+            here.receive(late, part);
+        }
+        for part in there.crossing(system(4)).map(|read| read()).unwrap_or_default() {
+            here.receive(entered_from, part);
+        }
+        assert_eq!(here.clipboard.content, Some(text("from the peer control came from")));
     }
 }

@@ -401,7 +401,7 @@ where
                             ended.push((*key, Err(error)));
                         }
                     }
-                    sharing.expect_snapshot();
+                    sharing.expect_snapshot(None);
                 }
                 publish(&control, &links, &group.reports);
             }
@@ -418,7 +418,7 @@ where
                 match message {
                     Message::ControlClaim { .. } => {
                         for action in release.target.reclaim() { release.injector.execute(&action); }
-                        sharing.expect_snapshot();
+                        sharing.expect_snapshot(None);
                         for (key, link) in &links {
                             if let Err(error) = link.outgoing.send(message.clone()) {
                                 ended.push((*key, Err(error)));
@@ -597,7 +597,7 @@ where
                             let mut crossing = false;
                             let actions = match message {
                                 Message::Enter { at, .. } => {
-                                    sharing.expect_snapshot();
+                                    sharing.expect_snapshot(Some(peer));
                                     release.injector.arrived();
                                     release.target.enter(at)
                                 },
@@ -624,7 +624,7 @@ where
                     match links.get(&to).filter(|link| !link.locked) {
                         _ if to == me => {
                             pointer.leave(Some(at));
-                            sharing.expect_snapshot();
+                            sharing.expect_snapshot(Some(peer));
                         }
                         Some(next) => {
                             crossed = Some(to);
