@@ -280,9 +280,23 @@ pub fn spawn(home: PathBuf, name: String) -> Result<Handle> {
     })
 }
 
+fn arrangement_preview_home(home: &Path, real_home: &Path) -> Result<PathBuf> {
+    let selected = home.canonicalize().context("open the preview data folder")?;
+    match real_home.canonicalize() {
+        Ok(real) if selected.starts_with(&real) => {
+            bail!("the arrangement preview requires a separate data folder")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("check the real data folder"),
+    }
+    Ok(selected)
+}
+
 /// Offline arrangement preview for `just dev`: sample screens, no capture,
 /// pairing, discovery, or persistent device identity.
 pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
+    let home = arrangement_preview_home(&home, &default_home()?)?;
     let store = PeerStore::open(&home)?;
     let saved = store.arrangement().context("seed an arrangement for the preview")?;
     let me = saved.1;
@@ -1283,6 +1297,30 @@ fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_refuses_real_data_and_aliases_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let child = real.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let marker = real.join("arrangement.toml");
+        fs::write(&marker, b"original geometry").unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        for selected in [&real, &alias, &child] {
+            assert!(arrangement_preview_home(selected, &real).is_err());
+        }
+        assert_eq!(fs::read(&marker).unwrap(), b"original geometry");
+        assert_eq!(fs::read_dir(&real).unwrap().count(), 2);
+        let separate = root.path().join("preview");
+        fs::create_dir(&separate).unwrap();
+        assert_eq!(
+            arrangement_preview_home(&separate, &real).unwrap(),
+            separate.canonicalize().unwrap()
+        );
+        assert!(arrangement_preview_home(&separate, &root.path().join("absent")).is_ok());
+    }
 
     #[tokio::test]
     async fn the_last_update_check_is_reported_after_a_restart() {

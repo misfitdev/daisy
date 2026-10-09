@@ -245,8 +245,8 @@ pub struct Sharing<C> {
     /// ignored until it is done.
     receiving: Option<PublicKey>,
     /// With clipboard IDs: the copy on the pasteboard when it came from a
-    /// peer, and the change count writing it produced.
-    received: Option<(CopyId, i64)>,
+    /// peer, its supplying peer, and the change count writing it produced.
+    received: Option<(CopyId, PublicKey, i64)>,
     /// The copy last offered to each peer; a request is answered only for it.
     offered: HashMap<PublicKey, CopyId>,
     /// The copy last requested, from whom, and whether its snapshot has begun.
@@ -308,7 +308,7 @@ impl<C: Clipboard> Sharing<C> {
     pub fn current(&self, me: PublicKey) -> CopyId {
         let count = self.clipboard.change_count();
         match self.received {
-            Some((copy, written)) if written == count => copy,
+            Some((copy, _, written)) if written == count => copy,
             _ => CopyId { origin: me, count },
         }
     }
@@ -317,6 +317,12 @@ impl<C: Clipboard> Sharing<C> {
     /// arrives here, or none with sharing switched off.
     pub fn offer(&mut self, me: PublicKey, peer: PublicKey) -> Option<CopyId> {
         if !*self.enabled.borrow() {
+            return None;
+        }
+        if self
+            .received
+            .is_some_and(|(_, source, written)| source == peer && written == self.clipboard.change_count())
+        {
             return None;
         }
         let copy = self.current(me);
@@ -334,7 +340,11 @@ impl<C: Clipboard> Sharing<C> {
         if expected {
             self.expecting = None;
         }
-        if !(expected || driver == Some(from)) || !*self.enabled.borrow() || copy == self.current(me) {
+        if !(expected || driver == Some(from))
+            || !*self.enabled.borrow()
+            || copy.origin == me
+            || copy == self.current(me)
+        {
             return false;
         }
         self.requested = Some((from, copy, false));
@@ -397,7 +407,7 @@ impl<C: Clipboard> Sharing<C> {
             }
             let count = self.clipboard.write(&content);
             self.outbox.wrote(from, count);
-            self.received = Some((copy, count));
+            self.received = Some((copy, from, count));
             Some(copy)
         });
         if done {
@@ -965,6 +975,43 @@ mod tests {
             to.sharing.receive_requested(from.key, part);
         }
         sent
+    }
+
+    #[test]
+    fn received_copy_is_not_offered_to_its_supplier() {
+        let mut origin = member(1, Some(text("relayed")));
+        let mut supplier = member(2, None);
+        let mut receiver = member(3, None);
+        assert!(hand(&mut origin, &mut supplier, false) > 0);
+        assert!(hand(&mut supplier, &mut receiver, false) > 0);
+        assert_eq!(receiver.sharing.offer(receiver.key, supplier.key), None);
+        receiver.sharing.clipboard.copy(text("local"));
+        assert!(hand(&mut receiver, &mut supplier, false) > 0);
+        assert_eq!(supplier.sharing.clipboard.content, Some(text("local")));
+    }
+
+    #[test]
+    fn stale_local_copy_is_rejected_during_an_incomplete_handoff() {
+        let mut local = member(1, Some(text("old")));
+        let mut peer = member(2, None);
+        assert!(hand(&mut local, &mut peer, false) > 0);
+        let stale = peer.sharing.current(peer.key);
+        local.sharing.clipboard.copy(text("new"));
+        let offered = local.sharing.offer(local.key, peer.key).unwrap();
+        peer.sharing.expect_snapshot(Some(local.key));
+        assert!(peer.sharing.wants(peer.key, local.key, offered, None));
+        let mut parts = local.sharing.requested(local.key, peer.key, offered, false).unwrap()();
+        let done = parts.pop().unwrap();
+        assert!(matches!(done, ClipboardPart::Done));
+        for part in parts {
+            peer.sharing.receive_requested(local.key, part);
+        }
+        assert_eq!(hand(&mut peer, &mut local, false), 0);
+        local.sharing.expect_snapshot(Some(peer.key));
+        assert!(!local.sharing.wants(local.key, peer.key, stale, None));
+        assert_eq!(local.sharing.clipboard.content, Some(text("new")));
+        peer.sharing.receive_requested(local.key, done);
+        assert_eq!(peer.sharing.clipboard.content, Some(text("new")));
     }
 
     #[test]
