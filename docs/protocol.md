@@ -10,7 +10,7 @@ A TCP connection, to port 24850 by default. Every frame is a big-endian `u16` le
 
 ## Handshake
 
-Every connection starts with a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake, and both sides send long-term keys. The prologue is `daisy` and never changes. Each side includes its protocol generation in the first handshake message, followed by authenticated capabilities encoded as UTF-8 within the existing 64-byte limit. The capability list explicitly names supported generations, and peers select the greatest generation both support. A legacy peer can continue using the generation it sent while ignoring the capability suffix. Trace and file-transfer capabilities are negotiated independently. The capability tail is authenticated because it is bound into the device proof.
+Every connection starts with a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake, and both sides send long-term keys. The prologue is `daisy` and never changes. Each side includes its protocol generation in the first handshake message, followed by authenticated capabilities encoded as UTF-8 within the existing 64-byte limit. The capability list explicitly names supported generations, and peers select the greatest generation both support. A legacy peer can continue using the generation it sent while ignoring the capability suffix. Trace, file-transfer and clipboard-ID capabilities are negotiated independently. The capability tail is authenticated because it is bound into the device proof.
 
 Both sides finish the authenticated handshake before comparing protocol support, so a peer can explain a mismatch. Different releases connect when they negotiate a shared protocol generation. Releases support the immediately preceding generation during rolling updates; older or unknown future generations are rejected unless explicitly supported. The handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
 
@@ -64,6 +64,7 @@ Points are in a system's own coordinates: macOS global coordinates, origin at th
 | 2 | `End` | `id` |
 | 3 | `Done` | none; the snapshot is complete |
 | 4 | `Ack` | none; sent back for every `Chunk` received |
+| 5 | `For` | `copy`; first part of a snapshot sent in answer to `ClipboardRequest`, on `clipid-v1` links only |
 
 A snapshot holds a `Text` item, with an `Rtf` item when the copy has rich text, or a `Png` item. The receiver writes its pasteboard once, on `Done`, from the items that arrived whole. Text and rich text are limited to 4 MiB each and images to 32 MiB; a larger item is left out of the snapshot.
 
@@ -121,6 +122,21 @@ Offers go to all currently connected capable members. Later arrivals receive no 
 Offers are bounded to 64 items, 100,000 entries and 4 GiB of contents. Paths are at most 4,096 bytes and 128 components deep. Data chunks are at most 16,000 bytes. Extended attributes are bounded to 64 per entry and 32 MiB per item. Declared and decompressed sizes must agree; the receiver caps the zstd window at 8 MiB. Symbolic-link resolution is checked against the complete item manifest before publication. Streaming zstd applies before encryption, with an independent context per file: level 1 above 64 MiB, otherwise level 3. If the first 64 KiB sample does not shrink, contents are sent uncompressed. Input messages are never compressed.
 
 The native clipboard adapter supplies local file URLs when Finder requests them. It may request them before Paste. A pending native request starts a worker and returns without a file URL. Finder’s Paste action becomes available when all items are cached and Daisy republishes their URLs, provided its offer still owns the clipboard. AppKit keeps servicing progress and cancellation. Transient listener failures retry with backoff, and rejected offers or an unavailable file service do not terminate the input link. Clipboard text fallback is retained for destinations without native file support. Files and directories are staged under hidden temporary names and published exclusively after contents and metadata complete; the top-level folder is renamed last. Completed cache entries survive clipboard replacement until the next boot so consumers can finish reading returned URLs.
+
+## Clipboard copy IDs
+
+Only links whose authenticated handshake payloads both advertise `clipid-v1` use tags 28 and 29 and the `For` clipboard part. Other links keep the snapshot exchange in step 6 of the session.
+
+| Tag | Message | Purpose |
+| --- | --- | --- |
+| 28 | `ClipboardOffer { copy }` | The copy on the sender's pasteboard |
+| 29 | `ClipboardRequest { copy }` | Asks for an offered copy the receiver lacks |
+
+A `CopyId` is the `origin` key of the system the copy was made on and that system's pasteboard change count at the time. It stays the same as the copy is passed from system to system: a system that writes a requested copy keeps its ID, and a copy made locally gets a new one.
+
+Wherever step 6 sends a snapshot, a `clipid-v1` link sends `ClipboardOffer` instead. The receiver ignores an offer unless it comes from the peer control just crossed from, or from the peer whose pointer is on it now, and unless it lacks that copy; otherwise it sends `ClipboardRequest`. The sender answers only for the copy it last offered that peer and still holds, with a snapshot that begins `For { copy }`. The receiver accepts only the snapshot `For` the copy it last requested from that peer, and acknowledges chunks as in step 6. A newer offer supersedes an outstanding request.
+
+When the pointer moves from one peer on to another, the driver also accepts an offer from the peer it left; once that copy is written, the driver offers it to the peer the pointer is on, so a copy made on a remotely driven system follows the pointer.
 
 ## A group
 
