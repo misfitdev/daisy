@@ -56,7 +56,7 @@ link. Control-Option-Command-Escape remains the shortcut to take control back.
 
 ## Clipboard
 
-When control moves, the clipboard goes with it: the system giving up control sends its clipboard, including when control moves because someone started using the other system. Copy on one system, move to the peer and paste there; copy on the peer, come back (through the edge, by using this system, or with Control-Option-Command-Escape) and paste here. In a group, the clipboard follows control to every system: copy on one, move through a second to a third, and paste there.
+When control moves, the clipboard goes with it: the system giving up control sends its clipboard, including when control moves because someone started using the other system. Copy on one system, move to the peer and paste there; copy on the peer, come back (through the edge, by using this system, or with Control-Option-Command-Escape) and paste here. In a group, a copy made on the system whose keyboard you are using follows control to every system: copy there, move through a second to a third, and paste there.
 
 - In `Daisy.app`, files and folders copied in Finder are shared with every connected group member. Paste normally in Finder. Daisy receives their contents when Finder first requests the clipboard; Finder can make that request before you choose Paste. A native panel shows progress and lets you cancel. While receiving, Finder’s Paste action is unavailable; wait for the panel to finish, then paste.
 - Pending file offers expire after 15 seconds without activity. Copy the files again if the offer expires. Copying something else or receiving a newer offer replaces the offer; transfers already running may finish.
