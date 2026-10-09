@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use tokio::sync::watch;
 
+use crate::identity::PublicKey;
 use crate::protocol::{ClipboardKind, ClipboardPart};
 
 /// Largest plain or rich text item sent, in bytes.
@@ -58,44 +59,62 @@ fn limit(kind: ClipboardKind) -> usize {
     }
 }
 
-/// Decides whether this system's clipboard goes out when control crosses, and
-/// turns it into parts.
+/// Decides whether this system's clipboard goes out to a peer when control
+/// crosses to it, and turns it into parts.
 #[derive(Debug, Default)]
 pub struct Outbox {
     next_id: u32,
-    sent: Option<(i64, bool)>,
-    written: Option<i64>,
+    /// The clipboard change each peer already holds: sent to it, with or
+    /// without native files, or received from it.
+    held: HashMap<PublicKey, Held>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Held {
+    count: i64,
+    /// Whether it was sent with native files; `None` when it came from that
+    /// peer, which holds it in every form.
+    files: Option<bool>,
 }
 
 impl Outbox {
-    /// Parts for the clipboard as it is now, or none when there is nothing new:
-    /// unchanged since the last send, or still exactly what arrived from the peer.
-    pub fn take(&mut self, clipboard: &impl Clipboard) -> Vec<ClipboardPart> {
-        match self.prepare(clipboard.change_count()) {
+    /// Parts for the clipboard as it is now, or none when `peer` already
+    /// holds it: sent there unchanged, or what arrived from there.
+    pub fn take(&mut self, peer: PublicKey, clipboard: &impl Clipboard) -> Vec<ClipboardPart> {
+        match self.prepare_for_peer(peer, clipboard.change_count(), false) {
             Some(first) => clipboard.read().map(|c| parts(first, &c)).unwrap_or_default(),
             None => Vec::new(),
         }
     }
 
-    /// Whether the clipboard at `count` is new; if so, records it as sent and
-    /// reserves the ids its items will use.
-    fn prepare(&mut self, count: i64) -> Option<u32> {
-        self.prepare_for_peer(count, false)
-    }
-
-    fn prepare_for_peer(&mut self, count: i64, files: bool) -> Option<u32> {
-        if self.sent == Some((count, files)) || self.written == Some(count) {
+    /// Whether `peer` lacks the clipboard at `count`; if so, records it as
+    /// sent there and reserves the ids its items will use.
+    fn prepare_for_peer(&mut self, peer: PublicKey, count: i64, files: bool) -> Option<u32> {
+        let has = |held: &Held| held.count == count && held.files.is_none_or(|sent| sent == files);
+        if self.held.get(&peer).is_some_and(has) {
             return None;
         }
-        self.sent = Some((count, files));
+        self.held.insert(
+            peer,
+            Held {
+                count,
+                files: Some(files),
+            },
+        );
         let first = self.next_id;
         self.next_id = self.next_id.wrapping_add(ITEM_KINDS);
         Some(first)
     }
 
-    /// Records a write of the peer's clipboard, so it is not sent straight back.
-    pub fn wrote(&mut self, change_count: i64) {
-        self.written = Some(change_count);
+    /// Records writing `from`'s clipboard, so it is not sent straight back.
+    pub fn wrote(&mut self, from: PublicKey, change_count: i64) {
+        self.held.insert(
+            from,
+            Held {
+                count: change_count,
+                files: None,
+            },
+        );
     }
 }
 
@@ -235,18 +254,25 @@ impl<C: Clipboard> Sharing<C> {
         &self.clipboard
     }
 
-    /// Control is leaving this system. Returns the work of reading the clipboard
-    /// and splitting it into parts, to run off the session loop: a large image
-    /// takes long enough to read and convert that input would stall behind it.
-    pub fn crossing(&mut self) -> Option<impl FnOnce() -> Vec<ClipboardPart> + Send + 'static> {
-        self.crossing_for_peer(false)
+    /// Control is leaving this system for `peer`. Returns the work of reading
+    /// the clipboard and splitting it into parts, to run off the session loop:
+    /// a large image takes long enough to read and convert that input would
+    /// stall behind it.
+    pub fn crossing(&mut self, peer: PublicKey) -> Option<impl FnOnce() -> Vec<ClipboardPart> + Send + 'static> {
+        self.crossing_for_peer(peer, false)
     }
 
-    pub fn crossing_for_peer(&mut self, files: bool) -> Option<impl FnOnce() -> Vec<ClipboardPart> + Send + 'static> {
+    pub fn crossing_for_peer(
+        &mut self,
+        peer: PublicKey,
+        files: bool,
+    ) -> Option<impl FnOnce() -> Vec<ClipboardPart> + Send + 'static> {
         if !*self.enabled.borrow() {
             return None;
         }
-        let first = self.outbox.prepare_for_peer(self.clipboard.change_count(), files)?;
+        let first = self
+            .outbox
+            .prepare_for_peer(peer, self.clipboard.change_count(), files)?;
         let clipboard = self.clipboard.clone();
         Some(move || {
             clipboard
@@ -264,7 +290,7 @@ impl<C: Clipboard> Sharing<C> {
     /// A part arrived from the peer. Only a snapshot that follows a crossing
     /// to this system is accepted, so the peer cannot replace this clipboard at
     /// other times. A completed one is written if sharing is on.
-    pub fn receive(&mut self, part: ClipboardPart) {
+    pub fn receive(&mut self, from: PublicKey, part: ClipboardPart) {
         if !self.receiving {
             if !(self.expecting && matches!(part, ClipboardPart::Begin { .. })) {
                 return;
@@ -277,7 +303,7 @@ impl<C: Clipboard> Sharing<C> {
             && *self.enabled.borrow()
         {
             let count = self.clipboard.write(&content);
-            self.outbox.wrote(count);
+            self.outbox.wrote(from, count);
         }
         if done {
             self.receiving = false;
@@ -288,6 +314,15 @@ impl<C: Clipboard> Sharing<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn system(byte: u8) -> PublicKey {
+        PublicKey::from_bytes(&[byte; 32]).unwrap()
+    }
+
+    /// The peer an exchange in these tests goes to or comes from.
+    fn peer() -> PublicKey {
+        system(9)
+    }
 
     #[derive(Default, Clone)]
     struct Fake {
@@ -347,7 +382,7 @@ mod tests {
         };
         let mut clipboard = Fake::default();
         clipboard.copy(content.clone());
-        let parts = Outbox::default().take(&clipboard);
+        let parts = Outbox::default().take(peer(), &clipboard);
         let chunks = parts
             .iter()
             .filter(|p| matches!(p, ClipboardPart::Chunk { .. }))
@@ -365,7 +400,7 @@ mod tests {
             png: None,
             concealed: false,
         });
-        let arrived = deliver(Outbox::default().take(&clipboard)).unwrap();
+        let arrived = deliver(Outbox::default().take(peer(), &clipboard)).unwrap();
         assert_eq!(arrived.text.map(|t| t.len()), Some(MAX_TEXT));
         assert_eq!(arrived.rtf, None);
     }
@@ -377,7 +412,7 @@ mod tests {
             png: Some(vec![0; MAX_IMAGE + 1]),
             ..Content::default()
         });
-        assert!(Outbox::default().take(&clipboard).is_empty());
+        assert!(Outbox::default().take(peer(), &clipboard).is_empty());
     }
 
     #[test]
@@ -388,7 +423,7 @@ mod tests {
             concealed: true,
             ..Content::default()
         });
-        assert!(Outbox::default().take(&clipboard).is_empty());
+        assert!(Outbox::default().take(peer(), &clipboard).is_empty());
     }
 
     #[test]
@@ -396,10 +431,10 @@ mod tests {
         let mut clipboard = Fake::default();
         clipboard.copy(text("one"));
         let mut outbox = Outbox::default();
-        assert!(!outbox.take(&clipboard).is_empty());
-        assert!(outbox.take(&clipboard).is_empty());
+        assert!(!outbox.take(peer(), &clipboard).is_empty());
+        assert!(outbox.take(peer(), &clipboard).is_empty());
         clipboard.copy(text("two"));
-        assert_eq!(deliver(outbox.take(&clipboard)), Some(text("two")));
+        assert_eq!(deliver(outbox.take(peer(), &clipboard)), Some(text("two")));
     }
 
     #[test]
@@ -407,10 +442,13 @@ mod tests {
         let mut clipboard = Fake::default();
         let mut outbox = Outbox::default();
         let count = clipboard.write(&text("from the peer"));
-        outbox.wrote(count);
-        assert!(outbox.take(&clipboard).is_empty());
+        outbox.wrote(peer(), count);
+        assert!(outbox.take(peer(), &clipboard).is_empty());
         clipboard.copy(text("copied here afterwards"));
-        assert_eq!(deliver(outbox.take(&clipboard)), Some(text("copied here afterwards")));
+        assert_eq!(
+            deliver(outbox.take(peer(), &clipboard)),
+            Some(text("copied here afterwards"))
+        );
     }
 
     #[test]
@@ -419,7 +457,7 @@ mod tests {
             count: 3,
             ..Fake::default()
         };
-        assert!(Outbox::default().take(&clipboard).is_empty());
+        assert!(Outbox::default().take(peer(), &clipboard).is_empty());
     }
 
     #[test]
@@ -548,9 +586,17 @@ mod tests {
             png: None,
             concealed: false,
         });
-        assert!(receive(&mut inbox, outbox.take(&clipboard)).unwrap().rtf.is_some());
+        assert!(
+            receive(&mut inbox, outbox.take(peer(), &clipboard))
+                .unwrap()
+                .rtf
+                .is_some()
+        );
         clipboard.copy(text("plain"));
-        assert_eq!(receive(&mut inbox, outbox.take(&clipboard)), Some(text("plain")));
+        assert_eq!(
+            receive(&mut inbox, outbox.take(peer(), &clipboard)),
+            Some(text("plain"))
+        );
     }
 
     fn sharing(content: Option<Content>) -> (Sharing<Fake>, watch::Sender<bool>) {
@@ -564,7 +610,7 @@ mod tests {
 
     /// The parts this system would send as control leaves it.
     fn outgoing(sharing: &mut Sharing<Fake>) -> Vec<ClipboardPart> {
-        sharing.crossing().map(|read| read()).unwrap_or_default()
+        sharing.crossing(peer()).map(|read| read()).unwrap_or_default()
     }
 
     #[test]
@@ -573,7 +619,7 @@ mod tests {
         let (mut there, _on_there) = sharing(None);
         there.expect_snapshot();
         for part in outgoing(&mut here) {
-            there.receive(part);
+            there.receive(peer(), part);
         }
         assert_eq!(there.clipboard.content, Some(text("copied here")));
         assert!(outgoing(&mut there).is_empty());
@@ -587,7 +633,7 @@ mod tests {
         let (mut other, _on) = sharing(Some(text("from the peer")));
         here.expect_snapshot();
         for part in outgoing(&mut other) {
-            here.receive(part);
+            here.receive(peer(), part);
         }
         assert_eq!(here.clipboard.content, Some(text("secret")));
     }
@@ -597,7 +643,7 @@ mod tests {
         let (mut here, _on) = sharing(Some(text("mine")));
         let (mut other, _on_other) = sharing(Some(text("unsolicited")));
         for part in outgoing(&mut other) {
-            here.receive(part);
+            here.receive(peer(), part);
         }
         assert_eq!(here.clipboard.content, Some(text("mine")));
     }
@@ -608,11 +654,11 @@ mod tests {
         let (mut other, _on_other) = sharing(Some(text("first")));
         here.expect_snapshot();
         for part in outgoing(&mut other) {
-            here.receive(part);
+            here.receive(peer(), part);
         }
         other.clipboard.copy(text("second"));
         for part in outgoing(&mut other) {
-            here.receive(part);
+            here.receive(peer(), part);
         }
         assert_eq!(here.clipboard.content, Some(text("first")));
     }
@@ -620,9 +666,9 @@ mod tests {
     #[test]
     fn nothing_is_read_until_the_work_is_run() {
         let (mut here, _on) = sharing(Some(text("copied")));
-        let read = here.crossing().expect("a new copy is due");
+        let read = here.crossing(peer()).expect("a new copy is due");
         // the copy is already counted as sent; running the work later still sends it
-        assert!(here.crossing().is_none());
+        assert!(here.crossing(peer()).is_none());
         assert!(!read().is_empty());
     }
     #[test]
@@ -634,12 +680,44 @@ mod tests {
         clipboard.copy(text("copied-file.txt"));
         let (_on, enabled) = watch::channel(true);
         let mut sharing = Sharing::new(clipboard, enabled);
-        assert!(sharing.crossing_for_peer(true).unwrap()().is_empty());
+        assert!(sharing.crossing_for_peer(peer(), true).unwrap()().is_empty());
         assert_eq!(
-            deliver(sharing.crossing_for_peer(false).unwrap()()),
+            deliver(sharing.crossing_for_peer(peer(), false).unwrap()()),
             Some(text("copied-file.txt"))
         );
-        assert!(sharing.crossing_for_peer(false).is_none());
-        assert!(sharing.crossing_for_peer(true).unwrap()().is_empty());
+        assert!(sharing.crossing_for_peer(peer(), false).is_none());
+        assert!(sharing.crossing_for_peer(peer(), true).unwrap()().is_empty());
+    }
+
+    #[test]
+    fn a_copy_reaches_every_peer_control_visits() {
+        let (mut here, _on) = sharing(Some(text("copied here")));
+        let (first, second) = (system(1), system(2));
+        let to = |here: &mut Sharing<Fake>, peer| deliver(here.crossing(peer).map(|read| read()).unwrap_or_default());
+        assert_eq!(to(&mut here, first), Some(text("copied here")));
+        assert_eq!(
+            to(&mut here, second),
+            Some(text("copied here")),
+            "the next peer also needs it"
+        );
+        assert_eq!(to(&mut here, first), None, "the first peer already has it");
+    }
+
+    #[test]
+    fn a_copy_received_is_passed_on_but_not_sent_back() {
+        let (origin, next) = (system(1), system(2));
+        let (mut there, _on_there) = sharing(Some(text("copied on the first system")));
+        let (mut here, _on_here) = sharing(None);
+        here.expect_snapshot();
+        for part in there.crossing(system(3)).map(|read| read()).unwrap_or_default() {
+            here.receive(origin, part);
+        }
+        assert_eq!(here.clipboard.content, Some(text("copied on the first system")));
+        assert!(here.crossing(origin).is_none(), "not echoed to where it came from");
+        assert_eq!(
+            deliver(here.crossing(next).map(|read| read()).unwrap_or_default()),
+            Some(text("copied on the first system")),
+            "passed on to the next system"
+        );
     }
 }
