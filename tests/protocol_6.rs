@@ -23,6 +23,9 @@ fn require_baseline_variant(message: &Message) {
         Message::TraceControl { .. } | Message::TraceRecord { .. } | Message::TraceAck { .. } => {
             panic!("optional trace variants require authenticated capability negotiation, not baseline fixtures");
         }
+        Message::ClipboardOffer { .. } | Message::ClipboardRequest { .. } => {
+            panic!("clipboard ID variants require authenticated capability negotiation, not baseline fixtures");
+        }
         Message::Hello { .. }
         | Message::PairingKeyExchange { .. }
         | Message::PairingConfirmation { .. }
@@ -45,6 +48,9 @@ fn require_baseline_variant(message: &Message) {
                 ClipboardKind::Text | ClipboardKind::Rtf | ClipboardKind::Png => {}
             },
             ClipboardPart::Chunk { .. } | ClipboardPart::End { .. } | ClipboardPart::Done | ClipboardPart::Ack => {}
+            ClipboardPart::For { .. } => {
+                panic!("the clipboard ID part requires authenticated capability negotiation, not baseline fixtures")
+            }
         },
         Message::Layout { side, .. } => match side {
             Side::Left | Side::Right | Side::Above | Side::Below => {}
