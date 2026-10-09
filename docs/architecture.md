@@ -97,6 +97,8 @@ The command-line `connect` command runs `service::connect` as a loop. Once a ses
 - `trust-v5/peers.toml`: one entry per trusted peer, including key, name, trust policy, pairing time, last-seen time, its signing key and who introduced it.
 - `trust-v5/revocations.toml`: signed revocations this system knows, to pass on.
 - `trust-v5/arrangement.toml`: the newest group arrangement it saw.
+- `trust-v5/arrangement-confirmation.toml`: checked member display sets and
+  their arrangement version, retained across reconnects and restarts.
 - `stats.toml`: each running link's round trips, for `daisy stats`.
 - `settings.toml`: the menu-bar app's last connection, control and trust choices, written atomically with mode `0600`.
 - `last-update-check.toml`: when the last successful update check ran and the newer release it found, if any, written atomically with mode `0600`.

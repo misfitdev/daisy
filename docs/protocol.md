@@ -10,7 +10,7 @@ A TCP connection, to port 24850 by default. Every frame is a big-endian `u16` le
 
 ## Handshake
 
-Every connection starts with a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake, and both sides send long-term keys. The prologue is `daisy` and never changes. Each side includes its protocol generation in the first handshake message, followed by authenticated capabilities encoded as UTF-8 within the existing 64-byte limit. The capability list explicitly names supported generations, and peers select the greatest generation both support. A legacy peer can continue using the generation it sent while ignoring the capability suffix. Trace, file-transfer and clipboard-ID capabilities are negotiated independently. The capability tail is authenticated because it is bound into the device proof.
+Every connection starts with a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake, and both sides send long-term keys. The prologue is `daisy` and never changes. Each side includes its protocol generation in the first handshake message, followed by authenticated capabilities encoded as UTF-8 within the existing 64-byte limit. The capability list explicitly names supported generations, and peers select the greatest generation both support. A legacy peer can continue using the generation it sent while ignoring the capability suffix. Trace, file-transfer, clipboard-ID and arrangement-confirmation capabilities are negotiated independently. The capability tail is authenticated because it is bound into the device proof.
 
 Both sides finish the authenticated handshake before comparing protocol support, so a peer can explain a mismatch. Different releases connect when they negotiate a shared protocol generation. Releases support the immediately preceding generation during rolling updates; older or unknown future generations are rejected unless explicitly supported. The handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
 
@@ -137,6 +137,34 @@ A `CopyId` is the `origin` key of the system the copy was made on and that syste
 Wherever step 6 sends a snapshot, a `clipid-v1` link sends `ClipboardOffer` instead. The receiver ignores an offer unless it comes from the peer control just crossed from, or from the peer whose pointer is on it now, and unless it lacks that copy; otherwise it sends `ClipboardRequest`. The sender answers only for the copy it last offered that peer and still holds, with a snapshot that begins `For { copy }`. The receiver accepts only the snapshot `For` the copy it last requested from that peer, and acknowledges chunks as in step 6. A newer offer supersedes an outstanding request.
 
 When the pointer moves from one peer on to another, the driver also accepts an offer from the peer it left; once that copy is written, the driver offers it to the peer the pointer is on, so a copy made on a remotely driven system follows the pointer.
+
+## Screen arrangement confirmation
+
+Only links whose authenticated handshake payloads both advertise `arr-v1`
+use tag 30. Other links exchange arrangements without confirmation traffic.
+
+| Tag | Message | Meaning |
+|-----|---------|---------|
+| 30 | `ArrangementConfirmed { version, author, fingerprint }` | A person checked this arrangement and its member display sets |
+
+The fingerprint is SHA-256 over the domain
+`daisy-arrangement-confirmation-v1` followed by each member in public-key
+order: its 32-byte key, an eight-byte little-endian display count, and each
+display's x, y, width and height as little-endian IEEE 754 binary64 values.
+Displays are sorted by x, y, width and height; negative zero is normalized
+to zero. The arrangement's `(version, author)` must also match. Confirmation
+is separate from automatic placement and overlap repair.
+
+**Looks Right** confirms the shown group. A user drag that connects the whole
+group also confirms it. A receiver waits until its arrangement and display
+sets match before recording or relaying a confirmation. Pending confirmations
+are bounded to eight records. Confirmation travels only on negotiated links;
+older peers continue sharing with their existing arrangement behavior.
+
+Each system saves the checked member display sets beside its arrangement.
+A reconnect with unchanged displays, including an unchanged subset of the
+checked group, keeps confirmation. New members or changed displays ask again;
+an unreachable member asks unless this exact arrangement was confirmed.
 
 ## A group
 

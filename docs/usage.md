@@ -32,6 +32,14 @@ Open Daisy. The arrangement at the top shows every display in the group.
 
 Changes apply across the group and are saved. If two systems change the arrangement, the later change wins. Adding, removing or rearranging a display updates the layout and moves any system that would overlap.
 
+When a new member joins, displays change, or a member cannot be reached,
+Daisy opens the arrangement and asks **Is this where your screens are?**
+It names any unreachable members. Drag the screens to match your desk;
+a drag that connects the whole group dismisses the question. Choose
+**Looks Right** to keep the arrangement as shown. Confirmation is shared
+with peers that support it and saved across restarts. Reconnecting with
+unchanged displays does not ask again after confirmation.
+
 [Move control](#move-control) across any nearby edge or corner; the arrangement is not a single chain.
 
 ## Move control

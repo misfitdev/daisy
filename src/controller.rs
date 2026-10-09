@@ -137,6 +137,7 @@ pub enum Command {
     SetAlwaysDiscoverable(bool),
     /// Put a member's displays where a person dropped them in the group.
     Place(PublicKey, crate::layout::Offset),
+    ConfirmArrangement(crate::share::Confirmation),
     /// Startup milestones used only by a replacement awaiting commit.
     Startup(crate::install::update::StartupState),
     Shutdown,
@@ -211,7 +212,7 @@ pub enum Event {
         link: crate::control::Link,
     },
     /// Where every member's displays sit, while the group runs.
-    Arranged(crate::share::Layout),
+    Arranged(crate::share::ArrangementView),
     /// The update checker's state, for the Updates panel.
     UpdateCheck {
         checking: bool,
@@ -272,6 +273,83 @@ pub fn spawn(home: PathBuf, name: String) -> Result<Handle> {
             let _ = stopped_tx.send(());
         })
         .context("starting Daisy's background controller")?;
+    Ok(Handle {
+        commands: command_tx,
+        events: event_rx,
+        stopped: stopped_rx,
+    })
+}
+
+/// Offline arrangement preview for `just dev`: sample screens, no capture,
+/// pairing, discovery, or persistent device identity.
+pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
+    let store = PeerStore::open(&home)?;
+    let saved = store.arrangement().context("seed an arrangement for the preview")?;
+    let me = saved.1;
+    let peers = store.list(trust::now())?;
+    let screen = crate::input::Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1512.0,
+        height: 982.0,
+    };
+    let mut placement = crate::layout::Placement::new(me, vec![screen]);
+    placement.adopt(saved.0, saved.1, &saved.2);
+    for peer in &peers {
+        placement.show(peer.key, vec![screen]);
+    }
+    let mut confirmed = store.confirmation();
+    let (command_tx, mut commands) = tokio_mpsc::unbounded_channel();
+    let (events, event_rx) = mpsc::channel();
+    let (stopped_tx, stopped_rx) = mpsc::channel();
+    let _ = events.send(Event::Ready {
+        settings: AppSettings::default(),
+        peers: peers.clone(),
+        first_run: false,
+        me,
+        always_discoverable_allowed: false,
+    });
+    let _ = events.send(Event::Status(Status::Connected {
+        peers: peers.iter().map(|p| (p.name.clone(), p.key)).collect(),
+    }));
+    thread::Builder::new()
+        .name("daisy-arrangement-preview".to_owned())
+        .spawn(move || {
+            loop {
+                let layout = placement.group();
+                let check = crate::setup::check_arrangement(&layout, me, placement.version(), confirmed.as_ref())
+                    .then(|| crate::share::Confirmation::new(&layout, placement.version()));
+                let _ = events.send(Event::Arranged(crate::share::ArrangementView {
+                    unreachable: layout.unreachable(me),
+                    layout,
+                    check,
+                }));
+                let Some(command) = commands.blocking_recv() else {
+                    break;
+                };
+                match command {
+                    Command::Shutdown => break,
+                    Command::Place(key, offset) if placement.put(key, offset, trust::now()) => {
+                        let _ = store.save_arrangement(&placement.message());
+                        let layout = placement.group();
+                        if layout.unreachable(me).is_empty() {
+                            confirmed = Some(crate::share::Confirmation::new(&layout, placement.version()));
+                        }
+                    }
+                    Command::ConfirmArrangement(check)
+                        if check == crate::share::Confirmation::new(&placement.group(), placement.version()) =>
+                    {
+                        confirmed = Some(check);
+                    }
+                    _ => {}
+                }
+                if let Some(checked) = &confirmed {
+                    let _ = store.save_confirmation(checked);
+                }
+            }
+            let _ = stopped_tx.send(());
+        })
+        .context("starting the arrangement preview")?;
     Ok(Handle {
         commands: command_tx,
         events: event_rx,
@@ -546,8 +624,11 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     );
                 }
             }
+            Command::ConfirmArrangement(confirmation) => {
+                arrange.send_replace(Some(crate::share::Choice::Confirm(confirmation)));
+            }
             Command::Place(key, offset) => {
-                arrange.send_replace(Some((key, offset)));
+                arrange.send_replace(Some(crate::share::Choice::Move((key, offset))));
             }
             Command::Startup(state) => {
                 if startup.observe(state)
@@ -626,7 +707,7 @@ struct Live {
     addresses: tokio_mpsc::UnboundedReceiver<(String, Option<PublicKey>)>,
     clipboard: watch::Receiver<bool>,
     discoverable: watch::Receiver<bool>,
-    arrangement: watch::Receiver<Option<crate::share::Placing>>,
+    arrangement: watch::Receiver<Option<crate::share::Choice>>,
     listening: watch::Receiver<Listening>,
     protocols: std::sync::Arc<ActiveProtocols>,
 }
@@ -984,7 +1065,7 @@ impl ServiceObserver for ControllerObserver {
         self.send_connected();
     }
 
-    fn arranged(&mut self, layout: &crate::share::Layout) {
+    fn arranged(&mut self, layout: &crate::share::ArrangementView) {
         let _ = self.events.send(Event::Arranged(layout.clone()));
     }
 

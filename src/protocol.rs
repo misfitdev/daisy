@@ -154,6 +154,13 @@ pub enum Message {
     ClipboardRequest {
         copy: CopyId,
     },
+    /// A person checked this arrangement and these member display sets.
+    /// Sent only after negotiating arr-v1; automatic placement is separate.
+    ArrangementConfirmed {
+        version: u64,
+        author: PublicKey,
+        fingerprint: [u8; 32],
+    },
 }
 
 /// One copied clipboard, wherever it has travelled: the system it was copied
@@ -454,6 +461,18 @@ mod tests {
         assert_eq!(encoded[0], 20);
         assert_eq!(Message::decode(&encoded).unwrap(), message);
     }
+    #[test]
+    fn arrangement_confirmation_uses_its_appended_tag_and_round_trips() {
+        let message = Message::ArrangementConfirmed {
+            version: u64::MAX,
+            author: PublicKey::from_bytes(&[7; 32]).unwrap(),
+            fingerprint: [11; 32],
+        };
+        let encoded = message.encode().unwrap();
+        assert_eq!(encoded[0], 30);
+        assert_eq!(Message::decode(&encoded).unwrap(), message);
+    }
+
     #[test]
     fn negotiated_trace_tags_are_appended_and_round_trip() {
         let record = crate::diagnostics::Record {

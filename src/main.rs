@@ -33,6 +33,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the offline developer arrangement fixture
+    #[command(hide = true)]
+    PreviewArrangement,
     /// Collect developer traces from the running app and supported connected peers
     Trace {
         /// New private NDJSON output file
@@ -215,6 +218,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => daisy::app::run(home, name),
+        Some(Command::PreviewArrangement) => daisy::app::run_preview(home, name),
         Some(command) => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -276,6 +280,7 @@ async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStor
         | Command::InstallUpdate { .. } => {
             unreachable!("update commands exit before identity and input initialization")
         }
+        Command::PreviewArrangement => unreachable!("preview runs before identity initialization"),
         Command::Screenshot { path } => daisy::app::screenshot::save(&path),
         Command::Id => {
             println!("{name}\n{}", identity.public_key());

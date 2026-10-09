@@ -63,6 +63,91 @@ pub(super) fn run() {
 
     peer_row_dialogs_are_sheets(mtm, &target, home.path());
     update_controls_report_and_follow_the_switch(mtm, &target);
+    arrangement_confirmation(mtm);
+}
+
+fn arrangement_confirmation(mtm: objc2_foundation::MainThreadMarker) {
+    use crate::controller::{Command, Event};
+    use objc2::DefinedClass;
+    let home = tempfile::tempdir().unwrap();
+    let me = crate::identity::PublicKey::from_bytes(&[1; 32]).unwrap();
+    let peer = crate::identity::PublicKey::from_bytes(&[2; 32]).unwrap();
+    let store = crate::peers::PeerStore::open(home.path()).unwrap();
+    store
+        .pin(peer, "Studio", crate::trust::Policy::Forever, crate::trust::now())
+        .unwrap();
+    store
+        .save_arrangement(&(10, me, vec![(me, (0.0, 0.0)), (peer, (5000.0, 0.0))]))
+        .unwrap();
+    let handle = crate::controller::spawn_arrangement_preview(home.path().to_owned()).unwrap();
+    let target = super::AppDelegate::new(mtm, handle);
+    *target.ivars().local_name.borrow_mut() = "Local system".to_owned();
+    target
+        .ivars()
+        .main
+        .set(super::window::MainViews::new(mtm, &target))
+        .ok()
+        .unwrap();
+    let drain = || {
+        while let Ok(Some(event)) = target.ivars().controller.try_recv() {
+            target.handle_event(event);
+        }
+    };
+    let views = target.ivars().main.get().unwrap();
+    wait_for("the arrangement question", || {
+        drain();
+        !views.question.isHidden()
+    });
+    assert!(views.unreachable.stringValue().to_string().contains("Studio"));
+    assert!(views.window.isVisible(), "a changed group brings the map forward");
+    click(&views.window, "Looks Right");
+    wait_for("Looks Right to record and dismiss", || {
+        drain();
+        views.question.isHidden() && store.confirmation().is_some()
+    });
+    let confirmed = store.confirmation().unwrap();
+    views.window.close();
+    let layout = target.ivars().arranged.borrow().as_ref().unwrap().layout.clone();
+    target.handle_event(Event::Arranged(crate::share::ArrangementView {
+        unreachable: layout.unreachable(me),
+        layout: layout.clone(),
+        check: None,
+    }));
+    assert!(
+        !views.window.isVisible(),
+        "an unchanged reconnect leaves the window alone"
+    );
+    target
+        .ivars()
+        .controller
+        .send(Command::Place(peer, (6000.0, 0.0)))
+        .unwrap();
+    wait_for("a newly stranded arrangement", || {
+        drain();
+        !views.question.isHidden()
+    });
+    target
+        .ivars()
+        .controller
+        .send(Command::Place(peer, (1512.0, 0.0)))
+        .unwrap();
+    wait_for("a fixing drag to dismiss", || {
+        drain();
+        views.question.isHidden()
+    });
+    assert!(store.confirmation().unwrap().version > confirmed.version);
+    assert!(
+        target
+            .ivars()
+            .arranged
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .unreachable
+            .is_empty()
+    );
+    target.ivars().controller.shutdown().unwrap();
+    views.window.close();
 }
 
 /// An app-modal alert from a peer row can end up off screen while it holds

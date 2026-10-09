@@ -65,6 +65,7 @@ const CODE_SHOWN: std::time::Duration = std::time::Duration::from_secs(120);
 const WAITING_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 struct AppDelegateIvars {
+    preview: Cell<bool>,
     controller: Handle,
     settings: RefCell<AppSettings>,
     peers: RefCell<Vec<Peer>>,
@@ -74,7 +75,7 @@ struct AppDelegateIvars {
     /// Each running link, as it last reported.
     links: RefCell<std::collections::BTreeMap<crate::identity::PublicKey, Link>>,
     /// Where every member's displays sit, while the group runs.
-    arranged: RefCell<Option<crate::share::Layout>>,
+    arranged: RefCell<Option<crate::share::ArrangementView>>,
     main: OnceCell<window::MainViews>,
     advanced: OnceCell<window::AdvancedViews>,
     /// Whether the running group is open to a new system.
@@ -152,7 +153,7 @@ define_class!(
         views.window.setDelegate(Some(ProtocolObject::from_ref(self)));
         self.ivars().walkthrough.set(views).ok();
         self.refresh_permissions();
-        if self.setup_step() != Step::Done {
+            if !self.ivars().preview.get() && self.setup_step() != Step::Done {
             self.open_setup();
         }
 
@@ -547,7 +548,14 @@ define_class!(
             }
         }
 
-        #[unsafe(method(arrangePeer:))]
+    #[unsafe(method(confirmArrangement:))]
+    fn confirm_arrangement(&self, _sender: Option<&AnyObject>) {
+        let check = self.ivars().arranged.borrow().as_ref().and_then(|view| view.check.clone());
+        if let Some(confirmation) = check {
+            let _ = self.ivars().controller.send(Command::ConfirmArrangement(confirmation));
+        }
+    }
+    #[unsafe(method(arrangePeer:))]
         fn arrange_peer(&self, _sender: Option<&AnyObject>) {
             let placed = self.ivars().main.get().and_then(|views| views.arrange.take_placed());
             if let Some((key, offset)) = placed {
@@ -596,11 +604,14 @@ define_class!(
             NSApplication::sharedApplication(self.mtm()).terminate(None);
         }
     }
+
+
 );
 
 impl AppDelegate {
     fn new(mtm: MainThreadMarker, controller: Handle) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(AppDelegateIvars {
+            preview: Cell::new(false),
             controller,
             settings: RefCell::new(AppSettings::default()),
             peers: RefCell::new(Vec::new()),
@@ -849,8 +860,18 @@ impl AppDelegate {
                 self.rebuild_peers_list();
             }
             Event::Arranged(layout) => {
+                let ask = layout.check.is_some()
+                    && self
+                        .ivars()
+                        .arranged
+                        .borrow()
+                        .as_ref()
+                        .is_none_or(|previous| previous.check != layout.check);
                 *self.ivars().arranged.borrow_mut() = Some(layout);
                 self.render_status();
+                if ask {
+                    self.open_window();
+                }
             }
             Event::Ready {
                 settings,
@@ -1006,7 +1027,26 @@ impl AppDelegate {
             names.insert(me, self.ivars().local_name.borrow().clone());
             let displays = crate::macos::displays().unwrap_or_default();
             let arranged = self.ivars().arranged.borrow();
-            let shown = map::scene(me, &names, arranged.as_ref(), &displays, &links);
+            let shown = map::scene(
+                me,
+                &names,
+                arranged.as_ref().map(|view| &view.layout),
+                &displays,
+                &links,
+            );
+            let unreachable: Vec<_> = arranged
+                .as_ref()
+                .into_iter()
+                .flat_map(|view| &view.unreachable)
+                .map(|key| {
+                    names
+                        .get(key)
+                        .cloned()
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| "Peer".to_owned())
+                })
+                .collect();
+            views.show_check(arranged.as_ref().is_some_and(|view| view.check.is_some()), &unreachable);
             views.title.setStringValue(&NSString::from_str(&copy.title));
             views.detail.setStringValue(&NSString::from_str(&copy.detail));
             views.arrange.show(shown);
@@ -1388,12 +1428,22 @@ impl AppDelegate {
 }
 
 pub fn run(home: PathBuf, name: String) -> Result<()> {
+    let controller = controller::spawn(home, name.clone())?;
+    run_controller(controller, name, false)
+}
+
+pub fn run_preview(home: PathBuf, name: String) -> Result<()> {
+    let controller = controller::spawn_arrangement_preview(home)?;
+    run_controller(controller, name, true)
+}
+
+fn run_controller(controller: Handle, name: String, preview: bool) -> Result<()> {
     let _focus = crate::macos::diagnostics::FocusObserver::observe();
     let mtm = MainThreadMarker::new().context("Daisy's interface must start on the main thread")?;
     crate::macos::file_pasteboard::enable(mtm);
-    let controller = controller::spawn(home, name.clone())?;
     let app = NSApplication::sharedApplication(mtm);
     let delegate = AppDelegate::new(mtm, controller);
+    delegate.ivars().preview.set(preview);
     *delegate.ivars().local_name.borrow_mut() = name;
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

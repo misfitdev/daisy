@@ -251,7 +251,7 @@ impl<O: ServiceObserver> ServiceObserver for GateWatch<'_, O> {
     fn link(&mut self, peer: &str, key: PublicKey, link: crate::control::Link) {
         self.inner.link(peer, key, link);
     }
-    fn arranged(&mut self, layout: &share::Layout) {
+    fn arranged(&mut self, layout: &share::ArrangementView) {
         self.inner.arranged(layout);
     }
     fn disconnected(&mut self, peer: &str, key: PublicKey) {
@@ -322,7 +322,7 @@ impl<O: ServiceObserver> ServiceObserver for Shared<'_, '_, O> {
     fn link(&mut self, peer: &str, key: PublicKey, link: crate::control::Link) {
         self.lock().link(peer, key, link);
     }
-    fn arranged(&mut self, layout: &share::Layout) {
+    fn arranged(&mut self, layout: &share::ArrangementView) {
         self.lock().arranged(layout);
     }
     fn disconnected(&mut self, peer: &str, key: PublicKey) {
@@ -357,7 +357,7 @@ pub trait ServiceObserver {
     /// Latency or who has control changed on the link with `peer`.
     fn link(&mut self, _peer: &str, _key: PublicKey, _link: crate::control::Link) {}
     /// Where every member's displays now sit.
-    fn arranged(&mut self, _layout: &share::Layout) {}
+    fn arranged(&mut self, _layout: &share::ArrangementView) {}
     /// A link that `connected` reported ended.
     fn disconnected(&mut self, _peer: &str, _key: PublicKey) {}
     /// Pairing opened while the group runs.
@@ -390,7 +390,7 @@ pub struct SessionConfig<'a> {
     /// Whether a waiting system advertises itself with Bonjour.
     pub discoverable: &'a watch::Receiver<bool>,
     /// Members moved on this system while a session runs, if it can rearrange.
-    pub arrangement: Option<&'a watch::Receiver<Option<share::Placing>>>,
+    pub arrangement: Option<&'a watch::Receiver<Option<share::Choice>>>,
     /// When a running group accepts a new system.
     pub listening: Option<&'a watch::Receiver<Listening>>,
     /// Signs this system's introductions and revocations.
@@ -1156,10 +1156,10 @@ pub struct Hub {
     me: PublicKey,
     peers: PeerStore,
     clipboard: watch::Receiver<bool>,
-    choices: watch::Receiver<Option<share::Placing>>,
+    choices: watch::Receiver<Option<share::Choice>>,
     running: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<share::Membership<TcpStream>>>>>,
     reports: std::sync::Arc<watch::Sender<share::Reports>>,
-    arranged: std::sync::Arc<watch::Sender<share::Layout>>,
+    arranged: std::sync::Arc<watch::Sender<share::ArrangementView>>,
     members: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -1236,7 +1236,7 @@ impl Hub {
             choices: session_choices(config.arrangement),
             running: std::sync::Arc::default(),
             reports: std::sync::Arc::new(watch::Sender::new(share::Reports::new())),
-            arranged: std::sync::Arc::new(watch::Sender::new(share::Layout { members: Vec::new() })),
+            arranged: std::sync::Arc::new(watch::Sender::new(share::ArrangementView::default())),
             members: std::sync::Arc::default(),
         }
     }
@@ -1392,6 +1392,15 @@ async fn run_core_once(
             }
         }
     }));
+    let (save_confirmation, mut confirmations) = mpsc::unbounded_channel();
+    let confirmation_store = peers.clone();
+    let _confirmation_saving = AbortOnDrop(tokio::spawn(async move {
+        while let Some(confirmation) = confirmations.recv().await {
+            if let Err(error) = confirmation_store.save_confirmation(&confirmation) {
+                tracing::error!(error = ?error, "screen confirmation could not be saved");
+            }
+        }
+    }));
     let group = share::Group {
         files: hub.files.clone(),
         displays: watched,
@@ -1399,6 +1408,8 @@ async fn run_core_once(
         choices: choices.clone(),
         arranged: hub.arranged.clone(),
         saved: peers.arrangement(),
+        saved_confirmation: peers.confirmation(),
+        save_confirmation,
         save,
         reports: reports.clone(),
         locked,
@@ -1465,8 +1476,8 @@ fn introduction_of(config: &SessionConfig<'_>, key: PublicKey) -> Result<Option<
 /// as from the command line, it never changes, and the peer's choices still
 /// apply.
 fn session_choices(
-    arrangement: Option<&watch::Receiver<Option<share::Placing>>>,
-) -> watch::Receiver<Option<share::Placing>> {
+    arrangement: Option<&watch::Receiver<Option<share::Choice>>>,
+) -> watch::Receiver<Option<share::Choice>> {
     let mut choices = arrangement.cloned().unwrap_or_else(|| watch::channel(None).1);
     // only choices made during this session count
     choices.mark_unchanged();

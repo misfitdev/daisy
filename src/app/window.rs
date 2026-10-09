@@ -85,6 +85,11 @@ impl Panel {
 }
 
 pub struct MainViews {
+    hero: Retained<Panel>,
+    rule: Retained<NSBox>,
+    pub question: Retained<NSTextField>,
+    pub unreachable: Retained<NSTextField>,
+    pub looks_right: Retained<NSButton>,
     pub window: Retained<NSWindow>,
     root: Retained<Panel>,
     pub arrange: Retained<ArrangeView>,
@@ -138,6 +143,18 @@ impl MainViews {
             0.0,
         );
         root.addSubview(&hero);
+        let question = label("Is this where your screens are?", 13.0, true, mtm);
+        question.setFrame(rect(MARGIN, 14.0, GROUP_WIDTH - 126.0, 20.0));
+        hero.addSubview(&question);
+        let unreachable = label("", 12.0, false, mtm);
+        unreachable.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        unreachable.setFrame(rect(MARGIN, 38.0, GROUP_WIDTH, 18.0));
+        unreachable.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        unreachable.setMaximumNumberOfLines(0);
+        hero.addSubview(&unreachable);
+        let looks_right = button("Looks Right", sel!(confirmArrangement:), target, mtm);
+        looks_right.setFrame(rect(WIDTH - MARGIN - 116.0, 10.0, 116.0, 28.0));
+        hero.addSubview(&looks_right);
         let arrange = ArrangeView::new(mtm, rect(MARGIN, 14.0, GROUP_WIDTH, 132.0), target, sel!(arrangePeer:));
         hero.addSubview(&arrange);
         let title = label("Not Sharing", 15.0, true, mtm);
@@ -177,6 +194,11 @@ impl MainViews {
         buttons.addSubview(&stop);
 
         let views = Self {
+            hero,
+            rule,
+            question,
+            unreachable,
+            looks_right,
             window,
             root,
             arrange,
@@ -192,8 +214,39 @@ impl MainViews {
         };
         views.root.addSubview(&escape_key(sel!(closeKeyWindow:), target, mtm));
         views.show_peers(&[], target);
+        views.show_check(false, &[]);
         views.window.center();
         views
+    }
+
+    pub fn show_check(&self, checking: bool, names: &[String]) {
+        let caption = if names.is_empty() {
+            "Drag the screens to match your desk.".to_owned()
+        } else {
+            format!("Cannot reach: {}. Drag the screens closer together.", names.join(", "))
+        };
+        if self.question.isHidden() == !checking && self.unreachable.stringValue().to_string() == caption {
+            return;
+        }
+        self.question.setHidden(!checking);
+        self.unreachable.setHidden(!checking);
+        self.looks_right.setHidden(!checking);
+        self.unreachable.setStringValue(&NSString::from_str(&caption));
+        self.unreachable.setToolTip(Some(&NSString::from_str(&caption)));
+        let caption_height = self.unreachable.cell().map_or(18.0, |cell| {
+            cell.cellSizeForBounds(rect(0.0, 0.0, GROUP_WIDTH, 1000.0))
+                .height
+                .max(18.0)
+        });
+        self.unreachable.setFrameSize(NSSize::new(GROUP_WIDTH, caption_height));
+        let extra = if checking { 46.0 + caption_height } else { 0.0 };
+        self.arrange.set_check(checking);
+        self.hero.setFrameSize(NSSize::new(WIDTH, HERO + extra));
+        self.rule.setFrameOrigin(NSPoint::new(0.0, HERO + extra));
+        self.arrange.setFrameOrigin(NSPoint::new(MARGIN, 14.0 + extra));
+        self.title.setFrameOrigin(NSPoint::new(MARGIN, 152.0 + extra));
+        self.detail.setFrameOrigin(NSPoint::new(MARGIN, 176.0 + extra));
+        self.layout();
     }
 
     /// One row per peer, each with its trust and Forget buttons.
@@ -267,7 +320,7 @@ impl MainViews {
     /// Stacks the groups from the top and fits the window to them, keeping
     /// its top edge where it is.
     fn layout(&self) {
-        let mut y = HERO + MARGIN;
+        let mut y = self.hero.frame().size.height + MARGIN;
         let mut place = |view: &NSView, height: f64, after: f64| {
             view.setFrameOrigin(NSPoint::new(MARGIN, y));
             if view.frame().size.height != height {

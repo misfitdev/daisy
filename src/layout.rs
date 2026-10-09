@@ -57,6 +57,38 @@ pub struct Group<K> {
 }
 
 impl<K: Copy + PartialEq> Group<K> {
+    /// Members outside this system's connected component. Small gaps and
+    /// corner contact use the same ray entry geometry as pointer crossing.
+    pub fn unreachable(&self, from: K) -> Vec<K> {
+        let mut reached = vec![from];
+        loop {
+            let before = reached.len();
+            for member in &self.members {
+                if reached.contains(&member.key) {
+                    continue;
+                }
+                let connects = self.members.iter().filter(|m| reached.contains(&m.key)).any(|m| {
+                    m.displays.iter().any(|a| {
+                        member
+                            .displays
+                            .iter()
+                            .any(|b| touching(&shifted(a, m.offset), &shifted(b, member.offset)))
+                    })
+                });
+                if connects {
+                    reached.push(member.key);
+                }
+            }
+            if before == reached.len() {
+                break;
+            }
+        }
+        self.members
+            .iter()
+            .filter(|m| !reached.contains(&m.key))
+            .map(|m| m.key)
+            .collect()
+    }
     /// A group of one system, at the origin.
     pub fn alone(key: K, displays: Vec<Rect>) -> Self {
         Self {
@@ -455,6 +487,26 @@ fn shifted(display: &Rect, offset: Offset) -> Rect {
     }
 }
 
+fn touching(a: &Rect, b: &Rect) -> bool {
+    let closest = |low: f64, high: f64, other_low: f64, other_high: f64| {
+        if high < other_low {
+            (high, other_low)
+        } else if other_high < low {
+            (low, other_high)
+        } else {
+            let shared = low.max(other_low);
+            (shared, shared)
+        }
+    };
+    let (ax, bx) = closest(a.x, a.x + a.width, b.x, b.x + b.width);
+    let (ay, by) = closest(a.y, a.y + a.height, b.y, b.y + b.height);
+    let length = (bx - ax).hypot(by - ay);
+    if length == 0.0 {
+        return true;
+    }
+    entry(b, (ax, ay), ((bx - ax) / length, (by - ay) / length)).is_some_and(|distance| distance <= REACH)
+}
+
 /// Sharing more than an edge or a corner.
 fn overlap(a: &Rect, b: &Rect) -> bool {
     a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
@@ -799,5 +851,37 @@ mod tests {
         let group = Group::alone(1, vec![side, main]);
         assert_eq!(group.home(1), Some((756.0, 491.0)), "not the first listed");
         assert_eq!(group.home(2), None);
+    }
+
+    #[test]
+    fn reachability_includes_edges_gaps_corners_and_connected_chains() {
+        let member = |key, x, y| Member {
+            key,
+            displays: vec![rect(0.0, 0.0, 100.0, 100.0)],
+            offset: (x, y),
+        };
+        for (x, y) in [(100.0, 0.0), (130.0, 0.0), (100.0, 100.0), (120.0, 120.0)] {
+            let group = Group {
+                members: vec![member(0, 0.0, 0.0), member(1, x, y)],
+            };
+            assert!(group.unreachable(0).is_empty(), "{x}, {y}");
+        }
+        for (x, y) in [(141.0, 0.0), (130.0, 130.0)] {
+            let group = Group {
+                members: vec![member(0, 0.0, 0.0), member(1, x, y)],
+            };
+            assert_eq!(group.unreachable(0), [1]);
+        }
+        let mut chain = Group {
+            members: vec![member(0, 0.0, 0.0), member(1, 100.0, 0.0), member(2, 200.0, 0.0)],
+        };
+        assert!(chain.unreachable(0).is_empty());
+        chain.members[2].offset = (500.0, 0.0);
+        chain.members.push(member(3, 600.0, 0.0));
+        assert_eq!(
+            chain.unreachable(0),
+            [2, 3],
+            "two internally connected pairs are still disconnected"
+        );
     }
 }

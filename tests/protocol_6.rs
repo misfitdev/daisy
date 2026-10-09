@@ -14,6 +14,9 @@ use daisy::trust::Policy;
 // A new sender must not silently keep protocol 6 while old peers reject its tag.
 fn require_baseline_variant(message: &Message) {
     match message {
+        Message::ArrangementConfirmed { .. } => {
+            panic!("arrangement confirmation requires authenticated capability negotiation");
+        }
         Message::FilesOffer { .. }
         | Message::FilesRelease { .. }
         | Message::FilesRequest { .. }
