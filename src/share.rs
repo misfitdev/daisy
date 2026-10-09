@@ -171,6 +171,8 @@ where
 struct Link {
     protocol: u16,
     files_capable: bool,
+    /// Clipboard copies go by offer and request on this link.
+    clipboard_ids: bool,
     trace_capable: bool,
     trace_sent: bool,
     trace_request: crate::diagnostics::Lease,
@@ -242,6 +244,8 @@ where
     let mut links: std::collections::BTreeMap<PublicKey, Link> = std::collections::BTreeMap::new();
     // the peer the pointer crossed onto, while this system drives it
     let mut crossed: Option<PublicKey> = None;
+    // the peer driving this system while its pointer is here
+    let mut driven_by: Option<PublicKey> = None;
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     let mut activity = crate::control::Activity::new(control.physical_activity());
     let mut ended: Vec<(PublicKey, Result<()>)> = Vec::new();
@@ -249,6 +253,8 @@ where
     // arrangement changed, both acted on after the message that caused them
     let mut handoff: Option<(u64, PublicKey, Point)> = None;
     let mut rearranged = false;
+    // a copy from a peer was written here, to pass on to the peer this system drives
+    let mut fresh_copy = false;
     // links already waiting join before any input is routed
     let mut waiting = waiting;
     waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
@@ -291,6 +297,9 @@ where
                     release.injector.execute(&action);
                 }
             }
+            if driven_by == Some(key) {
+                driven_by = None;
+            }
             if crossed == Some(key) {
                 crossed = None;
                 pointer.yield_control();
@@ -312,10 +321,12 @@ where
                     let trace_capable = joining.channel.trace_capable();
                     let protocol = joining.channel.protocol();
                     let files_capable = joining.channel.files_capable();
+                    let clipboard_ids = joining.channel.clipboard_ids_capable();
                     let (sender, receiver) = joining.channel.split();
                     let link = Link {
                         protocol,
                         files_capable,
+                        clipboard_ids,
                         trace_capable,
                         trace_sent: false,
                         trace_request: crate::diagnostics::hub().lease(),
@@ -394,6 +405,7 @@ where
                 if interrupted {
                     pointer.yield_control();
                     crossed = None;
+                    driven_by = None;
                 }
                 if let Some(generation) = claim {
                     for (key, link) in &links {
@@ -418,6 +430,7 @@ where
                 match message {
                     Message::ControlClaim { .. } => {
                         for action in release.target.reclaim() { release.injector.execute(&action); }
+                        driven_by = None;
                         sharing.expect_snapshot(None);
                         for (key, link) in &links {
                             if let Err(error) = link.outgoing.send(message.clone()) {
@@ -433,7 +446,9 @@ where
                                 ended.push((to, Err(error)));
                             } else {
                                 if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing_for_peer(to, link.files_capable && files.is_some()));
+                                if let Err(error) = hand_clipboard(me, to, link, sharing, files.is_some()) {
+                                    ended.push((to, Err(error)));
+                                }
                             }
                         }
                         None => {
@@ -503,7 +518,21 @@ where
                                 tracing::warn!(ms = round_trip.as_millis(), "slow round trip to the peer");
                             }
                         }
-                        Message::Clipboard { part } => receive_clipboard(peer, part, &link.outgoing, sharing)?,
+                        Message::Clipboard { part } => {
+                            if receive_clipboard(peer, part, link, sharing)? {
+                                fresh_copy = true;
+                            }
+                        }
+                        Message::ClipboardOffer { copy } => {
+                            anyhow::ensure!(link.clipboard_ids, "clipboard ID capability was not negotiated");
+                            if sharing.wants(me, peer, copy, driven_by) {
+                                link.outgoing.send(Message::ClipboardRequest { copy })?;
+                            }
+                        }
+                        Message::ClipboardRequest { copy } => {
+                            anyhow::ensure!(link.clipboard_ids, "clipboard ID capability was not negotiated");
+                            link.outgoing.send_clipboard(sharing.requested(me, peer, copy, link.files_capable && files.is_some()));
+                        }
                         // the system that chose also sends the arrangement it led to
                         Message::Layout { side, chosen } => {
                             let agreed = crate::control::agreed_side(link.initiator, link.agreed, (side, chosen));
@@ -559,9 +588,10 @@ where
                             if changed {
                                 pointer.yield_control();
                                 crossed = None;
+                                driven_by = None;
                                 for action in release.target.reclaim() { release.injector.execute(&action); }
                                 if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing_for_peer(peer, link.files_capable && files.is_some()));
+                                hand_clipboard(me, peer, link, sharing, files.is_some())?;
                             }
                         }
                         Message::Leave { generation, to, at } => {
@@ -597,6 +627,7 @@ where
                             let mut crossing = false;
                             let actions = match message {
                                 Message::Enter { at, .. } => {
+                                    driven_by = Some(peer);
                                     sharing.expect_snapshot(Some(peer));
                                     release.injector.arrived();
                                     release.target.enter(at)
@@ -611,8 +642,11 @@ where
                                     other => release.injector.execute(&other),
                                 }
                             }
-                            if crossing { if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing_for_peer(peer, link.files_capable && files.is_some())); }
+                            if crossing {
+                                driven_by = None;
+                                if let Some(files) = &files { files.crossing(); }
+                                hand_clipboard(me, peer, link, sharing, files.is_some())?;
+                            }
                         }
                         other => bail!("unexpected message in shared session: {other:?}"),
                     }
@@ -628,15 +662,27 @@ where
                         }
                         Some(next) => {
                             crossed = Some(to);
+                            // a copy made on the system the pointer just left
+                            // follows it here, to be passed on
+                            sharing.expect_snapshot(Some(peer));
                             if let Err(error) = next.outgoing.send(Message::Enter { generation, to, at }) {
                                 ended.push((to, Err(error)));
                             } else {
                                 if let Some(files) = &files { files.crossing(); }
-                        next.outgoing.send_clipboard(sharing.crossing_for_peer(to, next.files_capable && files.is_some()));
+                                if let Err(error) = hand_clipboard(me, to, next, sharing, files.is_some()) {
+                                    ended.push((to, Err(error)));
+                                }
                             }
                         }
                         None => pointer.leave(None),
                     }
+                }
+                if std::mem::take(&mut fresh_copy)
+                    && let Some(next) = crossed.filter(|next| *next != peer)
+                    && let Some(link) = links.get(&next)
+                    && let Err(error) = hand_clipboard(me, next, link, sharing, files.is_some())
+                {
+                    ended.push((next, Err(error)));
                 }
                 if rearranged {
                     rearranged = false;
@@ -1032,22 +1078,46 @@ fn closed_after(quiet: std::time::Duration) -> Result<()> {
 
 /// Handles a clipboard part from the peer: acknowledgements free the send
 /// window; every chunk is acknowledged whether or not it is accepted, so the
-/// peer's window never stalls.
+/// peer's window never stalls. Returns whether a requested copy was written.
 fn receive_clipboard(
     from: PublicKey,
     part: ClipboardPart,
-    outgoing: &Outgoing,
+    link: &Link,
     sharing: &mut Sharing<impl Clipboard>,
+) -> Result<bool> {
+    if let ClipboardPart::Ack = part {
+        link.outgoing.acknowledged();
+        return Ok(false);
+    }
+    if let ClipboardPart::Chunk { .. } = part {
+        link.outgoing.send(Message::Clipboard {
+            part: ClipboardPart::Ack,
+        })?;
+    }
+    if link.clipboard_ids {
+        return Ok(sharing.receive_requested(from, part).is_some());
+    }
+    sharing.receive(from, part);
+    Ok(false)
+}
+
+/// Gives `peer` the clipboard as control or a newer copy reaches it: an
+/// offer it requests if it lacks the copy, or for an older peer the snapshot
+/// itself unless it already has it.
+fn hand_clipboard(
+    me: PublicKey,
+    peer: PublicKey,
+    link: &Link,
+    sharing: &mut Sharing<impl Clipboard>,
+    files: bool,
 ) -> Result<()> {
-    match part {
-        ClipboardPart::Ack => outgoing.acknowledged(),
-        ClipboardPart::Chunk { .. } => {
-            outgoing.send(Message::Clipboard {
-                part: ClipboardPart::Ack,
-            })?;
-            sharing.receive(from, part);
+    if link.clipboard_ids {
+        if let Some(copy) = sharing.offer(me, peer) {
+            link.outgoing.send(Message::ClipboardOffer { copy })?;
         }
-        other => sharing.receive(from, other),
+    } else {
+        link.outgoing
+            .send_clipboard(sharing.crossing_for_peer(peer, link.files_capable && files));
     }
     Ok(())
 }
@@ -1243,11 +1313,21 @@ mod tests {
         channels_with_capacity(1 << 17).await
     }
 
+    /// A link with a peer that predates clipboard IDs, so snapshots go
+    /// straight across as control crosses.
     async fn channels_with_capacity(capacity: usize) -> (Channel<DuplexStream>, Channel<DuplexStream>) {
+        let (left, right) = id_channels_with_capacity(capacity).await;
+        (left.without_clipboard_ids(), right.without_clipboard_ids())
+    }
+
+    /// A link on which clipboard copies go by offer and request.
+    async fn id_channels_with_capacity(capacity: usize) -> (Channel<DuplexStream>, Channel<DuplexStream>) {
         let (a, b) = duplex(capacity);
         let (left, right) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let (left, right) = tokio::join!(Channel::initiate(a, &left), Channel::respond(b, &right));
-        (left.unwrap(), right.unwrap())
+        let (left, right) = (left.unwrap(), right.unwrap());
+        assert!(left.clipboard_ids_capable() && right.clipboard_ids_capable());
+        (left, right)
     }
 
     #[tokio::test]
@@ -2937,6 +3017,180 @@ mod tests {
         result.unwrap();
         assert_eq!(seen[0], enter);
         assert_eq!(assembled(&seen), Some(text("copied on this system")));
+    }
+
+    /// The next clipboard offer, request or snapshot part from this system,
+    /// acknowledging each chunk as a real peer does.
+    async fn next_clipboard(peer: &mut Channel<DuplexStream>) -> Message {
+        loop {
+            match peer.recv().await.unwrap() {
+                Message::Ping { nonce } => peer.send(&Message::Pong { nonce }).await.unwrap(),
+                message @ (Message::ClipboardOffer { .. } | Message::ClipboardRequest { .. }) => return message,
+                Message::Clipboard {
+                    part: part @ ClipboardPart::Chunk { .. },
+                } => {
+                    peer.send(&Message::Clipboard {
+                        part: ClipboardPart::Ack,
+                    })
+                    .await
+                    .unwrap();
+                    return Message::Clipboard { part };
+                }
+                message @ Message::Clipboard { .. } => return message,
+                _ => {}
+            }
+        }
+    }
+
+    /// Parts up to and including `Done`, after an offer was requested.
+    async fn requested_snapshot(peer: &mut Channel<DuplexStream>) -> Vec<Message> {
+        let mut seen = Vec::new();
+        loop {
+            let message = next_clipboard(peer).await;
+            let done = message
+                == (Message::Clipboard {
+                    part: ClipboardPart::Done,
+                });
+            seen.push(message);
+            if done {
+                return seen;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_crossing_offers_the_copy_and_sends_it_only_when_asked() {
+        let (local, mut peer) = id_channels_with_capacity(1 << 17).await;
+        let control = control(&local, true);
+        let them = local.remote_key();
+        let (capture, input) = mpsc::channel(16);
+        let mut board = board_with(text("copied here"), true);
+        let (mut pointer, mut injector) = (Returned::default(), Recorded::default());
+        let enter = |at| Message::Enter {
+            generation: 0,
+            to: them,
+            at,
+        };
+        capture.try_send(enter((999.0, 1.0))).unwrap();
+        let script = async {
+            let Message::ClipboardOffer { copy } = next_clipboard(&mut peer).await else {
+                panic!("a crossing offers the copy first");
+            };
+            peer.send(&Message::ClipboardRequest { copy }).await.unwrap();
+            let seen = requested_snapshot(&mut peer).await;
+            assert_eq!(
+                seen[0],
+                Message::Clipboard {
+                    part: ClipboardPart::For { copy }
+                }
+            );
+            assert_eq!(assembled(&seen), Some(text("copied here")));
+            // control comes back and crosses again: the same copy is offered, and
+            // with no request nothing more is sent
+            peer.send(&Message::Leave {
+                generation: 0,
+                to: me_of(&control),
+                at: (999.0, 1.0),
+            })
+            .await
+            .unwrap();
+            capture.send(enter((999.0, 2.0))).await.unwrap();
+            assert_eq!(next_clipboard(&mut peer).await, Message::ClipboardOffer { copy });
+            round_trip(&mut peer, 1).await
+        };
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let after = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                after = script => after,
+                result = session => panic!("session ended first: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !after.iter().any(|m| matches!(m, Message::Clipboard { .. })),
+            "{after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copy_made_on_a_driven_system_is_passed_on_to_the_next() {
+        let (control, _members, mut membership, mut far, _ended, keys) = group_of(2, None).await;
+        let me = me_of(&control);
+        let (capture, input) = mpsc::channel(16);
+        let mut board = no_clipboard();
+        let (mut pointer, mut injector) = (Returned::default(), Recorded::default());
+        let run = run(
+            group(&control),
+            VecDeque::new(),
+            &mut membership,
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let script = async {
+            let (first, second) = far.split_at_mut(1);
+            let (driven, next) = (&mut first[0], &mut second[0]);
+            for peer in [&mut *driven, &mut *next] {
+                assert!(matches!(super::tests::next(peer).await, Message::ControlState { .. }));
+            }
+            let generation = control.state.lock().unwrap().generation();
+            capture
+                .send(Message::Enter {
+                    generation,
+                    to: keys[0],
+                    at: (10.0, 20.0),
+                })
+                .await
+                .unwrap();
+            // something is copied on the driven system; the pointer moves on
+            let mut copied = board_with(text("copied on the driven system"), true);
+            let copy = copied.offer(keys[0], me).unwrap();
+            driven
+                .send(&Message::Leave {
+                    generation,
+                    to: keys[1],
+                    at: (5.0, 6.0),
+                })
+                .await
+                .unwrap();
+            driven.send(&Message::ClipboardOffer { copy }).await.unwrap();
+            loop {
+                if next_clipboard(driven).await == (Message::ClipboardRequest { copy }) {
+                    break;
+                }
+            }
+            for part in copied.requested(keys[0], me, copy, false).map(|read| read()).unwrap() {
+                driven.send(&Message::Clipboard { part }).await.unwrap();
+            }
+            // the next system is offered that copy, asks, and receives it
+            loop {
+                if next_clipboard(next).await == (Message::ClipboardOffer { copy }) {
+                    break;
+                }
+            }
+            next.send(&Message::ClipboardRequest { copy }).await.unwrap();
+            requested_snapshot(next).await
+        };
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                seen = script => seen,
+                result = run => panic!("the group ended: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(assembled(&seen), Some(text("copied on the driven system")));
     }
 
     #[tokio::test]

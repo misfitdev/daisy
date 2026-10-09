@@ -459,6 +459,14 @@ where
         &self.stream
     }
 
+    /// This link as one with a peer that predates clipboard IDs; apply to
+    /// both ends, since both must agree.
+    #[cfg(test)]
+    pub(crate) fn without_clipboard_ids(mut self) -> Self {
+        self.clipboard_ids_capable = false;
+        self
+    }
+
     #[cfg(test)]
     async fn initiate_as(stream: S, identity: &Identity, local: &Version) -> Result<Self, SessionError> {
         Self::initiate_negotiated(stream, identity, local, false).await
