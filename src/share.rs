@@ -3153,6 +3153,13 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            loop {
+                match driven.recv().await.unwrap() {
+                    Message::Ping { nonce } => driven.send(&Message::Pong { nonce }).await.unwrap(),
+                    Message::Enter { .. } => break,
+                    _ => {}
+                }
+            }
             // something is copied on the driven system; the pointer moves on
             let mut copied = board_with(text("copied on the driven system"), true);
             let copy = copied.offer(keys[0], me).unwrap();
