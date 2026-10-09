@@ -286,6 +286,10 @@ impl<C: Clipboard> Sharing<C> {
     /// Control has crossed to this system; the peer's clipboard follows.
     pub fn expect_snapshot(&mut self) {
         self.expecting = true;
+        // a snapshot still arriving from an earlier crossing never finished,
+        // perhaps because its sender disconnected; it must not block this one
+        self.receiving = None;
+        self.inbox = Inbox::default();
     }
 
     /// A part arrived from the peer. Only a snapshot that follows a crossing
@@ -750,5 +754,25 @@ mod tests {
         assert!(here.crossing(sender).is_none(), "not echoed to the peer it came from");
         assert!(here.crossing(intruder).is_some(), "the other peer does not have it");
         assert!(here.crossing(next).is_some());
+    }
+
+    #[test]
+    fn a_new_crossing_replaces_a_snapshot_that_never_finished() {
+        let (gone, next) = (system(1), system(2));
+        let (mut there, _on_there) = sharing(Some(text("never finished")));
+        let (mut other, _on_other) = sharing(Some(text("copied on the next peer")));
+        let (mut here, _on_here) = sharing(None);
+        here.expect_snapshot();
+        let mut unfinished = there.crossing(system(4)).map(|read| read()).unwrap_or_default();
+        unfinished.pop();
+        for part in unfinished {
+            here.receive(gone, part);
+        }
+        // the first peer disconnected; control later crosses here from another
+        here.expect_snapshot();
+        for part in other.crossing(system(4)).map(|read| read()).unwrap_or_default() {
+            here.receive(next, part);
+        }
+        assert_eq!(here.clipboard.content, Some(text("copied on the next peer")));
     }
 }
