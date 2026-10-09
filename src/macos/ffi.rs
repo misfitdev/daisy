@@ -133,6 +133,7 @@ unsafe extern "C" {
 
     pub fn CGEventSourceCreate(state: i32) -> CGEventSourceRef;
     pub fn CGEventSourceCounterForEventType(state: i32, event_type: u32) -> u32;
+    pub fn CGEventSourceFlagsState(state: i32) -> u64;
 
     pub fn CGWarpMouseCursorPosition(point: CGPoint) -> i32;
     pub fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;

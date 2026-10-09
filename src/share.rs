@@ -401,7 +401,7 @@ where
                             ended.push((*key, Err(error)));
                         }
                     }
-                    sharing.expect_snapshot();
+                    sharing.expect_snapshot(None);
                 }
                 publish(&control, &links, &group.reports);
             }
@@ -418,7 +418,7 @@ where
                 match message {
                     Message::ControlClaim { .. } => {
                         for action in release.target.reclaim() { release.injector.execute(&action); }
-                        sharing.expect_snapshot();
+                        sharing.expect_snapshot(None);
                         for (key, link) in &links {
                             if let Err(error) = link.outgoing.send(message.clone()) {
                                 ended.push((*key, Err(error)));
@@ -433,7 +433,7 @@ where
                                 ended.push((to, Err(error)));
                             } else {
                                 if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing_for_peer(link.files_capable && files.is_some()));
+                        link.outgoing.send_clipboard(sharing.crossing_for_peer(to, link.files_capable && files.is_some()));
                             }
                         }
                         None => {
@@ -503,7 +503,7 @@ where
                                 tracing::warn!(ms = round_trip.as_millis(), "slow round trip to the peer");
                             }
                         }
-                        Message::Clipboard { part } => receive_clipboard(part, &link.outgoing, sharing)?,
+                        Message::Clipboard { part } => receive_clipboard(peer, part, &link.outgoing, sharing)?,
                         // the system that chose also sends the arrangement it led to
                         Message::Layout { side, chosen } => {
                             let agreed = crate::control::agreed_side(link.initiator, link.agreed, (side, chosen));
@@ -561,7 +561,7 @@ where
                                 crossed = None;
                                 for action in release.target.reclaim() { release.injector.execute(&action); }
                                 if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing_for_peer(link.files_capable && files.is_some()));
+                        link.outgoing.send_clipboard(sharing.crossing_for_peer(peer, link.files_capable && files.is_some()));
                             }
                         }
                         Message::Leave { generation, to, at } => {
@@ -597,7 +597,7 @@ where
                             let mut crossing = false;
                             let actions = match message {
                                 Message::Enter { at, .. } => {
-                                    sharing.expect_snapshot();
+                                    sharing.expect_snapshot(Some(peer));
                                     release.injector.arrived();
                                     release.target.enter(at)
                                 },
@@ -612,7 +612,7 @@ where
                                 }
                             }
                             if crossing { if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing_for_peer(link.files_capable && files.is_some())); }
+                        link.outgoing.send_clipboard(sharing.crossing_for_peer(peer, link.files_capable && files.is_some())); }
                         }
                         other => bail!("unexpected message in shared session: {other:?}"),
                     }
@@ -624,7 +624,7 @@ where
                     match links.get(&to).filter(|link| !link.locked) {
                         _ if to == me => {
                             pointer.leave(Some(at));
-                            sharing.expect_snapshot();
+                            sharing.expect_snapshot(Some(peer));
                         }
                         Some(next) => {
                             crossed = Some(to);
@@ -632,7 +632,7 @@ where
                                 ended.push((to, Err(error)));
                             } else {
                                 if let Some(files) = &files { files.crossing(); }
-                        next.outgoing.send_clipboard(sharing.crossing_for_peer(next.files_capable && files.is_some()));
+                        next.outgoing.send_clipboard(sharing.crossing_for_peer(to, next.files_capable && files.is_some()));
                             }
                         }
                         None => pointer.leave(None),
@@ -1033,16 +1033,21 @@ fn closed_after(quiet: std::time::Duration) -> Result<()> {
 /// Handles a clipboard part from the peer: acknowledgements free the send
 /// window; every chunk is acknowledged whether or not it is accepted, so the
 /// peer's window never stalls.
-fn receive_clipboard(part: ClipboardPart, outgoing: &Outgoing, sharing: &mut Sharing<impl Clipboard>) -> Result<()> {
+fn receive_clipboard(
+    from: PublicKey,
+    part: ClipboardPart,
+    outgoing: &Outgoing,
+    sharing: &mut Sharing<impl Clipboard>,
+) -> Result<()> {
     match part {
         ClipboardPart::Ack => outgoing.acknowledged(),
         ClipboardPart::Chunk { .. } => {
             outgoing.send(Message::Clipboard {
                 part: ClipboardPart::Ack,
             })?;
-            sharing.receive(part);
+            sharing.receive(from, part);
         }
-        other => sharing.receive(other),
+        other => sharing.receive(from, other),
     }
     Ok(())
 }
@@ -2958,7 +2963,7 @@ mod tests {
             .await
             .unwrap();
             let mut theirs = board_with(text("copied on the peer"), true);
-            for part in theirs.crossing().map(|read| read()).unwrap_or_default() {
+            for part in theirs.crossing(me_of(&control)).map(|read| read()).unwrap_or_default() {
                 peer.send(&Message::Clipboard { part }).await.unwrap();
             }
             round_trip(&mut peer, 1).await;
@@ -3062,7 +3067,7 @@ mod tests {
         let script = async {
             peer_enters(&mut peer).await;
             let mut theirs = board_with(text("from the peer"), true);
-            for part in theirs.crossing().map(|read| read()).unwrap_or_default() {
+            for part in theirs.crossing(me_of(&control)).map(|read| read()).unwrap_or_default() {
                 peer.send(&Message::Clipboard { part }).await.unwrap();
             }
             peer_sends(&mut peer, AWAY).await;

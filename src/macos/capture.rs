@@ -455,21 +455,26 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
             | kCGEventKeyDown
             | kCGEventKeyUp
             | kCGEventFlagsChanged
-            | kCGEventScrollWheel
-    ) || swipe::is_gesture_event(event);
-    if !input {
+            | kCGEventScrollWheel // the trackpad sends gesture events for any touch, such as a resting
+                                  // palm; only a swipe is someone using it
+    ) || swipe::dock_event(event).is_some();
+    let gesture = swipe::is_gesture_event(event);
+    if !input && !gesture {
         return true;
     }
+    // A touch that is not a swipe claims nothing, but still follows the swipe
+    // it belongs to, below.
     // Momentum scrolling continues a flick after the fingers lift. It never
     // claims control, and stays on the system the flick began on.
     // SAFETY: event is valid for the duration of the callback
-    if event_type == kCGEventScrollWheel
+    if input
+        && event_type == kCGEventScrollWheel
         && unsafe { CGEventGetIntegerValueField(event, kCGScrollWheelEventMomentumPhase) } != 0
     {
         if !try_lock(&control.state).is_some_and(|state| state.owns()) {
             return try_lock(&context.driver).is_none_or(|driver| driver.scroll_is_local());
         }
-    } else {
+    } else if input {
         control.note_physical();
         let Some(mut state) = try_lock(&control.state) else {
             // Remote injection may hold the decision lock briefly. The local
@@ -517,7 +522,7 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
             return true;
         }
     }
-    if swipe::is_gesture_event(event) {
+    if gesture {
         return handle_gesture(context, event);
     }
 
@@ -681,9 +686,62 @@ mod tests {
             CGEventSetIntegerValueField(event, kCGEventSourceUserData, DAISY_EVENT_MARKER);
             assert!(handle(&context, kCGEventKeyDown, event));
             CFRelease(event.cast_const());
+
+            // the do-nothing modifier event that keeps an idle peer's screen saver off
+            let event = CGEventCreate(std::ptr::null_mut());
+            assert!(!event.is_null());
+            CGEventSetType(event, kCGEventFlagsChanged);
+            CGEventSetIntegerValueField(event, kCGEventSourceUserData, DAISY_EVENT_MARKER);
+            assert!(handle(&context, kCGEventFlagsChanged, event));
+            CFRelease(event.cast_const());
         }
+        assert_eq!(control.physical_activity(), None, "Daisy's own events are not activity");
         assert!(!lock(&control.state).owns());
         assert!(input.try_recv().is_err());
+    }
+
+    #[test]
+    fn touching_the_trackpad_without_swiping_does_not_claim_control() {
+        let (me, peer) = (test_key(1), test_key(2));
+        let control = Arc::new(SharedControl::new(me, peer));
+        let (messages, mut input) = mpsc::channel(1);
+        let context = Context {
+            driver: Arc::new(Mutex::new(Driver::new(
+                crate::layout::Group::alone(me, vec![SQUARE]),
+                me,
+            ))),
+            cursor: Arc::new(Mutex::new(Cursor::default())),
+            messages,
+            overflow: Arc::new(AtomicBool::new(false)),
+            tap: std::ptr::null_mut(),
+            control: control.clone(),
+        };
+        let touch = swipe::companion_event().unwrap();
+        // 29 is the CGEventType of a trackpad gesture event; the event is never posted
+        handle(&context, 29, touch.as_ptr());
+        assert!(!lock(&control.state).owns(), "a resting palm must not take control");
+        assert_eq!(
+            control.physical_activity(),
+            None,
+            "nor count as someone using this system"
+        );
+        assert!(input.try_recv().is_err());
+
+        // while a peer has control, the touch still stays off this system
+        let mut layout = crate::layout::Group::alone(me, vec![SQUARE]);
+        layout.members.push(crate::layout::Member {
+            key: peer,
+            displays: vec![SQUARE],
+            offset: (-500.0, 0.0),
+        });
+        let mut remote = Driver::new(layout, me);
+        assert!(matches!(remote.motion((0.0, 250.0), (-3.0, 0.0)), Route::Enter { .. }));
+        *lock(&context.driver) = remote;
+        assert!(
+            !handle(&context, 29, touch.as_ptr()),
+            "the touch must be swallowed here"
+        );
+        assert!(!lock(&control.state).owns());
     }
 
     #[test]

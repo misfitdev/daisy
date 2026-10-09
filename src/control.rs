@@ -26,6 +26,45 @@ impl Activity {
     }
 }
 
+/// Paces the do-nothing input a following system posts while activity
+/// arrives, so its own idle timer, which starts its screen saver and lock,
+/// counts from the last input anywhere in the group. macOS accepts at most
+/// one such event about every five seconds.
+#[derive(Debug, Default)]
+pub struct IdleReset {
+    last: Option<Duration>,
+    /// When the current run of posts began.
+    since: Option<Duration>,
+}
+
+impl IdleReset {
+    pub const EVERY: Duration = Duration::from_secs(2);
+    /// Activity this far apart starts a new run of posts.
+    const GAP: Duration = Duration::from_secs(10);
+    /// Longer than macOS takes to accept a post, with room for a missed one.
+    const GRACE: Duration = Duration::from_secs(15);
+
+    /// Whether to post at `now`.
+    pub fn due(&mut self, now: Duration) -> bool {
+        let since_last = self.last.map(|last| now.saturating_sub(last));
+        if since_last.is_some_and(|since| since < Self::EVERY) {
+            return false;
+        }
+        if since_last.is_none_or(|since| since > Self::GAP) {
+            self.since = Some(now);
+        }
+        self.last = Some(now);
+        true
+    }
+
+    /// Whether macOS ignores the posts: `idle`, its input idle time read at
+    /// `now`, is long although posts have run for longer than it takes to
+    /// accept one.
+    pub fn ignored(&self, now: Duration, idle: Duration) -> bool {
+        self.since.is_some_and(|since| now.saturating_sub(since) > Self::GRACE) && idle > Self::GRACE
+    }
+}
+
 /// What a person sees of one peer's link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Link {
@@ -331,6 +370,38 @@ mod tests {
             !existing.take(first, true, false),
             "starting a session is not new input"
         );
+    }
+
+    #[test]
+    fn idle_resets_are_paced_while_activity_keeps_arriving() {
+        let mut reset = IdleReset::default();
+        let at = |seconds: f64| Duration::from_secs_f64(seconds);
+        assert!(reset.due(at(0.0)));
+        assert!(
+            !reset.due(at(1.0)),
+            "activity arrives every second; posts are spaced out"
+        );
+        assert!(reset.due(at(2.0)));
+        assert!(!reset.due(at(3.5)));
+        assert!(reset.due(at(4.0)));
+    }
+
+    #[test]
+    fn ignored_idle_resets_are_noticed_only_after_macos_had_time_to_accept_one() {
+        let mut reset = IdleReset::default();
+        let at = Duration::from_secs;
+        assert!(!reset.ignored(at(0), at(900)), "nothing posted yet");
+        for second in 0..=20 {
+            reset.due(at(second));
+        }
+        assert!(!reset.ignored(at(20), at(4)), "accepted posts keep idle time short");
+        assert!(
+            reset.ignored(at(20), at(300)),
+            "idle time kept growing through 20 s of posts"
+        );
+        // after a pause, a new run starts and gets its own grace
+        assert!(reset.due(at(60)));
+        assert!(!reset.ignored(at(61), at(300)));
     }
 
     #[test]

@@ -96,7 +96,7 @@ Nearby paired peers find each other again with Bonjour after a drop, sleep or ne
 
 Input capture runs in the macOS event-tap callback, where blocking would lag the entire system. Its handoff queue is bounded and uses nonblocking sends. If the queue fills or callback state is contended, Daisy passes the current event through locally, reclaims local routing when possible, signals overload without taking another blocking lock and terminates the session.
 
-Display activity updates are accepted only from the current control owner at the current generation, while the receiving system is unlocked and not handling local input. They refresh macOS’s display idle timeout without injecting input or unlocking a system. The owner sends updates only when it sees new physical input; session heartbeats do not postpone display sleep or locking.
+Display activity updates are accepted only from the current control owner at the current generation, while the receiving system is unlocked and not handling local input. They refresh macOS’s display idle timeout and post a modifier-key event that leaves every modifier as it was, which restarts the screen saver's idle time. That event cannot type, click or move the pointer, and no system is unlocked. The owner sends updates only when it sees new physical input; session heartbeats do not postpone display sleep or locking.
 
 Network reads and writes run in dedicated tasks behind bounded queues. Trust revocation, local overload and the three-second silence deadline remain selectable even when a peer stops reading. When the outgoing input channel closes, accepted messages have at most one second to flush; a blocked flush returns an error instead of reporting clean shutdown.
 
@@ -104,7 +104,7 @@ A system replaying its peer's input releases every held key and button whenever 
 
 ## Clipboard
 
-When clipboard sharing is on, a system sends its clipboard to the paired peer each time control crosses: plain text, rich text and images, up to 4 MB of text and 32 MB of image. It travels inside the encrypted session like input and is written straight to the receiving system's pasteboard. A paired peer can therefore read whatever was on the clipboard at the moment control crossed, which is within the trust pairing already grants. Either side can turn sharing off; a system with it off neither sends nor writes. The receiver discards any item larger than its limit or longer than it declared, and never writes a partial item.
+When clipboard sharing is on, a system sends its clipboard to a peer each time control crosses to that peer, unless that peer already has it: plain text, rich text and images, up to 4 MB of text and 32 MB of image. A clipboard received from one member is passed on the same way, so it reaches every member control moves through. It travels inside the encrypted session like input and is written straight to the receiving system's pasteboard. Any member control reaches can therefore read what was copied on another member, which is within the trust the group already grants. Either side can turn sharing off; a system with it off neither sends nor writes. The receiver discards any item larger than its limit or longer than it declared, and never writes a partial item.
 
 Items marked concealed or transient by their source app stay on the system
 where they were copied. This includes clipboard entries from password managers

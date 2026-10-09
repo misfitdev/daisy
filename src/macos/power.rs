@@ -6,7 +6,8 @@ use std::ffi::{CStr, c_void};
 use anyhow::{Result, bail};
 
 use super::ffi::{
-    CFBooleanGetTypeID, CFBooleanGetValue, CFGetTypeID, CFRelease, CFStringCreateWithCString, kCFStringEncodingUTF8,
+    CFBooleanGetTypeID, CFBooleanGetValue, CFGetTypeID, CFNumberGetValue, CFRelease, CFStringCreateWithCString,
+    kCFStringEncodingUTF8,
 };
 
 /// Holds off idle system sleep while it lives; displays may still dim and
@@ -86,6 +87,29 @@ impl Drop for UserActivity {
     }
 }
 
+/// How long since this system last had input, as its screen saver and
+/// lock count it.
+pub fn input_idle() -> Option<std::time::Duration> {
+    // SAFETY: IOServiceMatching's dictionary is consumed by the lookup; the
+    // service and the copied property are released here
+    unsafe {
+        let service = IOServiceGetMatchingService(MAIN_PORT_DEFAULT, IOServiceMatching(c"IOHIDSystem".as_ptr()));
+        if service == 0 {
+            return None;
+        }
+        let key = CfString::new(c"HIDIdleTime");
+        let value = IORegistryEntryCreateCFProperty(service, key.0, std::ptr::null(), 0);
+        IOObjectRelease(service);
+        if value.is_null() {
+            return None;
+        }
+        let mut nanoseconds: i64 = 0;
+        let read = CFNumberGetValue(value, CF_NUMBER_SINT64, (&raw mut nanoseconds).cast());
+        CFRelease(value);
+        (read && nanoseconds >= 0).then(|| std::time::Duration::from_nanos(nanoseconds as u64))
+    }
+}
+
 /// Whether this system's screen is locked. Posted input does not reach the
 /// lock screen, so a person must unlock it here.
 pub fn screen_locked() -> bool {
@@ -125,12 +149,24 @@ impl Drop for CfString {
 // IOPMAssertionLevel and IOPMUserActiveType, from IOKit/pwr_mgt/IOPMLib.h
 const ASSERTION_LEVEL_ON: u32 = 255;
 const USER_ACTIVE_LOCAL: u32 = 0;
+// kIOMainPortDefault, from IOKit/IOKitLib.h, and kCFNumberSInt64Type
+const MAIN_PORT_DEFAULT: u32 = 0;
+const CF_NUMBER_SINT64: isize = 4;
 
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
     fn IOPMAssertionCreateWithName(kind: *const c_void, level: u32, name: *const c_void, id: *mut u32) -> i32;
     fn IOPMAssertionRelease(id: u32) -> i32;
     fn IOPMAssertionDeclareUserActivity(name: *const c_void, kind: u32, id: *mut u32) -> i32;
+    fn IOServiceMatching(name: *const std::ffi::c_char) -> *const c_void;
+    fn IOServiceGetMatchingService(main_port: u32, matching: *const c_void) -> u32;
+    fn IORegistryEntryCreateCFProperty(
+        entry: u32,
+        key: *const c_void,
+        allocator: *const c_void,
+        options: u32,
+    ) -> *const c_void;
+    fn IOObjectRelease(object: u32) -> i32;
     #[cfg(test)]
     fn IOPMAssertionCopyProperties(id: u32) -> *const c_void;
 }
@@ -148,6 +184,11 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_idle_time_is_readable() {
+        assert!(input_idle().is_some());
+    }
 
     #[test]
     fn the_assertion_is_held_while_it_lives_and_released_after() {

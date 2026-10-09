@@ -15,6 +15,9 @@ use crate::swipe::SwipeDetector;
 pub struct Injector {
     source: CGEventSourceRef,
     activity: super::power::UserActivity,
+    idle_reset: crate::control::IdleReset,
+    idle_reset_ignored: bool,
+    started: Instant,
     // macOS 27 ignores synthetic clicks and drags without an event number
     numbered_clicks: bool,
     click_number: i64,
@@ -36,6 +39,9 @@ impl Injector {
         Self {
             source,
             activity: super::power::UserActivity::default(),
+            idle_reset: crate::control::IdleReset::default(),
+            idle_reset_ignored: false,
+            started: Instant::now(),
             numbered_clicks: super::major_version() >= 27,
             click_number: 0,
             shake: ShakeDetector::default(),
@@ -137,6 +143,24 @@ impl Injector {
     }
 }
 
+impl Injector {
+    /// Posts a modifier event that repeats the current modifier state. macOS
+    /// counts it as input, restarting the idle timer behind the screen saver
+    /// and lock, yet nothing changes for any app.
+    fn reset_idle_timer(&self) {
+        // SAFETY: the event is live until `post` releases it
+        unsafe {
+            let event = CGEventCreate(self.source);
+            if event.is_null() {
+                return;
+            }
+            CGEventSetType(event, kCGEventFlagsChanged);
+            CGEventSetFlags(event, CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState));
+            post(event);
+        }
+    }
+}
+
 impl crate::share::Inject for Injector {
     fn execute(&mut self, action: &Action) {
         Injector::execute(self, action);
@@ -144,6 +168,25 @@ impl crate::share::Inject for Injector {
 
     fn arrived(&mut self) {
         self.activity.note();
+        let now = self.started.elapsed();
+        if !self.idle_reset.due(now) {
+            return;
+        }
+        let idle = super::power::input_idle();
+        if let Some(idle) = idle
+            && self.idle_reset.ignored(now, idle)
+            && !std::mem::replace(&mut self.idle_reset_ignored, true)
+        {
+            tracing::warn!(
+                idle_ms = idle.as_millis() as u64,
+                "macOS ignores idle timer resets; this system's screen saver may start while the group is in use"
+            );
+        }
+        tracing::debug!(
+            idle_ms = idle.map(|idle| idle.as_millis() as u64),
+            "idle timer reset posted"
+        );
+        self.reset_idle_timer();
     }
 }
 

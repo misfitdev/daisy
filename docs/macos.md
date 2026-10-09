@@ -46,8 +46,18 @@ is taking precedence. The injector refreshes `IOPMAssertionDeclareUserActivity`
 and retains the returned assertion ID for the next refresh. IOKit expires it
 using the user's display sleep timeout; the injector releases it when the
 session ends. Heartbeats and clipboard traffic do not refresh this assertion.
-No input event is synthesized to report display activity, and locked systems
-remain locked.
+
+The assertion keeps the display awake but does not reset the idle time behind
+the screen saver, which starts it and locks the screen; only input does. So
+at most every 2 seconds while activity arrives, the injector also posts a
+marked `kCGEventFlagsChanged` event that repeats the current modifier state.
+It changes nothing for apps, and Daisy's own event tap ignores it, so it never
+takes control. On macOS 26, measured on 2026-10-08 through `HIDIdleTime`,
+macOS counts such an event as input at most about once every 5 seconds, so a
+following system's idle time stays under about 5 seconds while the group is
+in use and grows normally once activity stops. If the idle time still exceeds
+15 seconds after 15 seconds of posting, the trace records that macOS ignored
+the resets. Locked systems accept no activity and remain locked.
 
 ## Swipes
 
