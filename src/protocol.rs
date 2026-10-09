@@ -144,6 +144,24 @@ pub enum Message {
     FilesPart {
         part: crate::files::Part,
     },
+    /// The copy on the sender's clipboard, offered as control crosses or a
+    /// newer copy arrives. Only with the clipboard-ID capability.
+    ClipboardOffer {
+        copy: CopyId,
+    },
+    /// Asks for an offered copy the receiver lacks; the sender answers with a
+    /// snapshot that starts with `ClipboardPart::For` naming it.
+    ClipboardRequest {
+        copy: CopyId,
+    },
+}
+
+/// One copied clipboard, wherever it has travelled: the system it was copied
+/// on and that system's pasteboard change count at the time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CopyId {
+    pub origin: PublicKey,
+    pub count: i64,
 }
 
 /// A clipboard snapshot is its items, each a `Begin`, its `Chunk`s and an
@@ -170,6 +188,11 @@ pub enum ClipboardPart {
     /// Sent back for every `Chunk` received, so the sender keeps only a few
     /// chunks in flight and input and heartbeats never queue behind them.
     Ack,
+    /// Starts a requested snapshot and names the copy it carries. Only with
+    /// the clipboard-ID capability.
+    For {
+        copy: CopyId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
