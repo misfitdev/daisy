@@ -249,8 +249,8 @@ pub struct Sharing<C> {
     received: Option<(CopyId, PublicKey, i64)>,
     /// The copy last offered to each peer; a request is answered only for it.
     offered: HashMap<PublicKey, CopyId>,
-    /// The copy last requested, from whom, and whether its snapshot has begun.
-    requested: Option<(PublicKey, CopyId, bool)>,
+    /// The requested copy, sender, snapshot state, and clipboard count at request time.
+    requested: Option<(PublicKey, CopyId, bool, i64)>,
     requested_inbox: Inbox,
 }
 
@@ -347,7 +347,7 @@ impl<C: Clipboard> Sharing<C> {
         {
             return false;
         }
-        self.requested = Some((from, copy, false));
+        self.requested = Some((from, copy, false, self.clipboard.change_count()));
         self.requested_inbox = Inbox::default();
         true
     }
@@ -387,13 +387,13 @@ impl<C: Clipboard> Sharing<C> {
     /// the copy last requested from `from` is accepted. Returns the copy once
     /// it is written here.
     pub fn receive_requested(&mut self, from: PublicKey, part: ClipboardPart) -> Option<CopyId> {
-        let (sender, copy, begun) = self.requested?;
+        let (sender, copy, begun, requested_count) = self.requested?;
         if sender != from {
             return None;
         }
         if let ClipboardPart::For { copy: named } = part {
             if named == copy && !begun {
-                self.requested = Some((sender, copy, true));
+                self.requested = Some((sender, copy, true, requested_count));
             }
             return None;
         }
@@ -402,7 +402,7 @@ impl<C: Clipboard> Sharing<C> {
         }
         let done = matches!(part, ClipboardPart::Done);
         let written = self.requested_inbox.accept(part).and_then(|content| {
-            if !*self.enabled.borrow() {
+            if !*self.enabled.borrow() || self.clipboard.change_count() != requested_count {
                 return None;
             }
             let count = self.clipboard.write(&content);
@@ -420,6 +420,8 @@ impl<C: Clipboard> Sharing<C> {
     /// taken by using this system; that peer's clipboard follows.
     pub fn expect_snapshot(&mut self, from: Option<PublicKey>) {
         self.expecting = Some(from);
+        self.requested = None;
+        self.requested_inbox = Inbox::default();
         // a snapshot still arriving from an earlier crossing never finished,
         // perhaps because its sender disconnected; it must not block this one
         self.receiving = None;
@@ -988,6 +990,63 @@ mod tests {
         receiver.sharing.clipboard.copy(text("local"));
         assert!(hand(&mut receiver, &mut supplier, false) > 0);
         assert_eq!(supplier.sharing.clipboard.content, Some(text("local")));
+    }
+
+    #[test]
+    fn requested_copy_cannot_replace_content_copied_locally_in_flight() {
+        for copy_before_first_part in [false, true] {
+            let mut sender = member(1, Some(text("incoming")));
+            let mut receiver = member(2, Some(text("original")));
+            let offered = sender.sharing.offer(sender.key, receiver.key).unwrap();
+            receiver.sharing.expect_snapshot(Some(sender.key));
+            assert!(receiver.sharing.wants(receiver.key, sender.key, offered, None));
+            let mut parts = sender
+                .sharing
+                .requested(sender.key, receiver.key, offered, false)
+                .unwrap()();
+            let done = parts.pop().unwrap();
+            if copy_before_first_part {
+                receiver.sharing.clipboard.copy(text("new local copy"));
+            }
+            for part in parts {
+                assert_eq!(receiver.sharing.receive_requested(sender.key, part), None);
+            }
+            if !copy_before_first_part {
+                receiver.sharing.clipboard.copy(text("new local copy"));
+            }
+            let count = receiver.sharing.clipboard.change_count();
+            assert_eq!(receiver.sharing.receive_requested(sender.key, done), None);
+            assert_eq!(receiver.sharing.clipboard.content, Some(text("new local copy")));
+            assert_eq!(receiver.sharing.clipboard.change_count(), count);
+            assert_eq!(receiver.sharing.current(receiver.key).origin, receiver.key);
+            assert!(receiver.sharing.requested.is_none());
+            assert!(hand(&mut sender, &mut receiver, false) > 0);
+            assert_eq!(receiver.sharing.clipboard.content, Some(text("incoming")));
+        }
+    }
+
+    #[test]
+    fn a_new_crossing_cancels_the_pending_requested_snapshot() {
+        let mut sender = member(1, Some(text("obsolete")));
+        let mut receiver = member(2, Some(text("original")));
+        let offered = sender.sharing.offer(sender.key, receiver.key).unwrap();
+        receiver.sharing.expect_snapshot(Some(sender.key));
+        assert!(receiver.sharing.wants(receiver.key, sender.key, offered, None));
+        let mut parts = sender
+            .sharing
+            .requested(sender.key, receiver.key, offered, false)
+            .unwrap()();
+        let done = parts.pop().unwrap();
+        for part in parts {
+            receiver.sharing.receive_requested(sender.key, part);
+        }
+        receiver.sharing.expect_snapshot(Some(system(3)));
+        assert_eq!(receiver.sharing.receive_requested(sender.key, done), None);
+        assert_eq!(receiver.sharing.clipboard.content, Some(text("original")));
+        assert!(receiver.sharing.requested.is_none());
+        let mut next = member(3, Some(text("next crossing")));
+        assert!(hand(&mut next, &mut receiver, false) > 0);
+        assert_eq!(receiver.sharing.clipboard.content, Some(text("next crossing")));
     }
 
     #[test]
