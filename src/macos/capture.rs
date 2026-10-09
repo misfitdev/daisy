@@ -9,7 +9,7 @@
 
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::thread::JoinHandle;
 
@@ -110,9 +110,24 @@ struct Context {
     overflow: Arc<AtomicBool>,
     tap: CFMachPortRef,
     control: Arc<SharedControl>,
+    /// The generation this system last stamped its own input with, plus
+    /// one; zero when it has none or lost control.
+    sent_generation: AtomicU64,
 }
 
 impl Context {
+    /// Whether this system's input is going to a peer it drives.
+    fn driving(&self) -> bool {
+        try_lock(&self.driver).is_some_and(|driver| driver.is_remote())
+    }
+
+    /// The generation to stamp input with while the session holds the
+    /// decision lock for an instant. If control changed hands meanwhile,
+    /// peers reject the stale stamp like any queued input.
+    fn last_generation(&self) -> Option<u64> {
+        self.sent_generation.load(Ordering::Acquire).checked_sub(1)
+    }
+
     fn diagnose_recovery(&self, reason: &'static str) {
         self.control.diagnostics.record(crate::diagnostics::CaptureEvent {
             at: self.control.now(),
@@ -152,12 +167,18 @@ impl Context {
     fn send_stamped(&self, stamp: impl FnOnce(u64) -> Message) -> bool {
         let control = &self.control;
         let Some(state) = try_lock(&control.state) else {
-            // The session task holds this lock only briefly: keep this
-            // one event here rather than end the session.
+            // The session task holds this lock only briefly, as on every
+            // heartbeat. While driving a peer, this system still has control.
+            if self.driving()
+                && let Some(generation) = self.last_generation()
+            {
+                return self.send(stamp(generation));
+            }
             self.release_local();
             return false;
         };
         if !state.owns() {
+            self.sent_generation.store(0, Ordering::Release);
             self.diagnose_recovery("owner_changed_while_sending");
             drop(state);
             if let Some(mut driver) = try_lock(&self.driver) {
@@ -170,9 +191,10 @@ impl Context {
             control.wake();
             return false;
         }
-        let message = stamp(state.generation());
+        let generation = state.generation();
         drop(state);
-        self.send(message)
+        self.sent_generation.store(generation + 1, Ordering::Release);
+        self.send(stamp(generation))
     }
 
     fn send(&self, message: Message) -> bool {
@@ -322,6 +344,7 @@ fn run_tap(
         overflow,
         tap: std::ptr::null_mut(),
         control,
+        sent_generation: AtomicU64::new(0),
     }));
 
     // SAFETY: context lives until after the run loop stops below, and the
@@ -476,50 +499,56 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
         }
     } else if input {
         control.note_physical();
-        let Some(mut state) = try_lock(&control.state) else {
-            // Remote injection may hold the decision lock briefly. The local
-            // event still passes immediately; cleanup and the claim run on the
-            // session task, never by waiting in the event tap.
-            if let Some(mut driver) = try_lock(&context.driver) {
-                driver.reclaim();
+        let state = try_lock(&control.state);
+        // While this system drives a peer, its own input is never a claim,
+        // even if the session holds the decision lock for an instant; the
+        // event is routed below like any other.
+        if !(state.is_none() && context.driving()) {
+            let Some(mut state) = state else {
+                // Remote injection may hold the decision lock briefly. The local
+                // event still passes immediately; cleanup and the claim run on the
+                // session task, never by waiting in the event tap.
+                if let Some(mut driver) = try_lock(&context.driver) {
+                    driver.reclaim();
+                }
+                if let Some(mut cursor) = try_lock(&context.cursor) {
+                    cursor.thaw(None);
+                }
+                context.diagnose("physical_input_lock_contention", None, event_type, event);
+                control.interrupted.store(true, Ordering::Release);
+                control.wake();
+                return true;
+            };
+            let was_owner = state.owns();
+            let claim = state.physical(control.now());
+            drop(state);
+            if !was_owner {
+                context.diagnose(
+                    if claim.is_some() {
+                        "physical_input_claim"
+                    } else {
+                        "physical_input_claim_settling"
+                    },
+                    claim,
+                    event_type,
+                    event,
+                );
+                control.wake();
+                if let Some(mut driver) = try_lock(&context.driver) {
+                    driver.reclaim();
+                }
+                // the session task holds the cursor while yielding control;
+                // it thaws it there, so a busy lock needs nothing here
+                if let Some(mut cursor) = try_lock(&context.cursor) {
+                    cursor.thaw(None);
+                }
+                if let Some(generation) = claim {
+                    context.send(Message::ControlClaim { generation });
+                }
+                // This first event belongs to the system being touched, including if
+                // its pointer happens to be resting at the shared screen edge.
+                return true;
             }
-            if let Some(mut cursor) = try_lock(&context.cursor) {
-                cursor.thaw(None);
-            }
-            context.diagnose("physical_input_lock_contention", None, event_type, event);
-            control.interrupted.store(true, Ordering::Release);
-            control.wake();
-            return true;
-        };
-        let was_owner = state.owns();
-        let claim = state.physical(control.now());
-        drop(state);
-        if !was_owner {
-            context.diagnose(
-                if claim.is_some() {
-                    "physical_input_claim"
-                } else {
-                    "physical_input_claim_settling"
-                },
-                claim,
-                event_type,
-                event,
-            );
-            control.wake();
-            if let Some(mut driver) = try_lock(&context.driver) {
-                driver.reclaim();
-            }
-            // the session task holds the cursor while yielding control;
-            // it thaws it there, so a busy lock needs nothing here
-            if let Some(mut cursor) = try_lock(&context.cursor) {
-                cursor.thaw(None);
-            }
-            if let Some(generation) = claim {
-                context.send(Message::ControlClaim { generation });
-            }
-            // This first event belongs to the system being touched, including if
-            // its pointer happens to be resting at the shared screen edge.
-            return true;
         }
     }
     if gesture {
@@ -678,6 +707,7 @@ mod tests {
             overflow: Arc::new(AtomicBool::new(false)),
             tap: std::ptr::null_mut(),
             control: control.clone(),
+            sent_generation: AtomicU64::new(0),
         };
         // Create a marked event but do not post it into the user's session.
         unsafe {
@@ -715,6 +745,7 @@ mod tests {
             overflow: Arc::new(AtomicBool::new(false)),
             tap: std::ptr::null_mut(),
             control: control.clone(),
+            sent_generation: AtomicU64::new(0),
         };
         let touch = swipe::companion_event().unwrap();
         // 29 is the CGEventType of a trackpad gesture event; the event is never posted
@@ -745,6 +776,56 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_session_does_not_pull_control_back_from_a_peer_this_system_drives() {
+        let (me, peer) = (test_key(1), test_key(2));
+        let mut layout = crate::layout::Group::alone(me, vec![SQUARE]);
+        layout.members.push(crate::layout::Member {
+            key: peer,
+            displays: vec![SQUARE],
+            offset: (-500.0, 0.0),
+        });
+        let driver = Arc::new(Mutex::new(Driver::new(layout, me)));
+        assert!(matches!(
+            lock(&driver).motion((0.0, 250.0), (-3.0, 0.0)),
+            Route::Enter { .. }
+        ));
+        let control = Arc::new(SharedControl::new(me, me));
+        let (messages, mut input) = mpsc::channel(4);
+        let context = Context {
+            driver: driver.clone(),
+            cursor: Arc::new(Mutex::new(Cursor::default())),
+            messages,
+            overflow: Arc::new(AtomicBool::new(false)),
+            tap: std::ptr::null_mut(),
+            control: control.clone(),
+            sent_generation: AtomicU64::new(0),
+        };
+        let generation = lock(&control.state).generation();
+        let typed = |code| {
+            // SAFETY: a plain keyboard event, released here and never posted
+            unsafe {
+                let event = CGEventCreateKeyboardEvent(std::ptr::null_mut(), code, true);
+                assert!(!event.is_null());
+                let passed = handle(&context, kCGEventKeyDown, event);
+                CFRelease(event.cast_const());
+                passed
+            }
+        };
+        assert!(!typed(7), "a key typed while driving the peer goes to the peer");
+        assert!(matches!(input.try_recv(), Ok(Message::Input { generation: sent, .. }) if sent == generation));
+        // the session holds the decision lock for an instant, as on each heartbeat
+        let held = lock(&control.state);
+        assert!(!typed(8), "the key still goes to the peer");
+        drop(held);
+        assert!(
+            lock(&driver).is_remote(),
+            "the peer this system drives keeps the pointer"
+        );
+        assert!(!control.interrupted.load(Ordering::Acquire), "nothing claims control");
+        assert!(matches!(input.try_recv(), Ok(Message::Input { generation: sent, .. }) if sent == generation));
+    }
+
+    #[test]
     fn cursor_contention_reclaims_remote_driver() {
         let mut layout = crate::layout::Group::alone(test_key(1), vec![SQUARE]);
         layout.members.push(crate::layout::Member {
@@ -768,6 +849,7 @@ mod tests {
             overflow: overflow.clone(),
             tap: std::ptr::null_mut(),
             control: Arc::new(SharedControl::new(test_key(1), test_key(2))),
+            sent_generation: AtomicU64::new(0),
         };
 
         let _held = lock(&context.cursor);
