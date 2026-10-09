@@ -351,7 +351,7 @@ fn new_event() -> Option<Event> {
     (!event.is_null()).then_some(Event(event))
 }
 
-fn companion_event() -> Option<Event> {
+pub(super) fn companion_event() -> Option<Event> {
     let event = new_event()?;
     // SAFETY: event was just created
     unsafe { CGEventSetIntegerValueField(event.as_ptr(), kFieldCGSEventType, kCGSEventGesture) };
