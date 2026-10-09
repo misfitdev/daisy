@@ -64,7 +64,7 @@ long that trust lasts.
 - Bonjour discovery of paired peers is implemented. Automatic reconnection after sleep, wake and
   network changes is implemented; two-system verification remains. Clipboard sharing of text, rich text and images is implemented;
   two-system verification remains. Groups of up to eight systems, arranged by dragging, are implemented.
-- Activity on the system in control refreshes every unlocked member’s display idle timeout. With no new input, normal display sleep and lock settings apply.
+- Activity on the system in control refreshes every unlocked member’s display and screen saver idle time. With no new input, normal display sleep, screen saver and lock settings apply.
 - Capturing trackpad swipes requires macOS 26 or later on the system whose trackpad is
   used.
 - Pairing codes are safe only as PAKE input. Never ask people to compare a code

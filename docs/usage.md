@@ -38,7 +38,7 @@ Changes apply across the group and are saved. If two systems change the arrangem
 
 Move the pointer off a display toward a peer's display to use that system. You can cross any nearby edge or corner; crossing between this system's own displays stays local. Small gaps are allowed. See [crossing geometry](architecture.md#session-flow) for the exact rules.
 
-Using a system's own keyboard or trackpad takes control there immediately. Momentum scrolling stays on the system where the flick began. Control never crosses while a mouse button is held or onto a locked system; unlock it there first.
+Using a system's own keyboard or trackpad takes control there immediately. Resting a hand on a trackpad does not; moving the pointer, clicking, typing, scrolling or swiping does. Momentum scrolling stays on the system where the flick began. Control never crosses while a mouse button is held or onto a locked system; unlock it there first.
 
 **Control-Option-Command-Escape** returns control to the system you are at and centers its pointer on the main display. Disconnecting or stopping sharing also releases held remote input.
 
@@ -56,7 +56,7 @@ link. Control-Option-Command-Escape remains the shortcut to take control back.
 
 ## Clipboard
 
-When control moves, the clipboard goes with it: the system giving up control sends its clipboard, including when control moves because someone started using the other system. Copy on one system, move to the peer and paste there; copy on the peer, come back (through the edge, by using this system, or with Control-Option-Command-Escape) and paste here.
+When control moves, the clipboard goes with it: the system giving up control sends its clipboard, including when control moves because someone started using the other system. Copy on one system, move to the peer and paste there; copy on the peer, come back (through the edge, by using this system, or with Control-Option-Command-Escape) and paste here. In a group, the copy keeps travelling with control: copy on one system, move through a second to a third, and paste there.
 
 - In `Daisy.app`, files and folders copied in Finder are shared with every connected group member. Paste normally in Finder. Daisy receives their contents when Finder first requests the clipboard; Finder can make that request before you choose Paste. A native panel shows progress and lets you cancel. While receiving, Finder’s Paste action is unavailable; wait for the panel to finish, then paste.
 - Pending file offers expire after 15 seconds without activity. Copy the files again if the offer expires. Copying something else or receiving a newer offer replaces the offer; transfers already running may finish.
@@ -82,7 +82,7 @@ The invitation lasts 30 seconds. Use **Cancel** to close it or **Try Again** if 
 
 To accept new systems whenever sharing is on, enable **Always discoverable** under **Advanced…**. Turning it on requires confirmation and Touch ID or the login password. While enabled, **Add a System** is unavailable. Each system keeps its own setting; an organization can [disable it](administration.md).
 
-A peer that sleeps or leaves the network drops out without interrupting the rest, then reconnects when available and still trusted. While connected, physical input on the system in control keeps unlocked members' displays active. When input stops, normal display sleep and lock timers apply. Daisy never unlocks a system.
+A peer that sleeps or leaves the network drops out without interrupting the rest, then reconnects when available and still trusted. While connected, physical input on the system in control keeps unlocked members' displays awake and their screen savers off. When input stops, each system's normal display sleep, screen saver and lock settings apply. Daisy never unlocks a system.
 
 Pairing one member admits a system to the whole group. See [group trust and introductions](security-model.md#groups) before adding a system you do not control.
 
