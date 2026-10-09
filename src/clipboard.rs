@@ -234,8 +234,9 @@ pub struct Sharing<C> {
     inbox: Inbox,
     /// Control just crossed to this system, so one snapshot from the peer is due.
     expecting: bool,
-    /// A due snapshot is arriving.
-    receiving: bool,
+    /// A due snapshot is arriving from this peer; parts from any other are
+    /// ignored until it is done.
+    receiving: Option<PublicKey>,
 }
 
 impl<C: Clipboard> Sharing<C> {
@@ -246,7 +247,7 @@ impl<C: Clipboard> Sharing<C> {
             outbox: Outbox::default(),
             inbox: Inbox::default(),
             expecting: false,
-            receiving: false,
+            receiving: None,
         }
     }
 
@@ -291,12 +292,16 @@ impl<C: Clipboard> Sharing<C> {
     /// to this system is accepted, so the peer cannot replace this clipboard at
     /// other times. A completed one is written if sharing is on.
     pub fn receive(&mut self, from: PublicKey, part: ClipboardPart) {
-        if !self.receiving {
-            if !(self.expecting && matches!(part, ClipboardPart::Begin { .. })) {
-                return;
+        match self.receiving {
+            Some(sender) if sender != from => return,
+            Some(_) => {}
+            None => {
+                if !(self.expecting && matches!(part, ClipboardPart::Begin { .. })) {
+                    return;
+                }
+                self.expecting = false;
+                self.receiving = Some(from);
             }
-            self.expecting = false;
-            self.receiving = true;
         }
         let done = matches!(part, ClipboardPart::Done);
         if let Some(content) = self.inbox.accept(part)
@@ -306,7 +311,7 @@ impl<C: Clipboard> Sharing<C> {
             self.outbox.wrote(from, count);
         }
         if done {
-            self.receiving = false;
+            self.receiving = None;
         }
     }
 }
@@ -719,5 +724,31 @@ mod tests {
             Some(text("copied on the first system")),
             "passed on to the next system"
         );
+    }
+
+    #[test]
+    fn a_snapshot_belongs_to_the_peer_that_began_it() {
+        let (sender, intruder, next) = (system(1), system(2), system(3));
+        let (mut there, _on_there) = sharing(Some(text("copied on the sender")));
+        let (mut other, _on_other) = sharing(Some(text("from someone else")));
+        let (mut here, _on_here) = sharing(None);
+        here.expect_snapshot();
+        let mut theirs = there.crossing(system(4)).map(|read| read()).unwrap_or_default();
+        let done = theirs.pop().unwrap();
+        for part in theirs {
+            here.receive(sender, part);
+        }
+        for part in other.crossing(system(4)).map(|read| read()).unwrap_or_default() {
+            here.receive(intruder, part);
+        }
+        assert_eq!(
+            here.clipboard.content, None,
+            "another peer cannot finish or feed the snapshot"
+        );
+        here.receive(sender, done);
+        assert_eq!(here.clipboard.content, Some(text("copied on the sender")));
+        assert!(here.crossing(sender).is_none(), "not echoed to the peer it came from");
+        assert!(here.crossing(intruder).is_some(), "the other peer does not have it");
+        assert!(here.crossing(next).is_some());
     }
 }
