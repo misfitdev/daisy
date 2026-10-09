@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { defineConfig } from "astro/config";
+import { unified } from "@astrojs/markdown-remark";
 import { remarkRepoDocs } from "./src/lib/remark-repo-docs.mjs";
 
 // CI sets DAISY_VERSION to the latest published release so the download link
@@ -18,7 +19,7 @@ export default defineConfig({
   trailingSlash: "always",
   vite: { define: { "import.meta.env.DAISY_VERSION": JSON.stringify(version) } },
   markdown: {
-    remarkPlugins: [[remarkRepoDocs, { base, downloadUrl: `https://github.com/misfitdev/daisy/releases/download/v${version}/Daisy-${version}-macos-arm64.dmg` }]],
+    processor: unified({ remarkPlugins: [[remarkRepoDocs, { base, downloadUrl: `https://github.com/misfitdev/daisy/releases/download/v${version}/Daisy-${version}-macos-arm64.dmg` }]] }),
     shikiConfig: { theme: "css-variables" },
   },
 });

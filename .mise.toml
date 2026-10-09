@@ -7,7 +7,7 @@ git-cliff = "2.14.2"
 # local security review tools
 "cargo:cargo-audit" = "0.22.2"
 # ReachSec delegates reachability analysis to call-cg4rs, which uses rustc-private APIs.
-"cargo:https://github.com/xizheyin/reachsec" = { version = "rev:548b228ba35774664d4d691b6fddf537aa6225db", bin = "reachsec", postinstall = "rustup toolchain install nightly-2025-08-09 --component rust-src --component rustc-dev --component llvm-tools-preview && RUSTUP_TOOLCHAIN=nightly-2025-08-09 cargo install --git=https://github.com/xizheyin/callgraph4rs --rev=b6cdc5f38410a934789ab70f2b8a41eaae2529ef --locked cg4rs --root \"$MISE_TOOL_INSTALL_PATH\"" }
+"cargo:https://github.com/xizheyin/reachsec" = { version = "rev:548b228ba35774664d4d691b6fddf537aa6225db", bin = "reachsec", postinstall = "rustup toolchain install nightly-2025-08-09 --component rust-src --component rustc-dev --component llvm-tools-preview && RUSTUP_TOOLCHAIN=nightly-2025-08-09 cargo install --git=https://github.com/xizheyin/callgraph4rs --rev=3898d83e715df1d56004761738a2db24d2c36628 --locked cg4rs --root \"$MISE_TOOL_INSTALL_PATH\"" }
 cargo-deny = "0.20.2"
 zizmor = "1.30.1"
 actionlint = "1.7.12"
