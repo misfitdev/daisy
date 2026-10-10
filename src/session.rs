@@ -109,10 +109,19 @@ fn negotiated_payload_for(version: &Version, trace: bool, protocol: u16) -> Vec<
         append_capability(&mut payload, &format!("protocols-{list}"));
     }
     if trace && crate::file_transfer::supported() {
-        append_capability(&mut payload, "files-v1");
+        append_capability(&mut payload, FILES_CAPABILITY);
+    }
+    if trace {
+        append_capability(&mut payload, CLIPBOARD_IDS_CAPABILITY);
+        append_capability(&mut payload, ARRANGEMENT_CAPABILITY);
     }
     payload
 }
+
+const FILES_CAPABILITY: &str = "files-v1";
+/// Clipboard copies are offered by ID and sent only when requested.
+const CLIPBOARD_IDS_CAPABILITY: &str = "clipid-v1";
+const ARRANGEMENT_CAPABILITY: &str = "arr-v1";
 
 fn append_capability(payload: &mut Vec<u8>, capability: &str) -> bool {
     let separator = if payload[2..].contains(&0) { "," } else { "\0caps=" };
@@ -124,13 +133,31 @@ fn append_capability(payload: &mut Vec<u8>, capability: &str) -> bool {
     true
 }
 
-fn advertises_files(bytes: &[u8]) -> bool {
+fn advertises(bytes: &[u8], capability: &str) -> bool {
     Version::decode(bytes).is_some_and(|v| {
         v.app.split_once('\0').is_some_and(|(_, tail)| {
             tail.strip_prefix("caps=")
-                .is_some_and(|caps| caps.split(',').any(|cap| cap == "files-v1"))
+                .is_some_and(|caps| caps.split(',').any(|cap| cap == capability))
         })
     })
+}
+
+/// Which optional capabilities the peer's handshake payload advertised.
+#[derive(Debug, Clone, Copy, Default)]
+struct PeerCapabilities {
+    files: bool,
+    clipboard_ids: bool,
+    arrangement: bool,
+}
+
+impl PeerCapabilities {
+    fn of(bytes: &[u8]) -> Self {
+        Self {
+            files: advertises(bytes, FILES_CAPABILITY),
+            clipboard_ids: advertises(bytes, CLIPBOARD_IDS_CAPABILITY),
+            arrangement: advertises(bytes, ARRANGEMENT_CAPABILITY),
+        }
+    }
 }
 
 fn handshake_payload(version: &Version, trace: bool) -> Vec<u8> {
@@ -258,6 +285,8 @@ pub struct Channel<S> {
     protocol: u16,
     trace_capable: bool,
     files_capable: bool,
+    clipboard_ids_capable: bool,
+    arrangement_capable: bool,
     handshake_hash: Vec<u8>,
     remote_device: Option<crate::device::PublicKey>,
     buffer: Vec<u8>,
@@ -311,7 +340,7 @@ where
         // <- e, ee, s, es, with the peer's version
         let frame = read_frame(&mut stream).await?;
         let len = handshake.read_message(&frame, &mut buffer).map_err(incompatible)?;
-        let peer_files = advertises_files(&buffer[..len]);
+        let peer_caps = PeerCapabilities::of(&buffer[..len]);
         let peer = decode_handshake_payload(&buffer[..len]);
         // -> s, se
         let len = handshake.write_message(&[], &mut buffer)?;
@@ -326,7 +355,7 @@ where
             peer,
             local,
             trace,
-            peer_files,
+            peer_caps,
             selected,
         )
     }
@@ -343,7 +372,7 @@ where
         // -> e, with the peer's version
         let frame = read_frame(&mut stream).await?;
         let len = handshake.read_message(&frame, &mut buffer)?;
-        let peer_files = advertises_files(&buffer[..len]);
+        let peer_caps = PeerCapabilities::of(&buffer[..len]);
         let peer = decode_handshake_payload(&buffer[..len]);
         let selected = peer.as_ref().and_then(|peer| select_protocol(local, peer));
         // <- e, ee, s, es, with this system's version
@@ -364,7 +393,7 @@ where
             peer,
             local,
             trace,
-            peer_files,
+            peer_caps,
             selected,
         )
     }
@@ -378,7 +407,7 @@ where
         peer: Option<HandshakeVersion>,
         local: &Version,
         trace: bool,
-        peer_files: bool,
+        peer_caps: PeerCapabilities,
         selected: Option<u16>,
     ) -> Result<Self, SessionError> {
         let remote_key = handshake
@@ -406,7 +435,11 @@ where
             remote_key,
             protocol: protocol.expect("checked above"),
             trace_capable: trace && peer.trace && local.app.len() + TRACE_CAPABILITY.len() <= MAX_APP_VERSION,
-            files_capable: peer_files && advertises_files(&negotiated_payload(local, trace)),
+            files_capable: peer_caps.files && advertises(&negotiated_payload(local, trace), FILES_CAPABILITY),
+            clipboard_ids_capable: peer_caps.clipboard_ids
+                && advertises(&negotiated_payload(local, trace), CLIPBOARD_IDS_CAPABILITY),
+            arrangement_capable: peer_caps.arrangement
+                && advertises(&negotiated_payload(local, trace), ARRANGEMENT_CAPABILITY),
             handshake_hash,
             remote_device: None,
             buffer,
@@ -423,8 +456,32 @@ where
         self.files_capable
     }
 
+    /// Clipboard offers and requests are legal only after both
+    /// authenticated handshake payloads advertise support.
+    pub fn clipboard_ids_capable(&self) -> bool {
+        self.clipboard_ids_capable
+    }
+
+    pub fn arrangement_capable(&self) -> bool {
+        self.arrangement_capable
+    }
+
+    #[cfg(test)]
+    pub(crate) fn without_arrangement(mut self) -> Self {
+        self.arrangement_capable = false;
+        self
+    }
+
     pub fn stream(&self) -> &S {
         &self.stream
+    }
+
+    /// This link as one with a peer that predates clipboard IDs; apply to
+    /// both ends, since both must agree.
+    #[cfg(test)]
+    pub(crate) fn without_clipboard_ids(mut self) -> Self {
+        self.clipboard_ids_capable = false;
+        self
     }
 
     #[cfg(test)]
@@ -1075,10 +1132,10 @@ mod tests {
     #[test]
     fn file_capabilities_do_not_change_the_baseline_or_imply_support_from_trace_alone() {
         let version = Version::this_system();
-        assert!(!advertises_files(&version.encode()));
-        assert!(!advertises_files(&handshake_payload(&version, true)));
+        assert!(!advertises(&version.encode(), FILES_CAPABILITY));
+        assert!(!advertises(&handshake_payload(&version, true), FILES_CAPABILITY));
         let payload = negotiated_payload(&version, true);
-        assert!(advertises_files(&payload));
+        assert!(advertises(&payload, FILES_CAPABILITY));
         assert_eq!(
             decode_handshake_payload(&payload).map(|peer| (peer.version.protocol, peer.trace, peer.supported)),
             Some((MIN_PROTOCOL, true, vec![PROTOCOL, MIN_PROTOCOL]))
@@ -1091,11 +1148,30 @@ mod tests {
                     app: version.app.clone()
                 }
                 .encode(),
-                format!("\0caps=trace-v1,protocols-{PROTOCOL}-{MIN_PROTOCOL},files-v1").into_bytes(),
+                format!("\0caps=trace-v1,protocols-{PROTOCOL}-{MIN_PROTOCOL},files-v1,clipid-v1,arr-v1").into_bytes(),
             ]
             .concat()
         );
-        assert!(!advertises_files(&negotiated_payload(&version, false)));
+        assert!(!advertises(&negotiated_payload(&version, false), FILES_CAPABILITY));
+        assert!(!advertises(
+            &negotiated_payload(&version, false),
+            CLIPBOARD_IDS_CAPABILITY
+        ));
+    }
+
+    #[test]
+    fn arrangement_confirmations_require_authenticated_capabilities() {
+        let version = Version::this_system();
+        assert!(!PeerCapabilities::of(&version.encode()).arrangement);
+        assert!(!PeerCapabilities::of(&handshake_payload(&version, true)).arrangement);
+        let payload = negotiated_payload(&version, true);
+        assert!(PeerCapabilities::of(&payload).arrangement);
+        assert!(payload.len() <= 2 + MAX_APP_VERSION);
+        let long = Version {
+            app: "x".repeat(MAX_APP_VERSION),
+            ..version
+        };
+        assert!(!PeerCapabilities::of(&negotiated_payload(&long, true)).arrangement);
     }
 
     #[test]

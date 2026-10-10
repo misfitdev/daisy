@@ -142,8 +142,31 @@ dev:
     side_chosen = 0
     introduced_by = "$studio"
     EOF
-    echo "sample data in $home; close Set Up Daisy and choose Open Daisy from the menu bar" >&2
-    "{{app}}/Contents/MacOS/daisy" --home "$home"
+    local_key="$(printf '00%.0s' {1..32})"
+    laptop="$(printf '22%.0s' {1..32})"
+    offline="$(printf '33%.0s' {1..32})"
+    cat > "$home/trust-v5/arrangement.toml" <<EOF
+    version = 1
+    author = "$local_key"
+    [[member]]
+    key = "$local_key"
+    x = 0.0
+    y = 0.0
+    [[member]]
+    key = "$studio"
+    x = 1512.0
+    y = 0.0
+    [[member]]
+    key = "$laptop"
+    x = -1512.0
+    y = 0.0
+    [[member]]
+    key = "$offline"
+    x = 5000.0
+    y = 0.0
+    EOF
+    echo "sample data in $home; drag Desk into reach or choose Looks Right" >&2
+    "{{app}}/Contents/MacOS/daisy" --home "$home" --name "Local system" preview-arrangement
 
 dist := "target/dist"
 

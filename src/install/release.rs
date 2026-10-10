@@ -363,7 +363,7 @@ fn extract_archive(bytes: &[u8], directory: &Path) -> Result<PathBuf> {
     // Validate every path and size before writing anything, including metadata.
     for index in 0..zip.len() {
         let entry = zip.by_index(index)?;
-        let name = entry.name();
+        let name = entry.name().context("reading a release archive entry name")?;
         ensure!(!name.contains('\\'), "the archive contains an invalid path");
         let path = entry.enclosed_name().context("the archive contains an unsafe path")?;
         ensure!(

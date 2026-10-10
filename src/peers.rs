@@ -74,6 +74,7 @@ pub struct PeerStore {
     path: PathBuf,
     lock: PathBuf,
     arrangement: PathBuf,
+    confirmation: PathBuf,
     revocations: PathBuf,
 }
 
@@ -116,6 +117,7 @@ impl PeerStore {
             path: home.join("peers.toml"),
             lock: home.join("peers.lock"),
             arrangement: home.join("arrangement.toml"),
+            confirmation: home.join("arrangement-confirmation.toml"),
             revocations: home.join("revocations.toml"),
         })
     }
@@ -284,6 +286,16 @@ impl PeerStore {
             .filter_map(|placed| Some((PublicKey::from_hex(&placed.key)?, (placed.x, placed.y))))
             .collect();
         Some((file.version, author, offsets))
+    }
+
+    pub fn confirmation(&self) -> Option<crate::setup::Confirmation<PublicKey>> {
+        toml::from_str(&fs::read_to_string(&self.confirmation).ok()?).ok()
+    }
+
+    pub fn save_confirmation(&self, confirmation: &crate::setup::Confirmation<PublicKey>) -> Result<()> {
+        let temporary = self.confirmation.with_extension("tmp");
+        fs::write(&temporary, toml::to_string(confirmation)?)?;
+        fs::rename(&temporary, &self.confirmation).context("saving the checked screen arrangement")
     }
 
     /// Keeps `arrangement` for the next time the group meets.
@@ -878,6 +890,32 @@ mod tests {
         let saved = (42, key(1), vec![(key(1), (0.0, 0.0)), (key(2), (-1440.5, 120.0))]);
         store.save_arrangement(&saved).unwrap();
         assert_eq!(store.arrangement(), Some(saved));
+    }
+
+    #[test]
+    fn screen_confirmation_is_kept_separately_from_automatic_arrangements() {
+        let (store, dir) = store();
+        assert!(store.confirmation().is_none());
+        let checked = crate::setup::Confirmation::new(
+            &crate::layout::Group::alone(
+                key(1),
+                vec![crate::input::Rect {
+                    x: -100.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 80.0,
+                }],
+            ),
+            (42, key(1)),
+        );
+        store.save_confirmation(&checked).unwrap();
+        let reopened = PeerStore::open(dir.path()).unwrap();
+        assert_eq!(store.confirmation(), Some(checked.clone()));
+        assert_eq!(reopened.confirmation(), Some(checked));
+        store
+            .save_arrangement(&(43, key(1), vec![(key(1), (0.0, 0.0))]))
+            .unwrap();
+        assert_eq!(store.confirmation().unwrap().version, 42);
     }
 
     #[test]

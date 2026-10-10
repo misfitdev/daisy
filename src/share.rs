@@ -40,6 +40,31 @@ pub type Layout = crate::layout::Group<PublicKey>;
 /// A member's displays, and where a person dropped them in the group.
 pub type Placing = (PublicKey, crate::layout::Offset);
 
+pub type Confirmation = crate::setup::Confirmation<PublicKey>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Choice {
+    Move(Placing),
+    Confirm(Confirmation),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrangementView {
+    pub layout: Layout,
+    pub check: Option<Confirmation>,
+    pub unreachable: Vec<PublicKey>,
+}
+
+impl Default for ArrangementView {
+    fn default() -> Self {
+        Self {
+            layout: Layout { members: Vec::new() },
+            check: None,
+            unreachable: Vec::new(),
+        }
+    }
+}
+
 pub struct SharedLayout {
     pub screen: Rect,
     pub side: Side,
@@ -53,7 +78,7 @@ pub struct Arranging {
     pub agreed: (Side, crate::trust::Timestamp),
     pub initiator: bool,
     /// Members a person moved on this system during the session.
-    pub choices: tokio::sync::watch::Receiver<Option<Placing>>,
+    pub choices: tokio::sync::watch::Receiver<Option<Choice>>,
     /// Each newly agreed relation, to store and show.
     pub agreed_tx: mpsc::UnboundedSender<(Side, crate::trust::Timestamp)>,
 }
@@ -79,12 +104,14 @@ pub struct Group {
     pub control: std::sync::Arc<crate::control::SharedControl>,
     /// Members a person moved on this system: whose displays, and the offset
     /// they were dropped at.
-    pub choices: tokio::sync::watch::Receiver<Option<Placing>>,
+    pub choices: tokio::sync::watch::Receiver<Option<Choice>>,
     /// The arrangement as it stands, for the window to draw.
-    pub arranged: std::sync::Arc<tokio::sync::watch::Sender<Layout>>,
+    pub arranged: std::sync::Arc<tokio::sync::watch::Sender<ArrangementView>>,
     /// The arrangement kept from before, and where to keep each new one.
     pub saved: Option<crate::peers::Arrangement>,
     pub save: mpsc::UnboundedSender<crate::peers::Arrangement>,
+    pub saved_confirmation: Option<Confirmation>,
+    pub save_confirmation: mpsc::UnboundedSender<Confirmation>,
     /// Each link as a person sees it.
     pub reports: std::sync::Arc<tokio::sync::watch::Sender<Reports>>,
     /// Whether this system's screen is locked, as it changes.
@@ -143,9 +170,11 @@ where
         displays: tokio::sync::watch::channel(vec![layout.screen]).1,
         control: layout.control,
         choices: layout.arranging.choices,
-        arranged: std::sync::Arc::new(tokio::sync::watch::Sender::new(Layout { members: Vec::new() })),
+        arranged: std::sync::Arc::new(tokio::sync::watch::Sender::new(ArrangementView::default())),
         saved: None,
         save: mpsc::unbounded_channel().0,
+        saved_confirmation: None,
+        save_confirmation: mpsc::unbounded_channel().0,
         reports: std::sync::Arc::new(tokio::sync::watch::Sender::new(Reports::new())),
         locked: tokio::sync::watch::channel(false).1,
         trust: mpsc::unbounded_channel().0,
@@ -169,8 +198,11 @@ where
 
 /// One peer's session within the group.
 struct Link {
+    arrangement_capable: bool,
     protocol: u16,
     files_capable: bool,
+    /// Clipboard copies go by offer and request on this link.
+    clipboard_ids: bool,
     trace_capable: bool,
     trace_sent: bool,
     trace_request: crate::diagnostics::Lease,
@@ -230,6 +262,10 @@ where
         placement.adopt(*version, *author, offsets);
     }
     let mut kept = placement.version();
+    let mut confirmed = group.saved_confirmation.clone();
+    let mut kept_confirmation = confirmed.clone();
+    let mut pending_confirmations = VecDeque::new();
+    let mut review_changed = true;
     let mut target = Target::new(placement.group(), me);
     let release = ReleaseOnDrop {
         target: &mut target,
@@ -242,6 +278,8 @@ where
     let mut links: std::collections::BTreeMap<PublicKey, Link> = std::collections::BTreeMap::new();
     // the peer the pointer crossed onto, while this system drives it
     let mut crossed: Option<PublicKey> = None;
+    // the peer driving this system while its pointer is here
+    let mut driven_by: Option<PublicKey> = None;
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     let mut activity = crate::control::Activity::new(control.physical_activity());
     let mut ended: Vec<(PublicKey, Result<()>)> = Vec::new();
@@ -249,6 +287,8 @@ where
     // arrangement changed, both acted on after the message that caused them
     let mut handoff: Option<(u64, PublicKey, Point)> = None;
     let mut rearranged = false;
+    // a copy from a peer was written here, to pass on to the peer this system drives
+    let mut fresh_copy = false;
     // links already waiting join before any input is routed
     let mut waiting = waiting;
     waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
@@ -275,8 +315,43 @@ where
             }
         }
         if placement.version() != kept {
+            review_changed = true;
             kept = placement.version();
             let _ = group.save.send(placement.message());
+        }
+        if review_changed {
+            let current = Confirmation::new(&placement.group(), placement.version());
+            if pending_confirmations
+                .iter()
+                .any(|candidate| *candidate == confirmation_message(&current))
+            {
+                confirmed = Some(current);
+                pending_confirmations.clear();
+            }
+            let layout = placement.group();
+            let check = crate::setup::check_arrangement(&layout, me, placement.version(), confirmed.as_ref())
+                .then(|| Confirmation::new(&layout, placement.version()));
+            let view = ArrangementView {
+                unreachable: layout.unreachable(me),
+                layout,
+                check,
+            };
+            group.arranged.send_if_modified(|current| {
+                if *current == view {
+                    false
+                } else {
+                    *current = view;
+                    true
+                }
+            });
+            review_changed = false;
+        }
+        if confirmed != kept_confirmation {
+            kept_confirmation = confirmed.clone();
+            if let Some(confirmation) = &confirmed {
+                let _ = group.save_confirmation.send(confirmation.clone());
+                broadcast_confirmation(&links, confirmation, &mut ended);
+            }
         }
         for (key, result) in ended.drain(..) {
             let Some(link) = links.remove(&key) else { continue };
@@ -291,6 +366,9 @@ where
                     release.injector.execute(&action);
                 }
             }
+            if driven_by == Some(key) {
+                driven_by = None;
+            }
             if crossed == Some(key) {
                 crossed = None;
                 pointer.yield_control();
@@ -301,7 +379,8 @@ where
                 }
             }
             if placement.remove(key) {
-                arrange(&placement, release.target, pointer, &group.arranged);
+                review_changed = true;
+                arrange(&placement, release.target, pointer);
             }
             publish(&control, &links, &group.reports);
         }
@@ -312,10 +391,14 @@ where
                     let trace_capable = joining.channel.trace_capable();
                     let protocol = joining.channel.protocol();
                     let files_capable = joining.channel.files_capable();
+                    let clipboard_ids = joining.channel.clipboard_ids_capable();
+                    let arrangement_capable = joining.channel.arrangement_capable();
                     let (sender, receiver) = joining.channel.split();
                     let link = Link {
+                        arrangement_capable,
                         protocol,
                         files_capable,
+                        clipboard_ids,
                         trace_capable,
                         trace_sent: false,
                         trace_request: crate::diagnostics::hub().lease(),
@@ -346,6 +429,12 @@ where
                             locked: *locked.borrow(),
                         },
                     ];
+                    let introduce = introduce.into_iter().chain(
+                        confirmed
+                            .as_ref()
+                            .filter(|_| arrangement_capable)
+                            .map(confirmation_message),
+                    );
                     if let Err(error) = introduce
                         .into_iter()
                         .try_for_each(|message| link.outgoing.send(message))
@@ -394,6 +483,7 @@ where
                 if interrupted {
                     pointer.yield_control();
                     crossed = None;
+                    driven_by = None;
                 }
                 if let Some(generation) = claim {
                     for (key, link) in &links {
@@ -418,6 +508,7 @@ where
                 match message {
                     Message::ControlClaim { .. } => {
                         for action in release.target.reclaim() { release.injector.execute(&action); }
+                        driven_by = None;
                         sharing.expect_snapshot(None);
                         for (key, link) in &links {
                             if let Err(error) = link.outgoing.send(message.clone()) {
@@ -433,7 +524,9 @@ where
                                 ended.push((to, Err(error)));
                             } else {
                                 if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing_for_peer(to, link.files_capable && files.is_some()));
+                                if let Err(error) = hand_clipboard(me, to, link, sharing, files.is_some()) {
+                                    ended.push((to, Err(error)));
+                                }
                             }
                         }
                         None => {
@@ -503,7 +596,21 @@ where
                                 tracing::warn!(ms = round_trip.as_millis(), "slow round trip to the peer");
                             }
                         }
-                        Message::Clipboard { part } => receive_clipboard(peer, part, &link.outgoing, sharing)?,
+                        Message::Clipboard { part } => {
+                            if receive_clipboard(peer, part, link, sharing)? {
+                                fresh_copy = true;
+                            }
+                        }
+                        Message::ClipboardOffer { copy } => {
+                            anyhow::ensure!(link.clipboard_ids, "clipboard ID capability was not negotiated");
+                            if sharing.wants(me, peer, copy, driven_by) {
+                                link.outgoing.send(Message::ClipboardRequest { copy })?;
+                            }
+                        }
+                        Message::ClipboardRequest { copy } => {
+                            anyhow::ensure!(link.clipboard_ids, "clipboard ID capability was not negotiated");
+                            link.outgoing.send_clipboard(sharing.requested(me, peer, copy, link.files_capable && files.is_some()));
+                        }
                         // the system that chose also sends the arrangement it led to
                         Message::Layout { side, chosen } => {
                             let agreed = crate::control::agreed_side(link.initiator, link.agreed, (side, chosen));
@@ -531,12 +638,20 @@ where
                         message @ (Message::Introduce { .. } | Message::Revoke { .. }) => {
                             let _ = group.trust.send((peer, message));
                         }
-                        Message::Arrangement { version, author, offsets } => {
+                    Message::Arrangement { version, author, offsets } => {
                             if placement.adopt(version, author, &offsets) {
                                 rearranged = true;
                             }
                         }
-                        Message::ControlState { generation, owner } => {
+                        message @ Message::ArrangementConfirmed { .. } => {
+                        anyhow::ensure!(link.arrangement_capable, "arrangement confirmation capability was not negotiated");
+                        if pending_confirmations.len() == 8 {
+                            pending_confirmations.pop_front();
+                        }
+                        pending_confirmations.push_back(message);
+                        review_changed = true;
+                    }
+                    Message::ControlState { generation, owner } => {
                             let mut state = control.state.lock().unwrap_or_else(|e| e.into_inner());
                             let was_mine = state.owns();
                             let changed = state.claim(generation, owner);
@@ -559,9 +674,10 @@ where
                             if changed {
                                 pointer.yield_control();
                                 crossed = None;
+                                driven_by = None;
                                 for action in release.target.reclaim() { release.injector.execute(&action); }
                                 if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing_for_peer(peer, link.files_capable && files.is_some()));
+                                hand_clipboard(me, peer, link, sharing, files.is_some())?;
                             }
                         }
                         Message::Leave { generation, to, at } => {
@@ -597,6 +713,7 @@ where
                             let mut crossing = false;
                             let actions = match message {
                                 Message::Enter { at, .. } => {
+                                    driven_by = Some(peer);
                                     sharing.expect_snapshot(Some(peer));
                                     release.injector.arrived();
                                     release.target.enter(at)
@@ -611,11 +728,15 @@ where
                                     other => release.injector.execute(&other),
                                 }
                             }
-                            if crossing { if let Some(files) = &files { files.crossing(); }
-                        link.outgoing.send_clipboard(sharing.crossing_for_peer(peer, link.files_capable && files.is_some())); }
+                            if crossing {
+                                driven_by = None;
+                                if let Some(files) = &files { files.crossing(); }
+                                hand_clipboard(me, peer, link, sharing, files.is_some())?;
+                            }
                         }
                         other => bail!("unexpected message in shared session: {other:?}"),
                     }
+
                     Ok(())
                 })();
                 if let Err(error) = outcome { ended.push((peer, Err(error))); }
@@ -628,31 +749,54 @@ where
                         }
                         Some(next) => {
                             crossed = Some(to);
+                            // a copy made on the system the pointer just left
+                            // follows it here, to be passed on
+                            sharing.expect_snapshot(Some(peer));
                             if let Err(error) = next.outgoing.send(Message::Enter { generation, to, at }) {
                                 ended.push((to, Err(error)));
                             } else {
                                 if let Some(files) = &files { files.crossing(); }
-                        next.outgoing.send_clipboard(sharing.crossing_for_peer(to, next.files_capable && files.is_some()));
+                                if let Err(error) = hand_clipboard(me, to, next, sharing, files.is_some()) {
+                                    ended.push((to, Err(error)));
+                                }
                             }
                         }
                         None => pointer.leave(None),
                     }
                 }
+                if std::mem::take(&mut fresh_copy)
+                    && let Some(next) = crossed.filter(|next| *next != peer)
+                    && let Some(link) = links.get(&next)
+                    && let Err(error) = hand_clipboard(me, next, link, sharing, files.is_some())
+                {
+                    ended.push((next, Err(error)));
+                }
                 if rearranged {
+                    review_changed = true;
                     rearranged = false;
                     settle(&mut placement, &links, &mut ended);
-                    arrange(&placement, release.target, pointer, &group.arranged);
+                    arrange(&placement, release.target, pointer);
                 }
                 publish(&control, &links, &group.reports);
             }
-            Ok(()) = choices.changed() => {
-                let chosen = *choices.borrow_and_update();
-                if let Some((key, offset)) = chosen
-                    && placement.put(key, offset, now_ms())
-                {
+        Ok(()) = choices.changed() => {
+            let chosen = choices.borrow_and_update().clone();
+            match chosen {
+                Some(Choice::Move((key, offset))) if placement.put(key, offset, now_ms()) => {
+                    review_changed = true;
                     broadcast(&links, arrangement(&placement), &mut ended);
-                    arrange(&placement, release.target, pointer, &group.arranged);
+                    arrange(&placement, release.target, pointer);
+                    let layout = placement.group();
+                    if layout.members.len() > 1 && layout.unreachable(me).is_empty() {
+                        confirmed = Some(Confirmation::new(&layout, placement.version()));
+                    }
                 }
+                Some(Choice::Confirm(confirmation)) if confirmation == Confirmation::new(&placement.group(), placement.version()) => {
+                    confirmed = Some(confirmation);
+                    review_changed = true;
+                }
+                _ => {}
+            }
             }
             Ok(()) = locked.changed() => {
                 let now = *locked.borrow_and_update();
@@ -661,11 +805,12 @@ where
             Ok(()) = displays.changed() => {
                 let mine = displays.borrow_and_update().clone();
                 if placement.show(me, mine.clone()) {
+                review_changed = true;
                     broadcast(&links, Message::Displays { displays: mine }, &mut ended);
                     if placement.clear_overlaps(now_ms()) {
                         broadcast(&links, arrangement(&placement), &mut ended);
                     }
-                    arrange(&placement, release.target, pointer, &group.arranged);
+                    arrange(&placement, release.target, pointer);
                 }
             }
             error = &mut until => return Err(error),
@@ -779,6 +924,26 @@ fn broadcast(
     }
 }
 
+fn confirmation_message(confirmation: &Confirmation) -> Message {
+    Message::ArrangementConfirmed {
+        version: confirmation.version,
+        author: confirmation.author,
+        fingerprint: confirmation.fingerprint(),
+    }
+}
+
+fn broadcast_confirmation(
+    links: &std::collections::BTreeMap<PublicKey, Link>,
+    confirmation: &Confirmation,
+    ended: &mut Vec<(PublicKey, Result<()>)>,
+) {
+    for (key, link) in links.iter().filter(|(_, link)| link.arrangement_capable) {
+        if let Err(error) = link.outgoing.send(confirmation_message(confirmation)) {
+            ended.push((*key, Err(error)));
+        }
+    }
+}
+
 fn arrangement(placement: &crate::layout::Placement<PublicKey>) -> Message {
     let (version, author, offsets) = placement.message();
     Message::Arrangement {
@@ -790,15 +955,10 @@ fn arrangement(placement: &crate::layout::Placement<PublicKey>) -> Message {
 
 /// Gives the capture, the replay and the window the arrangement as it now
 /// stands.
-fn arrange(
-    placement: &crate::layout::Placement<PublicKey>,
-    target: &mut Target,
-    pointer: &mut impl Pointer,
-    arranged: &tokio::sync::watch::Sender<Layout>,
-) {
+fn arrange(placement: &crate::layout::Placement<PublicKey>, target: &mut Target, pointer: &mut impl Pointer) {
     let layout = placement.group();
     target.arrange(layout.clone());
-    arranged.send_replace(layout.clone());
+
     pointer.arrange(layout);
 }
 
@@ -1032,22 +1192,46 @@ fn closed_after(quiet: std::time::Duration) -> Result<()> {
 
 /// Handles a clipboard part from the peer: acknowledgements free the send
 /// window; every chunk is acknowledged whether or not it is accepted, so the
-/// peer's window never stalls.
+/// peer's window never stalls. Returns whether a requested copy was written.
 fn receive_clipboard(
     from: PublicKey,
     part: ClipboardPart,
-    outgoing: &Outgoing,
+    link: &Link,
     sharing: &mut Sharing<impl Clipboard>,
+) -> Result<bool> {
+    if let ClipboardPart::Ack = part {
+        link.outgoing.acknowledged();
+        return Ok(false);
+    }
+    if let ClipboardPart::Chunk { .. } = part {
+        link.outgoing.send(Message::Clipboard {
+            part: ClipboardPart::Ack,
+        })?;
+    }
+    if link.clipboard_ids {
+        return Ok(sharing.receive_requested(from, part).is_some());
+    }
+    sharing.receive(from, part);
+    Ok(false)
+}
+
+/// Gives `peer` the clipboard as control or a newer copy reaches it: an
+/// offer it requests if it lacks the copy, or for an older peer the snapshot
+/// itself unless it already has it.
+fn hand_clipboard(
+    me: PublicKey,
+    peer: PublicKey,
+    link: &Link,
+    sharing: &mut Sharing<impl Clipboard>,
+    files: bool,
 ) -> Result<()> {
-    match part {
-        ClipboardPart::Ack => outgoing.acknowledged(),
-        ClipboardPart::Chunk { .. } => {
-            outgoing.send(Message::Clipboard {
-                part: ClipboardPart::Ack,
-            })?;
-            sharing.receive(from, part);
+    if link.clipboard_ids {
+        if let Some(copy) = sharing.offer(me, peer) {
+            link.outgoing.send(Message::ClipboardOffer { copy })?;
         }
-        other => sharing.receive(from, other),
+    } else {
+        link.outgoing
+            .send_clipboard(sharing.crossing_for_peer(peer, link.files_capable && files));
     }
     Ok(())
 }
@@ -1243,11 +1427,24 @@ mod tests {
         channels_with_capacity(1 << 17).await
     }
 
+    /// A link with a peer that predates clipboard IDs, so snapshots go
+    /// straight across as control crosses.
     async fn channels_with_capacity(capacity: usize) -> (Channel<DuplexStream>, Channel<DuplexStream>) {
+        let (left, right) = id_channels_with_capacity(capacity).await;
+        (
+            left.without_clipboard_ids().without_arrangement(),
+            right.without_clipboard_ids().without_arrangement(),
+        )
+    }
+
+    /// A link on which clipboard copies go by offer and request.
+    async fn id_channels_with_capacity(capacity: usize) -> (Channel<DuplexStream>, Channel<DuplexStream>) {
         let (a, b) = duplex(capacity);
         let (left, right) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let (left, right) = tokio::join!(Channel::initiate(a, &left), Channel::respond(b, &right));
-        (left.unwrap(), right.unwrap())
+        let (left, right) = (left.unwrap(), right.unwrap());
+        assert!(left.clipboard_ids_capable() && right.clipboard_ids_capable());
+        (left, right)
     }
 
     #[tokio::test]
@@ -1589,7 +1786,7 @@ mod tests {
 
     struct Scene {
         peer: Channel<DuplexStream>,
-        choose: watch::Sender<Option<Placing>>,
+        choose: watch::Sender<Option<Choice>>,
         me: crate::identity::PublicKey,
         /// The peer's own key.
         them: crate::identity::PublicKey,
@@ -1727,7 +1924,9 @@ mod tests {
                 .await
                 .unwrap();
             settle(&mut scene.peer, 1).await;
-            scene.choose.send_replace(Some((scene.them, (3.0, -503.0))));
+            scene
+                .choose
+                .send_replace(Some(Choice::Move((scene.them, (3.0, -503.0)))));
             loop {
                 if let Message::Arrangement { offsets, .. } = scene.peer.recv().await.unwrap()
                     && offsets.contains(&(scene.them, (0.0, -500.0)))
@@ -1750,7 +1949,7 @@ mod tests {
                 .await
                 .unwrap();
             settle(&mut scene.peer, 1).await;
-            scene.choose.send_replace(Some((scene.them, LEFT)));
+            scene.choose.send_replace(Some(Choice::Move((scene.them, LEFT))));
             settle(&mut scene.peer, 2).await;
         })
         .await;
@@ -1829,13 +2028,172 @@ mod tests {
             displays: watch::channel(vec![SCREEN]).1,
             control: control.clone(),
             choices: watch::channel(None).1,
-            arranged: Arc::new(watch::Sender::new(Layout { members: Vec::new() })),
+            arranged: Arc::new(watch::Sender::new(ArrangementView::default())),
             saved: None,
             save: mpsc::unbounded_channel().0,
+            saved_confirmation: None,
+            save_confirmation: mpsc::unbounded_channel().0,
             reports: Arc::new(watch::Sender::new(Reports::new())),
             locked: watch::channel(false).1,
             trust: mpsc::unbounded_channel().0,
         }
+    }
+
+    fn start_arrangement_session(
+        group: Group,
+        mut membership: mpsc::UnboundedReceiver<Membership<DuplexStream>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let (_capture, input) = mpsc::channel(16);
+            let (mut pointer, mut injector, mut board) = (Returned::default(), Recorded::default(), no_clipboard());
+            let _ = run(
+                group,
+                VecDeque::new(),
+                &mut membership,
+                input,
+                &mut pointer,
+                &mut injector,
+                &mut board,
+                pending(),
+            )
+            .await;
+        })
+    }
+
+    async fn view_when(
+        view: &mut watch::Receiver<ArrangementView>,
+        predicate: impl Fn(&ArrangementView) -> bool,
+    ) -> ArrangementView {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let current = view.borrow_and_update().clone();
+                if predicate(&current) {
+                    return current;
+                }
+                view.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn checking_or_fixing_an_arrangement_clears_both_systems_and_survives_reconnect() {
+        let (control, _members, membership, mut far, _ended, keys) = group_of(1, None).await;
+        let me = me_of(&control);
+        let peer = keys[0];
+        let saved = (10, me, vec![(me, (0.0, 0.0)), (peer, (5000.0, 0.0))]);
+        let mut local = group(&control);
+        local.saved = Some(saved.clone());
+        let (choose, choices) = watch::channel(None);
+        local.choices = choices;
+        let mut local_view = local.arranged.subscribe();
+        let (save, mut kept) = mpsc::unbounded_channel();
+        local.save_confirmation = save;
+        let remote_control = Arc::new(SharedControl::new(peer, me));
+        let mut remote = group(&remote_control);
+        remote.saved = Some(saved);
+        let mut remote_view = remote.arranged.subscribe();
+        let (remote_members, remote_membership) = mpsc::unbounded_channel();
+        remote_members
+            .send(Membership::Join(Joining {
+                channel: far.remove(0),
+                agreed: (Side::Left, 0),
+                initiator: false,
+                agreed_tx: mpsc::unbounded_channel().0,
+                done: oneshot::channel().0,
+            }))
+            .unwrap();
+        let local_task = start_arrangement_session(local, membership);
+        let remote_task = start_arrangement_session(remote, remote_membership);
+        let checking = view_when(&mut local_view, |v| v.check.is_some()).await;
+        assert_eq!(checking.unreachable, [peer]);
+        view_when(&mut remote_view, |v| v.check.is_some()).await;
+        choose.send_replace(Some(Choice::Confirm(checking.check.unwrap())));
+        view_when(&mut local_view, |v| v.layout.members.len() == 2 && v.check.is_none()).await;
+        view_when(&mut remote_view, |v| v.layout.members.len() == 2 && v.check.is_none()).await;
+        let checked = tokio::time::timeout(Duration::from_secs(2), kept.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(checked.covers(&Confirmation::new(&local_view.borrow().layout, (10, me))));
+        choose.send_replace(Some(Choice::Move((peer, (6000.0, 0.0)))));
+        view_when(&mut local_view, |v| v.check.is_some()).await;
+        view_when(&mut remote_view, |v| v.check.is_some()).await;
+        choose.send_replace(Some(Choice::Move((peer, (1000.0, 0.0)))));
+        let fixed = view_when(&mut local_view, |v| v.unreachable.is_empty() && v.check.is_none()).await;
+        view_when(&mut remote_view, |v| v.unreachable.is_empty() && v.check.is_none()).await;
+        assert_eq!(fixed.layout.members.len(), 2);
+        local_task.abort();
+        remote_task.abort();
+        let saved = kept.recv().await.unwrap();
+        let mut placement = crate::layout::Placement::new(me, vec![SCREEN]);
+        placement.adopt(saved.version, saved.author, &[(me, (0.0, 0.0)), (peer, (1000.0, 0.0))]);
+        placement.show(peer, vec![SCREEN]);
+        assert!(
+            !crate::setup::check_arrangement(&placement.group(), me, placement.version(), Some(&saved)),
+            "unchanged reconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmation_relay_matches_display_sets_and_leaves_older_peers_alone() {
+        let (control, _members, mut membership, mut far, _ended, keys) = group_of(2, None).await;
+        // Simulate an older link without disabling support on the other link.
+        let mut waiting = VecDeque::new();
+        for index in 0..2 {
+            let Membership::Join(mut joining) = membership.recv().await.unwrap() else {
+                unreachable!()
+            };
+            if index == 1 {
+                joining.channel = joining.channel.without_arrangement();
+            }
+            waiting.push_back(Membership::Join(joining));
+        }
+        let me = me_of(&control);
+        let mut local = group(&control);
+        local.saved = Some((
+            10,
+            me,
+            vec![(me, (0.0, 0.0)), (keys[0], (1000.0, 0.0)), (keys[1], (2000.0, 0.0))],
+        ));
+        let mut view = local.arranged.subscribe();
+        for joining in waiting {
+            _members.send(joining).unwrap();
+        }
+        let task = start_arrangement_session(local, membership);
+        for peer in &mut far {
+            peer.send(&Message::Displays { displays: vec![SCREEN] }).await.unwrap();
+        }
+        let current = view_when(&mut view, |v| v.layout.members.len() == 3 && v.check.is_some()).await;
+        let checked = current.check.unwrap();
+        let mut invalid = checked.clone();
+        invalid.members[0].1[0].width += 1.0;
+        far[0].send(&confirmation_message(&invalid)).await.unwrap();
+        far[0].send(&Message::Ping { nonce: 900 }).await.unwrap();
+        loop {
+            if next(&mut far[0]).await == (Message::Pong { nonce: 900 }) {
+                break;
+            }
+        }
+        assert!(
+            view.borrow().check.is_some(),
+            "wrong display fingerprint must not dismiss"
+        );
+        far[0].send(&confirmation_message(&checked)).await.unwrap();
+        view_when(&mut view, |v| v.layout.members.len() == 3 && v.check.is_none()).await;
+        far[1].send(&Message::Ping { nonce: 901 }).await.unwrap();
+        loop {
+            let message = next(&mut far[1]).await;
+            assert!(
+                !matches!(message, Message::ArrangementConfirmed { .. }),
+                "older peer received optional traffic"
+            );
+            if message == (Message::Pong { nonce: 901 }) {
+                break;
+            }
+        }
+        task.abort();
     }
 
     /// The next message from this system other than heartbeats.
@@ -2937,6 +3295,187 @@ mod tests {
         result.unwrap();
         assert_eq!(seen[0], enter);
         assert_eq!(assembled(&seen), Some(text("copied on this system")));
+    }
+
+    /// The next clipboard offer, request or snapshot part from this system,
+    /// acknowledging each chunk as a real peer does.
+    async fn next_clipboard(peer: &mut Channel<DuplexStream>) -> Message {
+        loop {
+            match peer.recv().await.unwrap() {
+                Message::Ping { nonce } => peer.send(&Message::Pong { nonce }).await.unwrap(),
+                message @ (Message::ClipboardOffer { .. } | Message::ClipboardRequest { .. }) => return message,
+                Message::Clipboard {
+                    part: part @ ClipboardPart::Chunk { .. },
+                } => {
+                    peer.send(&Message::Clipboard {
+                        part: ClipboardPart::Ack,
+                    })
+                    .await
+                    .unwrap();
+                    return Message::Clipboard { part };
+                }
+                message @ Message::Clipboard { .. } => return message,
+                _ => {}
+            }
+        }
+    }
+
+    /// Parts up to and including `Done`, after an offer was requested.
+    async fn requested_snapshot(peer: &mut Channel<DuplexStream>) -> Vec<Message> {
+        let mut seen = Vec::new();
+        loop {
+            let message = next_clipboard(peer).await;
+            let done = message
+                == (Message::Clipboard {
+                    part: ClipboardPart::Done,
+                });
+            seen.push(message);
+            if done {
+                return seen;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_crossing_offers_the_copy_and_sends_it_only_when_asked() {
+        let (local, mut peer) = id_channels_with_capacity(1 << 17).await;
+        let control = control(&local, true);
+        let them = local.remote_key();
+        let (capture, input) = mpsc::channel(16);
+        let mut board = board_with(text("copied here"), true);
+        let (mut pointer, mut injector) = (Returned::default(), Recorded::default());
+        let enter = |at| Message::Enter {
+            generation: 0,
+            to: them,
+            at,
+        };
+        capture.try_send(enter((999.0, 1.0))).unwrap();
+        let script = async {
+            let Message::ClipboardOffer { copy } = next_clipboard(&mut peer).await else {
+                panic!("a crossing offers the copy first");
+            };
+            peer.send(&Message::ClipboardRequest { copy }).await.unwrap();
+            let seen = requested_snapshot(&mut peer).await;
+            assert_eq!(
+                seen[0],
+                Message::Clipboard {
+                    part: ClipboardPart::For { copy }
+                }
+            );
+            assert_eq!(assembled(&seen), Some(text("copied here")));
+            // control comes back and crosses again: the same copy is offered, and
+            // with no request nothing more is sent
+            peer.send(&Message::Leave {
+                generation: 0,
+                to: me_of(&control),
+                at: (999.0, 1.0),
+            })
+            .await
+            .unwrap();
+            capture.send(enter((999.0, 2.0))).await.unwrap();
+            assert_eq!(next_clipboard(&mut peer).await, Message::ClipboardOffer { copy });
+            round_trip(&mut peer, 1).await
+        };
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let after = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                after = script => after,
+                result = session => panic!("session ended first: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !after.iter().any(|m| matches!(m, Message::Clipboard { .. })),
+            "{after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copy_made_on_a_driven_system_is_passed_on_to_the_next() {
+        let (control, _members, mut membership, mut far, _ended, keys) = group_of(2, None).await;
+        let me = me_of(&control);
+        let (capture, input) = mpsc::channel(16);
+        let mut board = no_clipboard();
+        let (mut pointer, mut injector) = (Returned::default(), Recorded::default());
+        let run = run(
+            group(&control),
+            VecDeque::new(),
+            &mut membership,
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let script = async {
+            let (first, second) = far.split_at_mut(1);
+            let (driven, next) = (&mut first[0], &mut second[0]);
+            for peer in [&mut *driven, &mut *next] {
+                assert!(matches!(super::tests::next(peer).await, Message::ControlState { .. }));
+            }
+            let generation = control.state.lock().unwrap().generation();
+            capture
+                .send(Message::Enter {
+                    generation,
+                    to: keys[0],
+                    at: (10.0, 20.0),
+                })
+                .await
+                .unwrap();
+            loop {
+                match driven.recv().await.unwrap() {
+                    Message::Ping { nonce } => driven.send(&Message::Pong { nonce }).await.unwrap(),
+                    Message::Enter { .. } => break,
+                    _ => {}
+                }
+            }
+            // something is copied on the driven system; the pointer moves on
+            let mut copied = board_with(text("copied on the driven system"), true);
+            let copy = copied.offer(keys[0], me).unwrap();
+            driven
+                .send(&Message::Leave {
+                    generation,
+                    to: keys[1],
+                    at: (5.0, 6.0),
+                })
+                .await
+                .unwrap();
+            driven.send(&Message::ClipboardOffer { copy }).await.unwrap();
+            loop {
+                if next_clipboard(driven).await == (Message::ClipboardRequest { copy }) {
+                    break;
+                }
+            }
+            for part in copied.requested(keys[0], me, copy, false).map(|read| read()).unwrap() {
+                driven.send(&Message::Clipboard { part }).await.unwrap();
+            }
+            // the next system is offered that copy, asks, and receives it
+            loop {
+                if next_clipboard(next).await == (Message::ClipboardOffer { copy }) {
+                    break;
+                }
+            }
+            next.send(&Message::ClipboardRequest { copy }).await.unwrap();
+            requested_snapshot(next).await
+        };
+        let seen = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                seen = script => seen,
+                result = run => panic!("the group ended: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(assembled(&seen), Some(text("copied on the driven system")));
     }
 
     #[tokio::test]

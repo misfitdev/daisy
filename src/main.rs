@@ -33,6 +33,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the offline developer arrangement fixture
+    #[command(hide = true)]
+    PreviewArrangement,
     /// Collect developer traces from the running app and supported connected peers
     Trace {
         /// New private NDJSON output file
@@ -144,6 +147,7 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    require_preview_home(&cli)?;
     match &cli.command {
         Some(Command::Trace { output }) => {
             let home = cli.home.clone().map_or_else(default_home, Ok)?;
@@ -215,6 +219,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => daisy::app::run(home, name),
+        Some(Command::PreviewArrangement) => daisy::app::run_preview(home, name),
         Some(command) => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -276,6 +281,7 @@ async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStor
         | Command::InstallUpdate { .. } => {
             unreachable!("update commands exit before identity and input initialization")
         }
+        Command::PreviewArrangement => unreachable!("preview runs before identity initialization"),
         Command::Screenshot { path } => daisy::app::screenshot::save(&path),
         Command::Id => {
             println!("{name}\n{}", identity.public_key());
@@ -524,9 +530,15 @@ fn access_name(access: Access) -> &'static str {
     }
 }
 
+fn require_preview_home(cli: &Cli) -> Result<()> {
+    if matches!(cli.command, Some(Command::PreviewArrangement)) && cli.home.is_none() {
+        anyhow::bail!("the arrangement preview requires --home pointing to a separate data folder");
+    }
+    Ok(())
+}
+
 fn default_home() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join("Library/Application Support/daisy"))
+    daisy::controller::default_home()
 }
 
 fn computer_name() -> String {
@@ -544,6 +556,18 @@ fn computer_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_requires_an_explicit_data_folder() {
+        let mut cli = Cli::try_parse_from(["daisy", "preview-arrangement"]).unwrap();
+        cli.home = None;
+        assert!(require_preview_home(&cli).is_err());
+        cli.home = Some(PathBuf::from("separate-preview"));
+        assert!(require_preview_home(&cli).is_ok());
+        cli.command = None;
+        cli.home = None;
+        assert!(require_preview_home(&cli).is_ok());
+    }
 
     #[test]
     fn stats_read_in_milliseconds() {

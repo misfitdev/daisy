@@ -196,6 +196,7 @@ pub fn beside(member: &Shown, me: &Shown, side: Side) -> Offset {
 type Drag = (usize, NSPoint, (f64, f64));
 
 pub struct ArrangeIvars {
+    checking: Cell<bool>,
     scene: RefCell<Vec<Shown>>,
     drag: Cell<Option<Drag>>,
     /// A member a person just placed, for the action to read.
@@ -227,6 +228,12 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
+            if self.ivars().checking.get() {
+                NSColor::secondaryLabelColor().setStroke();
+                let size = self.bounds().size;
+                let border = NSRect::new(NSPoint::new(1.0, 1.0), NSSize::new(size.width - 2.0, size.height - 2.0));
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(border, 8.0, 8.0).stroke();
+            }
             let scene = self.ivars().scene.borrow();
             let fit = self.fit(&scene);
             let drag = self.ivars().drag.get();
@@ -235,7 +242,7 @@ define_class!(
                 let moved = drag
                     .filter(|(dragged, _, _)| *dragged == index)
                     .map_or((0.0, 0.0), |(_, _, by)| by);
-                let faded = someone_in_control && shown.in_control != Some(true);
+                let faded = !self.ivars().checking.get() && someone_in_control && shown.in_control != Some(true);
                 let main = shown.main();
                 for display in shown.placed() {
                     let mut view = fit.to_view(display);
@@ -373,6 +380,7 @@ impl ArrangeView {
     /// Sends `action` to `target` when a person places a peer's displays.
     pub fn new(mtm: MainThreadMarker, frame: NSRect, target: &AnyObject, action: Sel) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ArrangeIvars {
+            checking: Cell::new(false),
             scene: RefCell::new(Vec::new()),
             drag: Cell::new(None),
             placed: Cell::new(None),
@@ -398,6 +406,12 @@ impl ArrangeView {
     /// The member a person just placed, and where.
     pub fn take_placed(&self) -> Option<(PublicKey, Offset)> {
         self.ivars().placed.take()
+    }
+
+    pub fn set_check(&self, checking: bool) {
+        if self.ivars().checking.replace(checking) != checking {
+            self.setNeedsDisplay(true);
+        }
     }
 
     pub fn show(&self, scene: Vec<Shown>) {

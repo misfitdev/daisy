@@ -313,6 +313,7 @@ impl Platform for Executor {
     }
 
     fn launch(&mut self, bundle: &Path, home: &Path, transaction: Option<&Path>) -> Result<()> {
+        register_bundle(bundle)?;
         let mut open = Command::new("/usr/bin/open");
         open.args(["-n", "-g", "--env"]);
         let mut environment = std::ffi::OsString::from(format!("{STARTUP_DIRECTORY}="));
@@ -420,6 +421,22 @@ fn lock(root: &Path) -> Result<File> {
         return Err(std::io::Error::last_os_error()).context("another update helper is already running");
     }
     Ok(lock)
+}
+
+/// Refresh LaunchServices before the replacement process asks AppKit for
+/// its application icon. Registration must cover the swapped bundle URL.
+fn register_bundle(bundle: &Path) -> Result<()> {
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&bundle.to_string_lossy()));
+    // SAFETY: NSURL and CFURL are toll-free bridged; url stays alive for
+    // this synchronous LaunchServices call.
+    let status = unsafe { LSRegisterURL((&*url as *const NSURL).cast(), true) };
+    ensure!(status == 0, "registering the updated application failed ({status})");
+    Ok(())
+}
+
+#[link(name = "CoreServices", kind = "framework")]
+unsafe extern "C" {
+    fn LSRegisterURL(url: *const std::ffi::c_void, update: bool) -> i32;
 }
 
 unsafe extern "C" {
