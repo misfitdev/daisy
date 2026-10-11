@@ -23,8 +23,7 @@ Daisy shares your keyboard, mouse, trackpad and clipboard across macOS systems o
 Move the pointer past a screen edge toward another system. Daisy remembers paired systems and reconnects automatically.
 
 For an existing installation, the [update controls](docs/usage.md#update-daisy)
-check signed feeds and install signed releases. Daisy 0.9 and earlier need a
-one-time DMG or Homebrew upgrade before using the native updater.
+check signed feeds and install signed releases.
 
 ## Security
 

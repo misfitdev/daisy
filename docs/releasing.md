@@ -68,7 +68,13 @@ group update and must be explained in the release notes.
    mise exec -- actionlint
    ```
 
-4. Tag and push, for example `git tag v0.1.0 && git push origin v0.1.0`. The tag must match `Cargo.toml` or the workflow stops.
+4. Tag and push the version recorded in `Cargo.toml`:
+
+   ```bash
+   version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+   git tag "v$version"
+   git push origin "v$version"
+   ```
 5. The workflow runs `just check`, builds `Daisy.app`, signs it with Developer ID, notarizes and staples it, and creates the zip and a DMG that is signed, notarized and stapled the same way. It records a GitHub artifact attestation, generates SLSA Build Level 3 provenance through the OpenSSF generator, and publishes a GitHub release with notes since the previous tag.
 
 ## Verifying a release
@@ -86,17 +92,22 @@ The native updater uses signed feed channels for compatibility.
 Either command proves that a release file was built by this repository's release workflow:
 
 ```bash
-gh attestation verify Daisy-0.1.0-macos-arm64.dmg --repo misfitdev/daisy
+release_tag="$(gh release view --repo misfitdev/daisy --json tagName --jq .tagName)"
+artifact="Daisy-${release_tag#v}-macos-arm64.dmg"
+gh release download "$release_tag" --repo misfitdev/daisy \
+  --pattern "$artifact" --pattern multiple.intoto.jsonl
 
-slsa-verifier verify-artifact Daisy-0.1.0-macos-arm64.dmg \
-  --provenance-path Daisy-0.1.0-macos-arm64.dmg.intoto.jsonl \
-  --source-uri github.com/misfitdev/daisy --source-tag v0.1.0
+gh attestation verify "$artifact" --repo misfitdev/daisy
+
+slsa-verifier verify-artifact "$artifact" \
+  --provenance-path multiple.intoto.jsonl \
+  --source-uri github.com/misfitdev/daisy --source-tag "$release_tag"
 ```
 
 To verify Apple's notarization of the DMG, and of the app inside it or the unzipped app:
 
 ```bash
-spctl --assess --type open --context context:primary-signature -vv Daisy-0.1.0-macos-arm64.dmg
+spctl --assess --type open --context context:primary-signature -vv "$artifact"
 spctl --assess --type execute -vv Daisy.app
 ```
 
@@ -125,7 +136,8 @@ brew upgrade --cask misfitdev/tap/daisy
 To generate the cask locally, e.g. to check its contents before a release:
 
 ```bash
-python3 tools/homebrew-cask.py target/dist/Daisy-0.6.0-macos-arm64.dmg target/dist/daisy.rb
+version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+python3 tools/homebrew-cask.py "target/dist/Daisy-$version-macos-arm64.dmg" target/dist/daisy.rb
 ```
 
 Homebrew's livecheck still watches for new stable releases for its own
@@ -156,13 +168,12 @@ version in `Cargo.toml` without querying the release API.
 After the release workflow publishes its assets, it dispatches Pages on the
 default branch with the exact `release_tag`. Pages validates that release is
 published, stable, and contains its versioned DMG before building. Deployment
-runs in its own workflow rather than the tag run, avoiding the stale artifact
-behavior seen when the same commit was already deployed from `main`.
+runs on the default branch with the selected release tag.
 
-To redeploy a specific published release:
+To redeploy the published release selected in [Verifying a release](#verifying-a-release):
 
 ```bash
-gh workflow run pages.yml --ref main -f release_tag=v0.7.0
+gh workflow run pages.yml --ref main -f "release_tag=$release_tag"
 ```
 
 Omit `release_tag` to use the latest stable release. Pages dispatch and
@@ -213,12 +224,6 @@ The release workflow dispatches Pages with its explicit tag; Pages downloads
 that release's feed to `site/public/updates/appcast.xml` before building. PR site
 builds do not publish feeds. A first release can start a feed when its URL returns
 404; other fetch or verification failures stop generation.
-
-The first native-updater release requires a one-time Homebrew or DMG upgrade
-from Daisy 0.9 and earlier because their archive extractor rejects framework
-symlinks. Release notes must state this migration step. Do not promise automatic
-migration through the retired updater. The old installer and readiness
-transaction are removed; subsequent updates use the native helpers.
 
 For an isolated native check with disposable bundles and signing keys:
 

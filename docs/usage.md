@@ -64,7 +64,7 @@ link. Control-Option-Command-Escape remains the shortcut to take control back.
 
 ## Clipboard
 
-When control moves, the clipboard goes with it: the system giving up control sends its clipboard, including when control moves because someone started using the other system. Copy on one system, move to the peer and paste there; copy on the peer, come back (through the edge, by using this system, or with Control-Option-Command-Escape) and paste here. In a group, the clipboard follows control to every system: copy on any of them, move through a second to a third, and paste there. A system that already has a copy is not sent it again. Systems running Daisy 0.8 still carry only copies made on the system whose keyboard you are using.
+When control moves, the clipboard goes with it: the system giving up control sends its clipboard, including when control moves because someone started using the other system. Copy on one system, move to the peer and paste there; copy on the peer, come back (through the edge, by using this system, or with Control-Option-Command-Escape) and paste here. In a group, the clipboard follows control to every system: copy on any of them, move through a second to a third, and paste there. A system that already has a copy is not sent it again.
 
 - In `Daisy.app`, files and folders copied in Finder are shared with every connected group member. Paste normally in Finder. Daisy receives their contents when Finder first requests the clipboard; Finder can make that request before you choose Paste. A native panel shows progress and lets you cancel. While receiving, Finder’s Paste action is unavailable; wait for the panel to finish, then paste.
 - Pending file offers expire after 15 seconds without activity. Copy the files again if the offer expires. Copying something else or receiving a newer offer replaces the offer; transfers already running may finish.
@@ -120,10 +120,6 @@ From the command line, `listen --no-discovery` disables advertising; connections
 
 ## Update Daisy
 
-When upgrading from Daisy 0.9 or earlier, first use the [Homebrew upgrade](#homebrew)
-or install the latest DMG in Applications. Those releases cannot extract the
-framework symlinks in the new update archive. This is a one-time migration.
-
 Open **Advanced… → Updates** and click **Check Now**. The native update panel
 shows the available release, download progress, and installation errors. Daisy
 stops sharing before it exits for an update. Device identity, paired trust,
@@ -151,8 +147,7 @@ update fails, its panel shows the error; you can also quit Daisy and install the
 or use the [Homebrew upgrade steps](#homebrew).
 
 Different releases can connect when they share a network protocol. See the
-[protocol compatibility rules](protocol.md#handshake). The older command-line
-`update` and `install-update` commands are replaced by the update panel.
+[protocol compatibility rules](protocol.md#handshake).
 
 ## Homebrew
 

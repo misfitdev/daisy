@@ -219,9 +219,8 @@ versions, archive URLs and archive signatures. Channels are generated from the
 release's compiled protocol metadata, not inferred from semver proximity.
 
 The final ZIP digest and compiled protocol metadata are checked together during
-feed generation. Daisy 0.9 and earlier cannot extract the framework symlinks;
-the first native-updater release needs a one-time Homebrew or DMG installation.
-Device identity, trust and settings remain in the existing data folder.
+feed generation. Device identity, trust and settings remain in the existing
+data folder.
 
 - Adding an optional message or event: append a variant and negotiate support through an authenticated, backward-compatible capability exchange before transmitting it. An older peer cannot decode an unknown tag and ends the session.
 - Adding a required message or event: append a variant and raise `PROTOCOL` in `src/session.rs` before transmitting it.
