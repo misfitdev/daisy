@@ -37,15 +37,15 @@ class BundleSigning(unittest.TestCase):
     def test_ad_hoc_without_profile_signs_and_verifies(self):
         result, calls, app, _ = self.run_signing("-")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls, [["--force", "--options", "runtime", "--sign", "-", "--identifier", "dev.misfit.daisy", app],
-                                 ["--verify", "--strict", app]])
+        self.assertEqual(calls, [["--force", "--options", "runtime", "--entitlements", "macos/dev-entitlements.plist", "--sign", "-", "--identifier", "dev.misfit.daisy", app],
+                                 ["--verify", "--deep", "--strict", app]])
 
     def test_publisher_profile_preserves_entitlements_and_space_containing_arguments(self):
         identity = "Developer ID Application: Test"
         result, calls, app, entitlements = self.run_signing(identity, "/tmp/profile with spaces.provisionprofile")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, [["--force", "--options", "runtime", "--entitlements", entitlements, "--timestamp",
-                                 "--sign", identity, "--identifier", "dev.misfit.daisy", app], ["--verify", "--strict", app]])
+                                 "--sign", identity, "--identifier", "dev.misfit.daisy", app], ["--verify", "--deep", "--strict", app]])
 
     def test_publisher_without_profile_refuses_before_signing(self):
         result, calls, _, _ = self.run_signing("Developer ID Application: Test")

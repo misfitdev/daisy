@@ -126,9 +126,6 @@ pub enum Command {
     SetUpdatePolicy(crate::update::Policy),
     /// Turn scheduled update checks on or off.
     SetCheckUpdates(bool),
-    /// Check for a new release right now, instead of waiting for the next
-    /// periodic check.
-    CheckUpdatesNow,
     /// Accept a new system for `ADD_SYSTEM_WINDOW`.
     AddSystem,
     /// Stop accepting a new system early.
@@ -138,8 +135,6 @@ pub enum Command {
     /// Put a member's displays where a person dropped them in the group.
     Place(PublicKey, crate::layout::Offset),
     ConfirmArrangement(crate::share::Confirmation),
-    /// Startup milestones used only by a replacement awaiting commit.
-    Startup(crate::install::update::StartupState),
     Shutdown,
 }
 
@@ -213,13 +208,6 @@ pub enum Event {
     },
     /// Where every member's displays sit, while the group runs.
     Arranged(crate::share::ArrangementView),
-    /// The update checker's state, for the Updates panel.
-    UpdateCheck {
-        checking: bool,
-        /// The most recent check failed.
-        failed: bool,
-        last: Option<crate::update::LastCheck>,
-    },
 }
 
 pub struct Handle {
@@ -401,10 +389,6 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     }
     let mut stored = settings.clone();
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
-    let (update_policy, update_policy_rx) = watch::channel(stored.update_policy);
-    let (check_updates, check_updates_rx) = watch::channel(stored.check_updates);
-    let recheck_updates = std::sync::Arc::new(tokio::sync::Notify::new());
-    let active_protocols = std::sync::Arc::new(ActiveProtocols::default());
     // always advertised while sharing; the advertisement names no one
     let (_discoverable, discoverable) = watch::channel(true);
     let (arrange, arrangement) = watch::channel(None);
@@ -441,21 +425,8 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     {
         return;
     }
-    tokio::spawn(update_worker(
-        home.clone(),
-        events.clone(),
-        update_policy_rx,
-        check_updates_rx,
-        active_protocols.clone(),
-        recheck_updates.clone(),
-    ));
-
     let mut session: Option<tokio::task::JoinHandle<()>> = None;
     let mut addresses: Option<tokio_mpsc::UnboundedSender<(String, Option<PublicKey>)>> = None;
-    let mut update_root = std::env::var_os(crate::macos::update::STARTUP_DIRECTORY)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    let mut startup = crate::install::update::StartupGate::default();
     while let Some(command) = commands.recv().await {
         let command = match command {
             Command::ConnectByAddress(settings) => {
@@ -516,7 +487,6 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     discoverable: discoverable.clone(),
                     arrangement: arrangement.clone(),
                     listening: listening.clone(),
-                    protocols: active_protocols.clone(),
                 };
                 session = Some(tokio::spawn(async move {
                     let start = Start { settings, side_chosen };
@@ -592,7 +562,6 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             }
             Command::SetUpdatePolicy(policy) => {
                 stored.update_policy = policy;
-                update_policy.send_replace(policy);
                 if let Err(error) = save_settings(&home, &stored) {
                     tracing::error!(error = ?error, "update policy could not be saved");
                     let _ = send_problem(
@@ -604,7 +573,6 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             }
             Command::SetCheckUpdates(on) => {
                 stored.check_updates = on;
-                check_updates.send_replace(on);
                 if let Err(error) = save_settings(&home, &stored) {
                     tracing::error!(error = ?error, "update check setting could not be saved");
                     let _ = send_problem(
@@ -613,9 +581,6 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                         "Check that Daisy can write its data folder, then try again.".to_owned(),
                     );
                 }
-            }
-            Command::CheckUpdatesNow => {
-                recheck_updates.notify_one();
             }
             Command::AddSystem => {
                 listen.send_replace(Listening::For(ADD_SYSTEM_WINDOW));
@@ -643,17 +608,6 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             }
             Command::Place(key, offset) => {
                 arrange.send_replace(Some(crate::share::Choice::Move((key, offset))));
-            }
-            Command::Startup(state) => {
-                if startup.observe(state)
-                    && let Some(root) = update_root.take()
-                {
-                    let acknowledged = crate::macos::update::running_bundle()
-                        .and_then(|bundle| crate::install::update::acknowledge(&root, &bundle, &home));
-                    if let Err(error) = acknowledged {
-                        tracing::warn!(error = ?error, "the replacement could not acknowledge startup");
-                    }
-                }
             }
             Command::Shutdown => {
                 if let Some(running) = session.take() {
@@ -723,172 +677,6 @@ struct Live {
     discoverable: watch::Receiver<bool>,
     arrangement: watch::Receiver<Option<crate::share::Choice>>,
     listening: watch::Receiver<Listening>,
-    protocols: std::sync::Arc<ActiveProtocols>,
-}
-
-#[derive(Default)]
-struct ActiveProtocols {
-    peers: std::sync::Mutex<std::collections::BTreeMap<PublicKey, u16>>,
-    revision: watch::Sender<u64>,
-}
-
-impl ActiveProtocols {
-    fn changed(&self) {
-        self.revision
-            .send_modify(|revision| *revision = revision.wrapping_add(1));
-    }
-
-    fn revision(&self) -> u64 {
-        *self.revision.borrow()
-    }
-}
-
-fn retry_update_after_mesh_change(policy: crate::update::Policy, installing: bool) -> bool {
-    !installing && policy != crate::update::Policy::NotifyOnly
-}
-
-fn mesh_changed_since(attempted_revision: u64, current_revision: u64) -> bool {
-    attempted_revision != current_revision
-}
-
-async fn update_worker(
-    home: PathBuf,
-    events: Sender<Event>,
-    mut policy: watch::Receiver<crate::update::Policy>,
-    mut automatic: watch::Receiver<bool>,
-    protocols: std::sync::Arc<ActiveProtocols>,
-    recheck: std::sync::Arc<tokio::sync::Notify>,
-) {
-    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("package version is semver");
-    let mut releases = crate::update::watch(
-        crate::update::REPOSITORY,
-        current.clone(),
-        crate::update::INTERVAL,
-        automatic.clone(),
-        recheck,
-    );
-    let mut latest: Option<crate::update::Release> = None;
-    let mut last_check = crate::update::load_last_check(&home);
-    let _ = events.send(Event::UpdateCheck {
-        checking: false,
-        failed: false,
-        last: last_check.clone(),
-    });
-    let mut handled: Option<(String, crate::update::Policy)> = None;
-    let mut protocol_changes = protocols.revision.subscribe();
-    let (completion_tx, mut completion_rx) = tokio_mpsc::unbounded_channel::<(u64, bool)>();
-    let mut installing = false;
-    loop {
-        tokio::select! {
-            progress = releases.recv() => {
-                let Some(progress) = progress else { return; };
-                let (checking, failed) = match progress {
-                    crate::update::CheckEvent::Started => (true, false),
-                    crate::update::CheckEvent::Finished(crate::update::Checked::Failed) => (false, true),
-                    crate::update::CheckEvent::Finished(crate::update::Checked::Found(found)) => {
-                        let checked = crate::update::LastCheck::of(found.as_ref(), crate::trust::now());
-                        if let Err(error) = crate::update::save_last_check(&home, &checked) {
-                            tracing::warn!(error = ?error, "the last update check could not be saved");
-                        }
-                        last_check = Some(checked);
-                        latest = found;
-                        (false, false)
-                    }
-                };
-                let _ = events.send(Event::UpdateCheck { checking, failed, last: last_check.clone() });
-                if checking {
-                    continue;
-                }
-            }
-            changed = automatic.changed() => {
-                if changed.is_err() { return; }
-            }
-            changed = policy.changed() => {
-                if changed.is_err() { return; }
-            }
-            changed = protocol_changes.changed() => {
-                if changed.is_err() { return; }
-                if retry_update_after_mesh_change(*policy.borrow(), installing) {
-                    handled = None;
-                }
-            }
-            completion = completion_rx.recv(), if installing => {
-                let Some((attempted_revision, success)) = completion else { return; };
-                installing = false;
-                if !success && mesh_changed_since(attempted_revision, protocols.revision()) {
-                    handled = None;
-                }
-            }
-        }
-        let Some(release) = latest.as_ref() else {
-            continue;
-        };
-        let Ok(version) = semver::Version::parse(release.tag_name.trim_start_matches('v')) else {
-            continue;
-        };
-        let selected_policy = *policy.borrow();
-        if installing || !*automatic.borrow() {
-            continue;
-        }
-        let key = (version.to_string(), selected_policy);
-        if handled.as_ref() == Some(&key) {
-            continue;
-        }
-        handled = Some(key);
-        if selected_policy == crate::update::Policy::NotifyOnly {
-            let _ = events.send(Event::Notice {
-                title: "Daisy update available".to_owned(),
-                detail: format!(
-                    "Daisy {} is available. Update from the app or run `daisy update`.",
-                    version
-                ),
-            });
-            continue;
-        }
-        if !selected_policy.permits(&current, &version) {
-            continue;
-        }
-        let mut peer_protocols = protocols
-            .peers
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .values()
-            .copied()
-            .collect::<Vec<_>>();
-        peer_protocols.sort_unstable();
-        peer_protocols.dedup();
-        if peer_protocols.contains(&0) {
-            continue;
-        }
-        let attempted_revision = protocols.revision();
-        let home = home.clone();
-        let events = events.clone();
-        let completion = completion_tx.clone();
-        installing = true;
-        tokio::task::spawn_blocking(move || {
-            let result = crate::macos::update::request_release_for_protocols(&home, &version, &peer_protocols)
-                .and_then(|child| child.wait_with_output().map_err(anyhow::Error::from))
-                .and_then(|output| {
-                    if output.status.success() {
-                        Ok(())
-                    } else {
-                        Err(anyhow::anyhow!(
-                            "verified update was deferred: {}",
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        ))
-                    }
-                });
-            let success = result.is_ok();
-            if let Err(error) = result {
-                tracing::warn!(error = ?error, "automatic Daisy update did not start");
-                let _ = events.send(Event::Notice {
-                    title: "Automatic update postponed".to_owned(),
-                    detail: "This release is not verified as compatible with every connected peer. Update the group together, then try again.".to_owned(),
-                });
-            }
-            let _ = completion.send((attempted_revision, success));
-        });
-    }
 }
 
 async fn run_session(home: PathBuf, name: String, start: Start, live: Live, events: Sender<Event>) {
@@ -898,7 +686,6 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
         discoverable,
         arrangement,
         mut listening,
-        protocols,
     } = live;
     // the session starts from the current choice; only later ones are news
     listening.mark_unchanged();
@@ -917,7 +704,6 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
             adding: false,
-            protocols: protocols.clone(),
         };
         let pairing = Some(settings.trust);
         let config = service::SessionConfig {
@@ -991,7 +777,6 @@ struct ControllerObserver {
     linked: Vec<(String, PublicKey, usize)>,
     /// Whether pairing was opened while the group runs.
     adding: bool,
-    protocols: std::sync::Arc<ActiveProtocols>,
 }
 
 impl ControllerObserver {
@@ -1045,12 +830,6 @@ impl ServiceObserver for ControllerObserver {
     }
 
     fn link(&mut self, peer: &str, key: PublicKey, link: crate::control::Link) {
-        self.protocols
-            .peers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, link.protocol);
-        self.protocols.changed();
         let _ = self.events.send(Event::Link { key, link });
         let now = trust::now();
         let fresh = self
@@ -1088,16 +867,6 @@ impl ServiceObserver for ControllerObserver {
             self.linked[index].2 -= 1;
             if self.linked[index].2 == 0 {
                 self.linked.remove(index);
-                if self
-                    .protocols
-                    .peers
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&key)
-                    .is_some()
-                {
-                    self.protocols.changed();
-                }
                 if self.stats.remove(&key).is_some() {
                     self.save_stats();
                 }
@@ -1263,7 +1032,7 @@ pub fn computer_name() -> String {
         .unwrap_or_else(|| "System".to_owned())
 }
 
-fn load_settings(home: &Path) -> Result<AppSettings> {
+pub fn load_settings(home: &Path) -> Result<AppSettings> {
     let path = home.join(SETTINGS_FILE);
     match fs::read_to_string(&path) {
         Ok(text) => toml::from_str(&text).with_context(|| format!("reading {}", path.display())),
@@ -1322,71 +1091,6 @@ mod tests {
         assert!(arrangement_preview_home(&separate, &root.path().join("absent")).is_ok());
     }
 
-    #[tokio::test]
-    async fn the_last_update_check_is_reported_after_a_restart() {
-        let home = tempfile::tempdir().unwrap();
-        let saved = crate::update::LastCheck {
-            at: 1_791_000_000,
-            available: None,
-        };
-        crate::update::save_last_check(home.path(), &saved).unwrap();
-        let (events, received) = mpsc::channel();
-        let (_policy, policy) = watch::channel(crate::update::Policy::NotifyOnly);
-        // automatic checks off, so nothing reaches the network
-        let (_automatic, automatic) = watch::channel(false);
-        let worker = tokio::spawn(update_worker(
-            home.path().to_owned(),
-            events,
-            policy,
-            automatic,
-            std::sync::Arc::new(ActiveProtocols::default()),
-            std::sync::Arc::new(tokio::sync::Notify::new()),
-        ));
-        let first = tokio::task::spawn_blocking(move || received.recv_timeout(std::time::Duration::from_secs(5)))
-            .await
-            .unwrap()
-            .unwrap();
-        worker.abort();
-        assert!(
-            matches!(first, Event::UpdateCheck { checking: false, failed: false, last: Some(ref last) } if *last == saved),
-            "the first event must report the saved check"
-        );
-    }
-
-    #[test]
-    fn active_mesh_changes_advance_the_update_eligibility_revision() {
-        let protocols = ActiveProtocols::default();
-        let mut observed = protocols.revision.subscribe();
-        let key = Identity::generate().unwrap().public_key();
-
-        protocols.peers.lock().unwrap().insert(key, 6);
-        protocols.changed();
-        assert_eq!(protocols.revision(), 1);
-        assert!(observed.has_changed().unwrap());
-        observed.borrow_and_update();
-
-        protocols.peers.lock().unwrap().remove(&key);
-        protocols.changed();
-        assert_eq!(protocols.revision(), 2);
-        assert!(observed.has_changed().unwrap());
-    }
-
-    #[test]
-    fn automatic_update_retries_after_the_active_mesh_changes() {
-        assert!(retry_update_after_mesh_change(crate::update::Policy::InstallAll, false,));
-        assert!(retry_update_after_mesh_change(
-            crate::update::Policy::InstallMinorAndPatch,
-            false,
-        ));
-        assert!(!retry_update_after_mesh_change(
-            crate::update::Policy::NotifyOnly,
-            false,
-        ));
-        assert!(!retry_update_after_mesh_change(crate::update::Policy::InstallAll, true,));
-        assert!(mesh_changed_since(4, 5));
-        assert!(!mesh_changed_since(4, 4));
-    }
-
     #[test]
     fn address_addition_keeps_the_running_group() {
         assert_eq!(address_action(true), AddressAction::Join);
@@ -1424,7 +1128,6 @@ mod tests {
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
             adding: false,
-            protocols: std::sync::Arc::default(),
         };
         let studio = Identity::generate().unwrap().public_key();
         let desk = Identity::generate().unwrap().public_key();
@@ -1565,7 +1268,6 @@ mod tests {
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
             adding: false,
-            protocols: std::sync::Arc::default(),
         };
         observer.waiting("Studio", key, service::DEFAULT_PORT, Some(Policy::IDLE));
         assert!(matches!(
@@ -1598,7 +1300,6 @@ mod tests {
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
             adding: false,
-            protocols: std::sync::Arc::default(),
         };
         let next = || received.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
         observer.pairing_opened();
@@ -1628,7 +1329,6 @@ mod tests {
             stats: std::collections::BTreeMap::new(),
             linked: Vec::new(),
             adding: false,
-            protocols: std::sync::Arc::default(),
         };
         for _ in 0..3 {
             observer.connection_failed("192.168.1.20:24850", &anyhow::anyhow!("connection refused"));

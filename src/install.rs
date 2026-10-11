@@ -7,9 +7,6 @@
 
 use std::path::{Path, PathBuf};
 
-pub mod release;
-pub mod update;
-
 const BUNDLE_NAME: &str = "Daisy.app";
 
 /// Whether to offer the move, given where the bundle really lives (its

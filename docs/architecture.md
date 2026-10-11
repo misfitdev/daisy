@@ -35,17 +35,20 @@ Each member shares its displays and one agreed arrangement: an offset per member
 
 Pure decision modules contain no macOS calls and are unit tested directly. The macOS modules carry those decisions out; they do not decide them. See [macos.md](macos.md).
 
-## Staged updates
+## Application updates
 
-The staged update transaction lives in `install::update`. It copies and
-verifies complete bundles before stopping sharing, then delegates process
-exit, port availability, atomic bundle exchange and reopening to
-`macos::update`. A retained old executable runs the helper. Startup is committed
-only after the replacement's UI and controller are ready; when sharing was
-enabled, the listener must have started. Failure stops the replacement before
-restoring and reopening the previous bundle. Interrupted cutovers retain a
-complete installed path and recover through the old helper. Device keys,
-peer trust, settings and arrangement remain in the existing data folder.
+`macos::update` wraps the native update framework on the AppKit main thread.
+It owns checking, signed-feed and archive validation, download, installation,
+and relaunch. Native callbacks enter a queue drained by the interface timer;
+the last successful check is persisted in the application data folder.
+The normal application-termination handler stops the background controller,
+which drops sessions and releases held input before exit.
+
+`update::channel` selects the stable feed channel for manual/every-update
+policies, or a channel naming the current major version and every supported
+protocol for routine automatic updates. Release feeds contain signed entries
+for each supported protocol subset. A routine channel therefore cannot select
+a release that drops compatibility with a protocol this build supports.
 
 ## Threads and tasks
 
@@ -77,7 +80,7 @@ side remains held.
 6. Pushing the pointer off one of this system's displays toward another member's display, within 40 points, hides and pins the local pointer, then sends `Enter` to that member with the exact entry point. Control never crosses while a mouse button is held, and never onto a locked member.
 7. Input is swallowed locally and forwarded. A key pressed before crossing keeps its release on the system it was pressed on, so it cannot become stuck remotely.
 8. The member being driven moves its pointer within its displays. Pushing it off them toward another display releases held input and sends `Leave` naming the next system and point; the system in control sends `Enter` to that system, or puts its own pointer back at that point.
-9. Whenever control moves, whether across displays or because someone started using another member, the system giving it up reads its clipboard on a blocking thread and sends it behind input and heartbeats. Chunks are acknowledged and at most four are in flight, so a large image never holds up input. The receiver writes a snapshot once the whole of it has arrived. Between systems that both support clipboard IDs, the system giving up control first offers the copy's ID, and the snapshot follows only if the receiver lacks that copy; the ID travels with the copy, so no system is sent a copy it already has. A received copy is never offered back to its supplying peer while it remains on the clipboard, and this system rejects offers of its own copies so a delayed handoff cannot replace a newer local copy. An incoming requested snapshot is discarded if the local clipboard changes during the transfer or a new crossing supersedes its request. When the pointer moves from one driven member on to another, the driver accepts the copy the first member offers and passes it on. With an older member, the snapshot goes on each crossing and the receiver accepts one per crossing.
+9. Whenever control moves, whether across displays or because someone started using another member, the system giving it up reads its clipboard on a blocking thread and sends it behind input and heartbeats. Chunks are acknowledged and at most four are in flight, so a large image never holds up input. The receiver writes a snapshot once the whole of it has arrived. Between systems that both support clipboard IDs, the system giving up control first offers the copy's ID, and the snapshot follows only if the receiver lacks that copy; the ID travels with the copy, so no system is sent a copy it already has. A received copy is never offered back to its supplying peer while it remains on the clipboard, and this system rejects offers of its own copies so a delayed handoff cannot replace a newer local copy. An incoming requested snapshot is discarded if the local clipboard changes during the transfer or a new crossing supersedes its request. When the pointer moves from one driven member on to another, the driver accepts the copy the first member offers and passes it on. For peers without clipboard-ID support, the snapshot goes on each crossing and the receiver accepts one per crossing.
 10. Control-Option-Command-Escape returns control to the system it was pressed on. Explicit stop, trust revocation, a dropped link with the member in control, three seconds of silence or queue overload takes control back immediately.
 
 Whatever ends replay of remote input releases every key and button that system still considers held. While any link runs, the system holds off idle sleep; control arriving wakes its display. The event tap records physical input in an atomic timestamp. Once per second, the system in control broadcasts `Activity` only if that timestamp changed. Each unlocked member accepts it only from the current owner at the current generation, refreshes a timed macOS user-activity assertion, and posts a do-nothing modifier event so its screen saver idle time also restarts; see [macOS internals](macos.md). Heartbeats do not refresh display activity; when input stops, normal display sleep, screen saver and lock timers apply.
@@ -113,24 +116,16 @@ Physical events on a receiving system pass locally on their first callback and c
 
 Posted input and swipe shortcut events carry a Daisy marker that the event tap excludes from ownership and forwarding. The callback uses only cached state, nonblocking locks and bounded queue operations. Both sides exchange heartbeat messages and unwind capture and held-input state on cancellation or connection loss.
 
-## Verified release installation
+## Release update feed
 
-`install::release` selects a newer stable release and verifies both its
-compatibility manifest and architecture-specific ZIP. Anonymous HTTPS reads
-have request and size limits. Sigstore verification checks certificate chains,
-transparency evidence and the exact release workflow/tag identity; the signed
-SLSA statement must also name the selected asset and SHA-256 digest. Missing or
-invalid metadata prevents staging.
-
-Archives are extracted into a private temporary directory after checking every
-path, entry type and expanded size. Links, special files, duplicate paths and
-paths outside the app are rejected. The downloaded app's signed build metadata
-must match the verified manifest, and its Developer ID publisher must match
-the installed copy. The existing staging helper then owns restart, readiness
-confirmation and rollback. A failed download or verification leaves the
-installed app running. `macos::update::request_release` starts a separate
-installer worker for policy callers; it does not exclude the GUI process from
-the helper's stop operation.
+The signed feed at `updates/appcast.xml` points to architecture-specific ZIP
+assets on GitHub Releases. Each enclosure has an Ed25519 archive signature.
+The application embeds the update public key and requires signed feeds and
+archive verification before installation. Feed signatures also authenticate
+version and compatibility-channel metadata. The release workflow signs the
+framework's nested helpers and the application with Developer ID, notarizes
+and staples the bundle, then signs the final ZIP and feed. Pages publishes the
+feed from the explicit release selected by the release workflow.
 
 ## Developer trace flow
 

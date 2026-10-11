@@ -64,7 +64,7 @@ link. Control-Option-Command-Escape remains the shortcut to take control back.
 
 ## Clipboard
 
-When control moves, the clipboard goes with it: the system giving up control sends its clipboard, including when control moves because someone started using the other system. Copy on one system, move to the peer and paste there; copy on the peer, come back (through the edge, by using this system, or with Control-Option-Command-Escape) and paste here. In a group, the clipboard follows control to every system: copy on any of them, move through a second to a third, and paste there. A system that already has a copy is not sent it again. Systems running Daisy 0.8 still carry only copies made on the system whose keyboard you are using.
+When control moves, the clipboard goes with it: the system giving up control sends its clipboard, including when control moves because someone started using the other system. Copy on one system, move to the peer and paste there; copy on the peer, come back (through the edge, by using this system, or with Control-Option-Command-Escape) and paste here. In a group, the clipboard follows control to every system: copy on any of them, move through a second to a third, and paste there. A system that already has a copy is not sent it again.
 
 - In `Daisy.app`, files and folders copied in Finder are shared with every connected group member. Paste normally in Finder. Daisy receives their contents when Finder first requests the clipboard; Finder can make that request before you choose Paste. A native panel shows progress and lets you cancel. While receiving, Finder’s Paste action is unavailable; wait for the panel to finish, then paste.
 - Pending file offers expire after 15 seconds without activity. Copy the files again if the offer expires. Copying something else or receiving a newer offer replaces the offer; transfers already running may finish.
@@ -120,44 +120,34 @@ From the command line, `listen --no-discovery` disables advertising; connections
 
 ## Update Daisy
 
-To download and install the latest compatible stable release, run the command
-from the installed app:
+Open **Advanced… → Updates** and click **Check Now**. The native update panel
+shows the available release, download progress, and installation errors. Daisy
+stops sharing before it exits for an update. Device identity, paired trust,
+settings and screen arrangement stay in the existing data folder.
 
-```bash
-/Applications/Daisy.app/Contents/MacOS/daisy update
-```
+**Check for updates automatically** is on by default and checks every six
+hours. Choose what happens when a release is found:
 
-Daisy verifies the release and its compatibility before stopping the running
-copy. It then restarts with your device identity, paired trust, settings and
-screen arrangement retained. If startup fails, it restores the previous copy.
-The installed app folder must be writable by your account. Under **Updates** in Advanced settings, **Check for updates automatically** is on by default and checks every six hours. While it is on, choose what happens when a release is found: **Ask before installing**,
-**Auto-install routine updates**, which skips releases that could break compatibility with peers, or **Auto-install every update**. Turn it off and Daisy checks only when you click **Check Now**, and installs nothing on its own. While a check runs, the line under the menu reads **Checking**; afterwards it shows what Daisy found and how long ago it last checked successfully, such as "Checked 5 minutes ago". Daisy remembers that time across restarts. The installer
-checks signed compatibility metadata against this system and every connected
-peer before replacing Daisy. Offline peers do not block an update and may need
-to update Daisy before reconnecting. If an incompatible peer disconnects,
-Daisy retries the compatibility check against the remaining group. If an older installed build
-reports `unrecognized subcommand`, use the DMG or Homebrew steps below.
+- **Ask before installing** announces updates and lets you choose when to install.
+- **Auto-install routine updates** accepts releases in the same major version
+  that retain every network protocol supported by this installation.
+- **Auto-install every update** also accepts releases that may require updating
+  other group members before they can reconnect.
 
-Use `update --version 0.7.0` to request a specific newer stable release. Daisy verifies the release and checks that it is compatible with this system and every currently connected peer before installation. Prereleases, older versions, and releases without usable verification metadata are refused.
+Turn automatic checks off to check only with **Check Now**. The status line
+shows the result and how long ago Daisy last checked successfully; that time
+survives restarts. Automatic downloads are also disabled when automatic checks
+are off. An update already downloaded and accepted can finish when Daisy quits.
 
-If the command refuses a release, quit Daisy, install the
-[latest release](https://github.com/misfitdev/daisy/releases/latest) from its DMG
-in Applications and reopen it. If you installed with Homebrew, use the
-[Homebrew upgrade steps](#homebrew).
+Update feeds and downloaded archives have Ed25519 signatures. The native
+updater verifies the feed and refuses tampered updates before installation.
+Installation and relaunch use its helpers. If an
+update fails, its panel shows the error; you can also quit Daisy and install the
+[latest release](https://github.com/misfitdev/daisy/releases/latest) from its DMG,
+or use the [Homebrew upgrade steps](#homebrew).
 
-Different releases can connect when compatible. Daisy checks compatibility automatically. If it reports a compatibility issue,
-update the system it identifies. See the
+Different releases can connect when they share a network protocol. See the
 [protocol compatibility rules](protocol.md#handshake).
-
-### Install a staged update
-
-To install a newer signed release without copying over the running app, mount its DMG and run:
-
-```bash
-/Applications/Daisy.app/Contents/MacOS/daisy install-update /Volumes/Daisy/Daisy.app
-```
-
-Daisy stages and verifies the replacement while the current copy keeps running. It then stops the current process, checks that the network listener has closed, exchanges the app bundles, and starts the replacement. Sharing resumes with the same device identity, paired peers, settings, and screen arrangement. The previous copy stays available until startup succeeds. If startup fails, Daisy stops the replacement and restores the previous copy. The command accepts only a newer notarized release from the same publisher that Daisy can use with this installation. This command applies a staged update; automatic update behavior is controlled separately in Advanced settings.
 
 ## Homebrew
 

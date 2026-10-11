@@ -1,6 +1,9 @@
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../sparkle");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../../sparkle");
     // a worktree's .git is a file; these paths then do not exist and cargo
     // reruns this script on every build, which is only slower
     for path in [".git/HEAD", ".git/index", ".git/refs"] {

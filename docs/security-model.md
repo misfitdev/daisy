@@ -104,7 +104,7 @@ A system replaying its peer's input releases every held key and button whenever 
 
 ## Clipboard
 
-When clipboard sharing is on, a system offers its clipboard to a peer each time control crosses to that peer, and sends it when the peer asks: plain text, rich text and images, up to 4 MB of text and 32 MB of image. A peer asks only for a copy it lacks, and accepts only the copy it asked for, from the peer it asked. A clipboard received from one member is passed on the same way, including a copy made on a system that is being driven remotely, so it reaches every member control moves through. Links with members running Daisy 0.8 send the clipboard on each crossing instead. It travels inside the encrypted session like input and is written straight to the receiving system's pasteboard. Any member control reaches can therefore read what was copied on another member, which is within the trust the group already grants. Either side can turn sharing off; a system with it off neither sends nor writes. The receiver discards any item larger than its limit or longer than it declared, and never writes a partial item.
+When clipboard sharing is on, a system offers its clipboard to a peer each time control crosses to that peer, and sends it when the peer asks: plain text, rich text and images, up to 4 MB of text and 32 MB of image. A peer asks only for a copy it lacks, and accepts only the copy it asked for, from the peer it asked. A clipboard received from one member is passed on the same way, including a copy made on a system that is being driven remotely, so it reaches every member control moves through. Peers without clipboard-ID support receive a snapshot on each crossing. It travels inside the encrypted session like input and is written straight to the receiving system's pasteboard. Any member control reaches can therefore read what was copied on another member, which is within the trust the group already grants. Either side can turn sharing off; a system with it off neither sends nor writes. The receiver discards any item larger than its limit or longer than it declared, and never writes a partial item.
 
 Items marked concealed or transient by their source app stay on the system
 where they were copied. This includes clipboard entries from password managers
@@ -134,18 +134,15 @@ When Daisy moves itself to Applications, Gatekeeper has already approved the run
 
 ## Verified updates
 
-The release installer reads public GitHub release assets and attestations over
-HTTPS without an account or access token. Both the compatibility manifest and
-ZIP archive must have a valid Sigstore signature and transparency proof from
-this repository's release workflow at the selected version tag. Verification
-uses bundled public Sigstore trust roots and the GitHub Actions OIDC issuer.
-Signed SLSA provenance must bind the expected repository, workflow, tag, asset
-name and SHA-256 digest. Unknown signing roots are rejected; the trust-root
-snapshot is updated with the verifier dependency in subsequent releases.
+The application embeds an Ed25519 update public key in its signed `Info.plist`.
+The native updater requires signed feeds and validates update archives before
+installation. The signed feed binds release versions, compatibility channels,
+archive URLs and Ed25519 archive signatures. The update signing key is separate
+from the Developer ID signing certificate.
 
-The manifest must declare the selected version, the current session protocol,
-and the exact ZIP SHA-256. Archive paths, entry types and expanded sizes are
-checked before extraction into a private temporary directory. Before staging,
-Daisy verifies the extracted app's notarization, bundle identifier, Developer
-ID publisher and signed build version/protocol. The staged copy is checked
-again before restart. Downloaded code is not executed during verification.
+Release bundles include the native updater framework and its installer
+helpers, signed with the application's Developer ID identity. The framework
+validates downloaded application code signatures during installation. GitHub
+artifact attestations and SLSA provenance remain available for independently
+verifying release artifacts. Compiled protocol metadata binds compatibility
+channels to the release source and final ZIP digest during feed generation.

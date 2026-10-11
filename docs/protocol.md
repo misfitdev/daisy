@@ -203,33 +203,24 @@ A required message or behavior change requires a protocol change. Unknown
 messages remain errors; silently ignoring control or security messages is
 unsafe.
 
-The current protocol generation explicitly supports its immediately preceding generation. The authenticated handshake advertises supported generations, and each link selects the greatest mutual generation before sharing begins. Numeric adjacency alone never authorizes compatibility. Unsupported older or unknown future generations are rejected. The update installer checks signed release metadata against this system and every currently connected peer. If an incompatible active peer disconnects, Daisy retries compatibility against the remaining group. Offline peers do not block an update; if one returns incompatible, Daisy rejects the connection and points to the canonical release page.
+The current protocol generation explicitly supports its immediately preceding generation. The authenticated handshake advertises supported generations, and each link selects the greatest mutual generation before sharing begins. Numeric adjacency alone never authorizes compatibility. Unsupported older or unknown future generations are rejected. Routine automatic updates select a signed feed channel containing the current
+major version and every protocol supported by this build. A release is listed
+in that channel only when it retains all of those protocols. The every-update
+policy and manual update panel can offer releases that require other members
+to update before reconnecting. Unsupported links remain rejected by the
+normal authenticated handshake.
 
 ### Automatic installation contract
 
-Packaging emits `Daisy-<version>-update.toml` metadata format `2`, binding the
-exact Daisy release, primary session protocol, supported protocol list, and
-SHA-256 of the final ZIP archive. Format 1 remains valid only for an exact
-single-protocol match. The release workflow attests the metadata alongside the
-archive and includes it in SLSA provenance. Missing, malformed, unsupported,
-or unverified metadata does not authorize automatic installation.
+The update public key is embedded in the signed application bundle. The native
+updater requires an Ed25519-signed feed and archive verification before
+installation. The feed signature authenticates compatibility channels, release
+versions, archive URLs and archive signatures. Channels are generated from the
+release's compiled protocol metadata, not inferred from semver proximity.
 
-Before replacing the app, the installer verifies the manifest provenance for
-the repository's release workflow and selected tag, verifies the ZIP SHA-256,
-and confirms the supported protocol list includes this system and every
-currently connected peer. `update::Manifest::matches` checks the version, tag,
-archive digest, and protocol metadata; it does not verify provenance or
-authorize installation. The installer also verifies the app signature and
-identity and retains the local device key, trust store, and settings.
-
-Every automatic policy, including minor/patch-only, applies these checks.
-Semver alone is not evidence of protocol compatibility. Only currently
-connected peers gate an automatic protocol update; saved or disconnected peers
-may need to update Daisy before reconnecting. The
-verified `update` command enforces these checks before staging a release.
-Both manifest and ZIP signatures are verified against the bundled public
-Sigstore trust roots, the GitHub Actions issuer, and the exact repository,
-release workflow, tag and artifact digest.
+The final ZIP digest and compiled protocol metadata are checked together during
+feed generation. Device identity, trust and settings remain in the existing
+data folder.
 
 - Adding an optional message or event: append a variant and negotiate support through an authenticated, backward-compatible capability exchange before transmitting it. An older peer cannot decode an unknown tag and ends the session.
 - Adding a required message or event: append a variant and raise `PROTOCOL` in `src/session.rs` before transmitting it.

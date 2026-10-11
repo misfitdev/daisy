@@ -320,7 +320,8 @@ fn update_controls_report_and_follow_the_switch(mtm: objc2_foundation::MainThrea
     assert!(views.update_policy.isEnabled(), "turning them back on enables it");
 
     // SAFETY: as above.
-    assert!(unsafe { app.sendAction_to_from(sel!(checkForUpdatesNow:), Some(target), None) });
+    target.ivars().update_checking.set(true);
+    target.refresh_update_status();
     let status = || views.update_status.stringValue().to_string();
     assert_eq!(status(), "Checking", "Check Now shows that it started");
     assert!(!views.check_now.isEnabled(), "Check Now waits for the running check");
@@ -329,21 +330,33 @@ fn update_controls_report_and_follow_the_switch(mtm: objc2_foundation::MainThrea
     assert_eq!(status(), "Checking..", "the dots grow while the check runs");
 
     let at = crate::trust::now() - 5 * 60;
-    target.handle_event(crate::controller::Event::UpdateCheck {
-        checking: false,
-        failed: false,
-        last: Some(crate::update::LastCheck { at, available: None }),
-    });
+    let home = tempfile::tempdir().unwrap();
+    *target.ivars().update_home.borrow_mut() = home.path().to_owned();
+    target.handle_update_event(sparkle_updater::UpdateEvent::DidNotFindUpdate(Default::default()));
+    target.handle_update_event(sparkle_updater::UpdateEvent::DidFinishUpdateCycle(
+        sparkle_updater::events::UpdateCycleInfo {
+            update_check: "userInitiated".to_owned(),
+            error: None,
+        },
+    ));
+    target.ivars().update_last.borrow_mut().as_mut().unwrap().at = at;
+    target.refresh_update_status();
     assert!(
         status().starts_with("Daisy is up to date. Checked ") && !status().contains("just now"),
         "the result says how long ago the check ran, got {:?}",
         status()
     );
-    target.handle_event(crate::controller::Event::UpdateCheck {
-        checking: false,
-        failed: true,
-        last: Some(crate::update::LastCheck { at, available: None }),
-    });
+    target.handle_update_event(sparkle_updater::UpdateEvent::DidAbortWithError(
+        sparkle_updater::events::ErrorPayload {
+            message: "download failed".to_owned(),
+            code: 4005,
+            domain: "SUSparkleErrorDomain".to_owned(),
+            no_update: None,
+            failure_reason: None,
+            recovery_suggestion: None,
+            underlying: Vec::new(),
+        },
+    ));
     assert!(
         status().starts_with("Could not check for updates. Last checked "),
         "a failed check keeps the last good time, got {:?}",
