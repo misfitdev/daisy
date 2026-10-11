@@ -21,6 +21,7 @@ this repository):
 | `NOTARY_KEY_ID` | App Store Connect API key ID |
 | `NOTARY_ISSUER_ID` | Issuer ID shown with that key |
 | `NOTARY_KEY` | Contents of the key's `.p8` file |
+| `SPARKLE_PRIVATE_KEY` | Base64 Ed25519 update signing key matching `macos/sparkle-public-key.txt` |
 | `HOMEBREW_TAP_TOKEN` | Fine-grained GitHub PAT, scoped to Contents: write on `misfitdev/homebrew-tap` only |
 
 Create them:
@@ -74,16 +75,13 @@ group update and must be explained in the release notes.
 
 The bundle recipe embeds `DaisyNetworkProtocol` in the signed `Info.plist`,
 using the compiled binary's `update-info` command. That command exits before
-identity, input capture or listener initialization. The local updater reads
-this sealed value and the bundle version instead of executing the replacement
-while the current app is sharing.
+identity, input capture or listener initialization. Feed generation uses this compiled metadata.
 
 Packaging also emits `Daisy-<version>-update.toml` from the release source.
 It records metadata format `2`, package version, `session::PROTOCOL`, the
 supported protocol list, and the final ZIP SHA-256. The release workflow
-attests the file and includes it in SLSA provenance. This metadata is the
-compatibility contract for verified updates; release numbers and release-note
-text do not replace it. Verify provenance and archive binding before use.
+attests the file and includes it in SLSA provenance. Feed generation checks this metadata against the final ZIP digest.
+The native updater uses signed feed channels for compatibility.
 
 Either command proves that a release file was built by this repository's release workflow:
 
@@ -134,13 +132,12 @@ Homebrew's livecheck still watches for new stable releases for its own
 metadata, but `update-homebrew` is what actually advances the pinned version
 and SHA-256 in the tap.
 Advanced settings offers three update policies: ask before installing,
-auto-install routine updates (the same major version), or auto-install every update.
-They apply while **Check for updates automatically** is on; with it off, Daisy
-checks only on **Check Now** and announces or installs nothing on its own. Protocol-changing installs require
-signed compatibility metadata that supports this system and every currently
-connected peer. Offline peers do not block installation and may need Daisy
-updated before reconnecting. If an incompatible active peer disconnects,
-Daisy retries compatibility against the remaining group.
+auto-install routine updates, or auto-install every update. Routine updates
+retain the same major version and every protocol supported by the current
+build. The signed feed authenticates that selection. Automatic checks and
+downloads stop when **Check for updates automatically** is off; an update
+already downloaded and accepted can still install on quit.
+
 Accessibility and Input Monitoring still require approval in System Settings.
 The cask is release metadata; the DMG and ZIP are the assets covered by the
 existing provenance and artifact attestations.
@@ -176,24 +173,61 @@ and the Pages workflow reports its test, build, and deployment results.
 
 Release notes come from Conventional Commit subjects through `git cliff`; `just notes` previews them. `feat`, `fix`, `perf` and `docs` commits are listed. `chore`, `ci`, `build`, `test`, `style` and `refactor` commits are omitted.
 
-## Release installer verification
+## Update feed and framework
 
-`daisy update` consumes the architecture-specific ZIP and the update TOML
-manifest through the public releases API. Both assets need the release
-workflow's GitHub artifact attestation. The verifier checks SLSA v1 claims and
-Sigstore certificate, signature and transparency evidence against the expected
-repository, workflow and version tag; a downloadable asset alone is not
-sufficient. The separate OpenSSF SLSA provenance remains available for external
-verification.
+`just sparkle` downloads the official native updater framework at the revision
+and SHA-256 pinned in `tools/sparkle.py`. The Rust wrapper links this framework;
+packaging copies it into `Daisy.app/Contents/Frameworks` with its symlinks intact.
+Nested XPC services, the installer executable, updater application and framework
+are signed before the outer application. Ad hoc development builds disable
+library validation; distributed builds retain it.
 
-Keep the Sigstore verifier dependency and its bundled public trust roots
-current. A release signed by an unknown root is refused by an older updater;
-manual installation from the notarized DMG remains available. An older release
-without an attested compatibility manifest cannot be installed by this command.
-The download worker is separate from the running app, so all installed GUI
-processes must exit before the helper exchanges bundles.
+The public update key is committed in `macos/sparkle-public-key.txt`. The
+matching private key is stored locally under the Keychain account
+`dev.misfit.daisy.sparkle`. To export it directly to the release secret without
+printing the private key:
 
-The release ZIP must be a single-disk archive without ZIP64 metadata, symlinks,
-or special files. The installer limits compressed downloads to 256 MiB,
-expanded contents to 512 MiB and the directory to 10,000 entries. Duplicate
-paths, traversal and unexpected top-level content are rejected before writing.
+```bash
+key_dir="$(mktemp -d)"
+key_file="$key_dir/private-key"
+umask 077
+target/sparkle/bin/generate_keys --account dev.misfit.daisy.sparkle -x "$key_file"
+gh secret set SPARKLE_PRIVATE_KEY < "$key_file"
+rm -f "$key_file"
+rmdir "$key_dir"
+```
+
+Back up that private key securely. Changing the embedded public key without a
+key-rotation migration prevents installed releases from accepting updates.
+
+The release workflow writes the key to a private temporary file, exposes its
+path as `DAISY_SPARKLE_KEY_FILE`, and removes it when packaging exits. Local
+packaging uses that variable when supplied, otherwise the named Keychain key.
+Ad hoc CI packages contain the framework but do not generate production feeds.
+
+`tools/sparkle_appcast.py` verifies the preceding feed's signature, retains its
+older entries, adds the current release in stable and major/protocol channels,
+signs the final ZIP, and signs the feed. The resulting `appcast.xml` is uploaded
+with the release assets and included in artifact attestations and SLSA subjects.
+The release workflow dispatches Pages with its explicit tag; Pages downloads
+that release's feed to `site/public/updates/appcast.xml` before building. PR site
+builds do not publish feeds. A first release can start a feed when its URL returns
+404; other fetch or verification failures stop generation.
+
+The first native-updater release requires a one-time Homebrew or DMG upgrade
+from Daisy 0.9 and earlier because their archive extractor rejects framework
+symlinks. Release notes must state this migration step. Do not promise automatic
+migration through the retired updater. The old installer and readiness
+transaction are removed; subsequent updates use the native helpers.
+
+For an isolated native check with disposable bundles and signing keys:
+
+```bash
+just sparkle
+cargo build --example sparkle_smoke
+python3 tools/test_sparkle_native.py --identity developer-id
+```
+
+This checks automatic installation on quit, reopening the resulting bundle,
+code-signature validity, and rejection of modified feeds and archives. It does
+not replace the installed application or use the production update signing key.

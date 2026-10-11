@@ -42,27 +42,9 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Download, verify and install a newer compatible stable release
-    Update {
-        /// Install this exact stable version instead of the latest release
-        #[arg(long)]
-        version: Option<semver::Version>,
-        /// Active peer protocols that the verified release must preserve.
-        #[arg(long = "compatible-protocol")]
-        compatible_protocols: Vec<u16>,
-    },
-    /// Stage a signed local update and restart Daisy after verification
-    InstallUpdate { bundle: PathBuf },
     /// Compatibility metadata for packaging, without starting Daisy
     #[command(hide = true)]
     UpdateInfo,
-    /// Runs from the retained old app during replacement
-    #[command(hide = true)]
-    ApplyUpdate {
-        directory: PathBuf,
-        #[arg(long, default_value_t = 0)]
-        exclude_process: u32,
-    },
     /// Save a picture of Daisy's window with sample systems, for the website
     #[command(hide = true)]
     Screenshot {
@@ -157,45 +139,13 @@ fn main() -> Result<()> {
                 .block_on(daisy::diagnostics::collect(&home, output));
         }
         Some(Command::UpdateInfo) => {
-            print!("{}", toml::to_string(&daisy::install::update::Build::this_system())?);
-            return Ok(());
-        }
-        Some(Command::ApplyUpdate {
-            directory,
-            exclude_process,
-        }) => return macos::update::apply(directory, *exclude_process),
-        Some(Command::InstallUpdate { bundle }) => {
-            let home = cli.home.clone().map_or_else(default_home, Ok)?;
-            let status = macos::update::install_local(bundle, &home)?.wait()?;
-            if !status.success() {
-                bail!("the update did not complete; inspect the helper's error above");
-            }
-            return Ok(());
-        }
-        Some(Command::Update {
-            version,
-            compatible_protocols,
-        }) => {
-            let home = cli.home.clone().map_or_else(default_home, Ok)?;
-            let Some(mut helper) =
-                macos::update::install_release_for_protocols(&home, version.as_ref(), compatible_protocols)?
-            else {
-                println!("Daisy is already up to date.");
-                return Ok(());
-            };
-            let status = helper.wait()?;
-            if !status.success() {
-                bail!("the update did not complete; inspect the helper's error above");
-            }
+            print!("{}", toml::to_string(&daisy::update::Build::this_system())?);
             return Ok(());
         }
         _ => {}
     }
     if let Some(code) = launcher::relaunch_as_app()? {
         std::process::exit(code);
-    }
-    if cli.command.is_none() && macos::update::recover_pending()? {
-        return Ok(());
     }
 
     tracing_subscriber::registry()
@@ -274,11 +224,7 @@ struct Keys<'a> {
 async fn execute(command: Command, home: &Path, keys: Keys<'_>, peers: &PeerStore, name: &str) -> Result<()> {
     let Keys { identity, signer } = keys;
     match command {
-        Command::Trace { .. }
-        | Command::Update { .. }
-        | Command::UpdateInfo
-        | Command::ApplyUpdate { .. }
-        | Command::InstallUpdate { .. } => {
+        Command::Trace { .. } | Command::UpdateInfo => {
             unreachable!("update commands exit before identity and input initialization")
         }
         Command::PreviewArrangement => unreachable!("preview runs before identity initialization"),

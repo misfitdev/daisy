@@ -12,7 +12,7 @@ import { href, releaseAsset, repo, version } from "../config";
       <h1>Download Daisy</h1>
       <p>Version {version}. Signed with Developer ID and notarized by Apple.</p>
     </header>
-    <p>Updating to 0.6.0? Update every member of your group. Earlier versions cannot connect to 0.6.0; your paired identities and trust settings are retained.</p>
+    <p>Updating from 0.9 or earlier? Install the latest DMG or upgrade with Homebrew once to enable native updates. Your paired identities and trust settings are retained.</p>
     <div class="download-panel">
       <div class="verify">
         <GetDaisy />
@@ -24,7 +24,7 @@ import { href, releaseAsset, repo, version } from "../config";
           <li><div><h3>Drag Daisy to Applications</h3><p>Then open it. Daisy appears in the menu bar.</p></div></li>
           <li><div><h3>Follow Daisy's setup</h3><p>Allow Accessibility and Input Monitoring, then pair. <a href={href("/docs/getting-started/")}>Getting started</a> walks through it.</p></div></li>
         </ol>
-        <p>Already using Daisy? Follow the <a href={href("/docs/user-guide/#update-daisy")}>update instructions</a> for verified release installation, DMG replacement, or Homebrew upgrades. Verified updates retain the previous copy until startup succeeds.</p>
+        <p>Already using Daisy? Follow the <a href={href("/docs/user-guide/#update-daisy")}>update instructions</a> for the native update panel, DMG replacement, or Homebrew upgrades.</p>
         <h2 class="section-sub">Homebrew</h2>
         <p>Each release includes a Homebrew cask for the same signed and notarized app. <a href={href("/docs/user-guide/#homebrew")}>Install and upgrade</a> with <code>brew install --cask misfitdev/tap/daisy</code>. Accessibility and Input Monitoring still need approval in System Settings.</p>
       </div>

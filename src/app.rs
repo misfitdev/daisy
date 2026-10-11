@@ -107,6 +107,8 @@ struct AppDelegateIvars {
     expiry_poll_ticks: Cell<u16>,
     /// The last successful update check, and whether one is running or the
     /// latest failed.
+    updater: OnceCell<Option<crate::macos::update::Updater>>,
+    update_home: RefCell<PathBuf>,
     update_last: RefCell<Option<crate::update::LastCheck>>,
     update_checking: Cell<bool>,
     update_failed: Cell<bool>,
@@ -167,7 +169,17 @@ define_class!(
                 )
             };
             self.ivars().timer.set(timer).ok();
-            let _ = self.ivars().controller.send(Command::Startup(crate::install::update::StartupState::UiReady));
+        if !self.ivars().preview.get() {
+            let home = self.ivars().update_home.borrow();
+            *self.ivars().settings.borrow_mut() = controller::load_settings(&home).unwrap_or_default();
+            *self.ivars().update_last.borrow_mut() = crate::update::load_last_check(&home);
+            match crate::macos::update::Updater::new(self.mtm()) {
+                Ok(updater) => { let _ = self.ivars().updater.set(updater); }
+                Err(error) => tracing::error!(error = ?error, "updates could not be initialized"),
+            }
+            self.configure_updater();
+        }
+
         }
 
         #[unsafe(method(applicationWillTerminate:))]
@@ -200,7 +212,8 @@ define_class!(
                     }
                 }
             }
-            self.tick_pairing();
+            self.poll_updates();
+        self.tick_pairing();
             let setup_open = self.ivars().walkthrough.get().is_some_and(|views| views.window.isVisible());
             if setup_open && self.ivars().permission_poll_ticks.get().is_multiple_of(5) {
                 self.refresh_setup();
@@ -407,6 +420,7 @@ define_class!(
         };
         self.ivars().settings.borrow_mut().update_policy = policy;
         let _ = self.ivars().controller.send(Command::SetUpdatePolicy(policy));
+        self.configure_updater();
         self.refresh_update_policy();
     }
 
@@ -415,7 +429,17 @@ define_class!(
         self.ivars().update_checking.set(true);
         self.ivars().checking_ticks.set(0);
         self.refresh_update_status();
-        let _ = self.ivars().controller.send(Command::CheckUpdatesNow);
+        if let Some(Some(updater)) = self.ivars().updater.get() {
+            if let Err(error) = updater.check() {
+                self.ivars().update_checking.set(false);
+                self.configure_updater();
+                self.show_alert("Update check failed", &error.to_string(), NSAlertStyle::Warning);
+            }
+        } else {
+            self.ivars().update_checking.set(false);
+            self.show_alert("Updates unavailable", "Reinstall the latest release using Homebrew or its disk image, then reopen Daisy.", NSAlertStyle::Warning);
+        }
+        self.refresh_update_status();
     }
 
     #[unsafe(method(toggleCheckUpdates:))]
@@ -426,6 +450,7 @@ define_class!(
             settings.check_updates
         };
         let _ = self.ivars().controller.send(Command::SetCheckUpdates(on));
+        self.configure_updater();
         self.refresh_update_policy();
     }
 
@@ -637,6 +662,8 @@ impl AppDelegate {
             setup_asked: Cell::new(false),
             permission_poll_ticks: Cell::new(0),
             expiry_poll_ticks: Cell::new(0),
+            updater: OnceCell::new(),
+            update_home: RefCell::new(PathBuf::new()),
             update_last: RefCell::new(None),
             update_checking: Cell::new(false),
             update_failed: Cell::new(false),
@@ -883,6 +910,8 @@ impl AppDelegate {
                 self.ivars().me.set(Some(me));
                 self.ivars().always_allowed.set(always_discoverable_allowed);
                 *self.ivars().settings.borrow_mut() = settings.clone();
+                self.configure_updater();
+
                 self.refresh_share_clipboard();
                 self.refresh_update_policy();
                 self.refresh_always_discoverable();
@@ -899,12 +928,6 @@ impl AppDelegate {
                 }
                 if settings.sharing && self.setup_step() == Step::Done {
                     self.start();
-                }
-                if !settings.sharing {
-                    let _ = self
-                        .ivars()
-                        .controller
-                        .send(Command::Startup(crate::install::update::StartupState::IdleReady));
                 }
             }
             Event::Status(status) => self.apply_status(status),
@@ -954,15 +977,6 @@ impl AppDelegate {
                     panel.show(panel::State::Mismatch, false);
                 }
             }
-            Event::UpdateCheck { checking, failed, last } => {
-                if checking && !self.ivars().update_checking.get() {
-                    self.ivars().checking_ticks.set(0);
-                }
-                self.ivars().update_checking.set(checking);
-                self.ivars().update_failed.set(failed);
-                *self.ivars().update_last.borrow_mut() = last;
-                self.refresh_update_status();
-            }
             Event::Notice { title, detail } => {
                 self.show_alert(&title, &detail, NSAlertStyle::Informational);
             }
@@ -970,16 +984,6 @@ impl AppDelegate {
     }
 
     fn apply_status(&self, status: Status) {
-        let milestone = match &status {
-            Status::Waiting { .. } | Status::Connected { .. } => {
-                Some(crate::install::update::StartupState::SharingReady)
-            }
-            Status::Problem { .. } => Some(crate::install::update::StartupState::Failed),
-            _ => None,
-        };
-        if let Some(milestone) = milestone {
-            let _ = self.ivars().controller.send(Command::Startup(milestone));
-        }
         let problem = matches!(status, Status::Problem { .. });
         match &status {
             Status::Connected { peers } => self
@@ -1295,6 +1299,60 @@ impl AppDelegate {
         }
     }
 
+    fn configure_updater(&self) {
+        if let Some(Some(updater)) = self.ivars().updater.get() {
+            let settings = self.ivars().settings.borrow();
+            if let Err(error) = updater.configure(settings.update_policy, settings.check_updates) {
+                tracing::error!(error = ?error, "update preferences could not be applied");
+            }
+        }
+    }
+
+    fn poll_updates(&self) {
+        let Some(Some(updater)) = self.ivars().updater.get() else {
+            return;
+        };
+        for event in updater.events() {
+            self.handle_update_event(event);
+        }
+    }
+
+    fn handle_update_event(&self, event: sparkle_updater::UpdateEvent) {
+        use sparkle_updater::UpdateEvent;
+
+        tracing::info!(event = event.name(), "update framework event");
+        let checked = match &event {
+            UpdateEvent::DidFindValidUpdate(info) => Some(Some(info.version.clone())),
+            UpdateEvent::DidNotFindUpdate(_) => Some(None),
+            UpdateEvent::DidAbortWithError(error) if error.no_update.is_some() => Some(None),
+            _ => None,
+        };
+        if let Some(available) = checked {
+            let last = crate::update::LastCheck {
+                at: crate::trust::now(),
+                available,
+            };
+            if let Err(error) = crate::update::save_last_check(&self.ivars().update_home.borrow(), &last) {
+                tracing::warn!(error = ?error, "update check time could not be saved");
+            }
+            *self.ivars().update_last.borrow_mut() = Some(last);
+            self.ivars().update_failed.set(false);
+        }
+        match event {
+            UpdateEvent::DidFinishUpdateCycle(_) => {
+                self.ivars().update_checking.set(false);
+                self.configure_updater();
+            }
+            UpdateEvent::DidAbortWithError(error) if error.no_update.is_none() => {
+                self.ivars().update_checking.set(false);
+                self.ivars().update_failed.set(true);
+                tracing::error!(message = error.message, reason = ?error.failure_reason, recovery = ?error.recovery_suggestion, underlying = ?error.underlying, "update failed");
+            }
+            _ => {}
+        }
+        self.refresh_update_status();
+    }
+
     fn refresh_update_status(&self) {
         let Some(views) = self.ivars().advanced.get() else {
             return;
@@ -1428,22 +1486,23 @@ impl AppDelegate {
 }
 
 pub fn run(home: PathBuf, name: String) -> Result<()> {
-    let controller = controller::spawn(home, name.clone())?;
-    run_controller(controller, name, false)
+    let controller = controller::spawn(home.clone(), name.clone())?;
+    run_controller(controller, name, false, home)
 }
 
 pub fn run_preview(home: PathBuf, name: String) -> Result<()> {
-    let controller = controller::spawn_arrangement_preview(home)?;
-    run_controller(controller, name, true)
+    let controller = controller::spawn_arrangement_preview(home.clone())?;
+    run_controller(controller, name, true, home)
 }
 
-fn run_controller(controller: Handle, name: String, preview: bool) -> Result<()> {
+fn run_controller(controller: Handle, name: String, preview: bool, home: PathBuf) -> Result<()> {
     let _focus = crate::macos::diagnostics::FocusObserver::observe();
     let mtm = MainThreadMarker::new().context("Daisy's interface must start on the main thread")?;
     crate::macos::file_pasteboard::enable(mtm);
     let app = NSApplication::sharedApplication(mtm);
     let delegate = AppDelegate::new(mtm, controller);
     delegate.ivars().preview.set(preview);
+    *delegate.ivars().update_home.borrow_mut() = home;
     *delegate.ivars().local_name.borrow_mut() = name;
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

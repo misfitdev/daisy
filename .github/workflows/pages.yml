@@ -58,6 +58,11 @@ jobs:
             gh release view --repo "$GITHUB_REPOSITORY" --json tagName,assets,isDraft,isPrerelease > "$metadata"
           fi
           version="$(node scripts/release-version.mjs "$metadata" "$RELEASE_TAG")"
+          if jq -e '.assets[] | select(.name == "appcast.xml")' "$metadata" > /dev/null; then
+            tag="$(jq -r '.tagName' "$metadata")"
+            mkdir -p public/updates
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern appcast.xml --dir public/updates --clobber
+          fi
           echo "DAISY_VERSION=$version" >> "$GITHUB_ENV"
       - name: Test and build site
         working-directory: site

@@ -182,3 +182,9 @@ Report security problems privately, never in a public issue; see [SECURITY.md](S
 ## License
 
 By contributing, you agree that your contributions are licensed under the same terms as the project, MIT or Apache-2.0 at the user's option, without additional terms.
+
+The application links a pinned native updater framework. Run `just sparkle`
+before invoking Cargo directly; build, test, lint and bundle recipes do this
+preparation automatically. `just clean` removes all generated native build
+outputs, including the development application and framework, and website
+build output. It leaves source, application data and site dependencies intact.

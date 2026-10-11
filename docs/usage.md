@@ -120,44 +120,39 @@ From the command line, `listen --no-discovery` disables advertising; connections
 
 ## Update Daisy
 
-To download and install the latest compatible stable release, run the command
-from the installed app:
+When upgrading from Daisy 0.9 or earlier, first use the [Homebrew upgrade](#homebrew)
+or install the latest DMG in Applications. Those releases cannot extract the
+framework symlinks in the new update archive. This is a one-time migration.
 
-```bash
-/Applications/Daisy.app/Contents/MacOS/daisy update
-```
+Open **Advanced… → Updates** and click **Check Now**. The native update panel
+shows the available release, download progress, and installation errors. Daisy
+stops sharing before it exits for an update. Device identity, paired trust,
+settings and screen arrangement stay in the existing data folder.
 
-Daisy verifies the release and its compatibility before stopping the running
-copy. It then restarts with your device identity, paired trust, settings and
-screen arrangement retained. If startup fails, it restores the previous copy.
-The installed app folder must be writable by your account. Under **Updates** in Advanced settings, **Check for updates automatically** is on by default and checks every six hours. While it is on, choose what happens when a release is found: **Ask before installing**,
-**Auto-install routine updates**, which skips releases that could break compatibility with peers, or **Auto-install every update**. Turn it off and Daisy checks only when you click **Check Now**, and installs nothing on its own. While a check runs, the line under the menu reads **Checking**; afterwards it shows what Daisy found and how long ago it last checked successfully, such as "Checked 5 minutes ago". Daisy remembers that time across restarts. The installer
-checks signed compatibility metadata against this system and every connected
-peer before replacing Daisy. Offline peers do not block an update and may need
-to update Daisy before reconnecting. If an incompatible peer disconnects,
-Daisy retries the compatibility check against the remaining group. If an older installed build
-reports `unrecognized subcommand`, use the DMG or Homebrew steps below.
+**Check for updates automatically** is on by default and checks every six
+hours. Choose what happens when a release is found:
 
-Use `update --version 0.7.0` to request a specific newer stable release. Daisy verifies the release and checks that it is compatible with this system and every currently connected peer before installation. Prereleases, older versions, and releases without usable verification metadata are refused.
+- **Ask before installing** announces updates and lets you choose when to install.
+- **Auto-install routine updates** accepts releases in the same major version
+  that retain every network protocol supported by this installation.
+- **Auto-install every update** also accepts releases that may require updating
+  other group members before they can reconnect.
 
-If the command refuses a release, quit Daisy, install the
-[latest release](https://github.com/misfitdev/daisy/releases/latest) from its DMG
-in Applications and reopen it. If you installed with Homebrew, use the
-[Homebrew upgrade steps](#homebrew).
+Turn automatic checks off to check only with **Check Now**. The status line
+shows the result and how long ago Daisy last checked successfully; that time
+survives restarts. Automatic downloads are also disabled when automatic checks
+are off. An update already downloaded and accepted can finish when Daisy quits.
 
-Different releases can connect when compatible. Daisy checks compatibility automatically. If it reports a compatibility issue,
-update the system it identifies. See the
-[protocol compatibility rules](protocol.md#handshake).
+Update feeds and downloaded archives have Ed25519 signatures. The native
+updater verifies the feed and refuses tampered updates before installation.
+Installation and relaunch use its helpers. If an
+update fails, its panel shows the error; you can also quit Daisy and install the
+[latest release](https://github.com/misfitdev/daisy/releases/latest) from its DMG,
+or use the [Homebrew upgrade steps](#homebrew).
 
-### Install a staged update
-
-To install a newer signed release without copying over the running app, mount its DMG and run:
-
-```bash
-/Applications/Daisy.app/Contents/MacOS/daisy install-update /Volumes/Daisy/Daisy.app
-```
-
-Daisy stages and verifies the replacement while the current copy keeps running. It then stops the current process, checks that the network listener has closed, exchanges the app bundles, and starts the replacement. Sharing resumes with the same device identity, paired peers, settings, and screen arrangement. The previous copy stays available until startup succeeds. If startup fails, Daisy stops the replacement and restores the previous copy. The command accepts only a newer notarized release from the same publisher that Daisy can use with this installation. This command applies a staged update; automatic update behavior is controlled separately in Advanced settings.
+Different releases can connect when they share a network protocol. See the
+[protocol compatibility rules](protocol.md#handshake). The older command-line
+`update` and `install-update` commands are replaced by the update panel.
 
 ## Homebrew
 

@@ -1,17 +1,27 @@
 default:
     @just --list
 
+# Fetch the pinned native update framework
+sparkle:
+    python3 tools/sparkle.py fetch
+
 # Build the command-line tool
-build:
+build: sparkle
     cargo build
 
+# Remove generated builds, including Daisy.app and website output
+clean:
+    cargo clean --target-dir target
+    rm -rf site/dist site/.astro
+
 # Run the test suite
-test:
+test: sparkle
     cargo test
     python3 tools/test_bundle_signing.py
+    python3 tools/test_sparkle_appcast.py
 
 # Lint and check formatting
-lint:
+lint: sparkle
     # separate target dir: clippy's rustc flags differ from plain build/test,
     # so sharing target/debug invalidates its incremental cache every run
     cargo clippy --target-dir target/clippy --all-targets -- -D warnings
@@ -46,7 +56,7 @@ sign_identity := '''${DAISY_SIGN_IDENTITY:-$([ -z "${DAISY_PROVISIONING_PROFILE:
 # Build Daisy.app and sign it with DAISY_SIGN_IDENTITY, or ad hoc ("-", as CI
 # does) when DAISY_PROVISIONING_PROFILE is unset. Ad hoc builds cannot create
 # a persistent device identity.
-bundle:
+bundle: sparkle
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --release
@@ -76,11 +86,17 @@ bundle:
         sips -z "$pixels" "$pixels" "$icon_work/Daisy-1024.png" --out "$icon_work/Daisy.iconset/$name" >/dev/null
     done
     iconutil -c icns "$icon_work/Daisy.iconset" -o "{{app}}/Contents/Resources/Daisy.icns"
+    python3 tools/sparkle.py bundle --app "{{app}}"
+    python3 tools/sparkle.py sign --app "{{app}}" --identity "$identity"
+
     # notarization requires a secure timestamp on distributed builds
     timestamp=""
     [ "$identity" = "-" ] || timestamp="--timestamp"
     # hardened runtime now, so notarizing later changes nothing at run time
     sign_args=(--force --options runtime)
+    if [ "$identity" = "-" ]; then
+        sign_args+=(--entitlements macos/dev-entitlements.plist)
+    fi
     if [ "$identity" != "-" ]; then
         if [ -z "${DAISY_PROVISIONING_PROFILE:-}" ]; then
             echo "set DAISY_PROVISIONING_PROFILE to a macOS profile authorizing this signing certificate and {{bundle_id}}" >&2
@@ -90,7 +106,7 @@ bundle:
         sign_args+=(--entitlements "$icon_work/entitlements.plist")
     fi
     codesign "${sign_args[@]}" ${timestamp:+"$timestamp"} --sign "$identity" --identifier "{{bundle_id}}" "{{app}}"
-    codesign --verify --strict "{{app}}"
+    codesign --verify --deep --strict "{{app}}"
     echo "signed {{app}} with $identity"
 
 # Draw the Daisy window with sample systems for the website
@@ -181,7 +197,7 @@ package: bundle
     dmg="{{dist}}/Daisy-$version-macos-arm64.dmg"
     identity="{{sign_identity}}"
     mkdir -p "{{dist}}"
-    rm -f "{{dist}}"/Daisy-*
+    rm -f "{{dist}}"/Daisy-* "{{dist}}"/appcast.xml
     notarize() {
         result="$(xcrun notarytool submit "$1" --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" \
             --issuer "$NOTARY_ISSUER_ID" --wait --output-format json)"
@@ -222,6 +238,9 @@ package: bundle
         (cd "{{dist}}" && shasum -a 256 "$(basename "$file")" > "$(basename "$file").sha256")
     done
     cargo run --release --quiet --example update_manifest -- "$zip" > "{{dist}}/Daisy-$version-update.toml"
+    if [ "$identity" != "-" ]; then
+        python3 tools/sparkle_appcast.py "$zip" "{{dist}}/Daisy-$version-update.toml" "{{dist}}/appcast.xml"
+    fi
     ls -l "{{dist}}"
 
 # Release notes for the current version, from conventional commits
