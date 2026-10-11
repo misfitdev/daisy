@@ -19,6 +19,7 @@ test: sparkle
     cargo test
     python3 tools/test_bundle_signing.py
     python3 tools/test_sparkle_appcast.py
+    python3 tools/test_sparkle_native_checks.py
 
 # Lint and check formatting
 lint: sparkle

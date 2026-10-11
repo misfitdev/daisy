@@ -20,6 +20,7 @@ import sparkle
 import sparkle_appcast as feed
 
 ROOT = Path(__file__).resolve().parents[1]
+from sparkle_fixtures import INSTALLED_VERSION, UPDATE_VERSION, SUPPORTED_PROTOCOLS, REPLACEMENT_STARTED, ROUTINE_CHANNEL
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -39,6 +40,17 @@ def fixture_key(work):
     return key, base64.b64encode(public).decode()
 
 
+def verify_result(case, installed, text):
+    version = plistlib.loads((installed/'Contents/Info.plist').read_bytes())['CFBundleVersion']
+    if case == 'good':
+        assert version == UPDATE_VERSION and REPLACEMENT_STARTED in text, 'native installation and reopen did not complete'
+        subprocess.run(['codesign','--verify','--deep','--strict',str(installed)],check=True)
+    elif case == 'manual':
+        assert version == INSTALLED_VERSION and 'did-find-valid-update' in text, text
+    else:
+        assert version == INSTALLED_VERSION and 'did-abort-with-error' in text, 'update was not rejected'
+
+
 def run_case(case, identity):
     with tempfile.TemporaryDirectory(prefix='daisy-native-update-') as directory:
         work = Path(directory)
@@ -50,7 +62,7 @@ def run_case(case, identity):
         url = f'http://127.0.0.1:{server.server_port}'
         installed = work / 'installed/Daisy.app'
         candidate = work / 'candidate/Daisy.app'
-        for app, version in [(installed, '0.9.9'), (candidate, '0.10.0')]:
+        for app, version in [(installed, INSTALLED_VERSION), (candidate, UPDATE_VERSION)]:
             (app / 'Contents/MacOS').mkdir(parents=True)
             shutil.copy2(ROOT / 'target/debug/examples/sparkle_smoke', app / 'Contents/MacOS/sparkle-smoke')
             info = dict(CFBundleExecutable='sparkle-smoke', CFBundleIdentifier=identifier, CFBundleName='Daisy Update Test',
@@ -59,7 +71,8 @@ def run_case(case, identity):
                         SURequireSignedFeed=True, SUVerifyUpdateBeforeExtraction=True,
                         SUEnableAutomaticChecks=True, SUAutomaticallyUpdate=True,
                         NSAppTransportSecurity=dict(NSAllowsArbitraryLoads=True), DaisySmokeLog=str(log),
-                        DaisySmokeChannel="major-0-protocols-6-7" if case == "incompatible" else "stable",
+                        DaisySmokeChannel=ROUTINE_CHANNEL if case == "incompatible" else "stable",
+                        DaisySmokeReplacement=app == candidate,
                         DaisySmokeManual=case == 'manual')
             (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
             framework = app/'Contents/Frameworks/Sparkle.framework'
@@ -73,12 +86,12 @@ def run_case(case, identity):
                 command += ['--timestamp']
             subprocess.run(command+[str(app)], check=True)
             subprocess.run(['codesign','--verify','--deep','--strict',str(app)],check=True)
-        archive = work/'Daisy-0.10.0-macos-arm64.zip'
+        archive = work/f'Daisy-{UPDATE_VERSION}-macos-arm64.zip'
         subprocess.run(['ditto','-c','-k','--keepParent',str(candidate),str(archive)],check=True)
         signature = subprocess.check_output([str(feed.SIGNER),'--ed-key-file',str(key),'-p',str(archive)],text=True).strip()
         xml = ET.fromstring('<rss version="2.0"><channel><title>Daisy Updates</title></channel></rss>')
         incompatible = case in ('incompatible', 'manual')
-        feed.add_release(xml, dict(version='0.10.0',protocol=8 if incompatible else 7,supported_protocols=[7,8] if incompatible else [6,7]), archive.stat().st_size,signature)
+        feed.add_release(xml, dict(version=UPDATE_VERSION,protocol=8 if incompatible else max(SUPPORTED_PROTOCOLS),supported_protocols=[7,8] if incompatible else SUPPORTED_PROTOCOLS), archive.stat().st_size,signature)
         for enclosure in xml.findall('channel/item/enclosure'):
             enclosure.set('url',url+'/'+archive.name)
         cast = work/'appcast.xml'
@@ -96,22 +109,15 @@ def run_case(case, identity):
             while time.monotonic()<deadline:
                 text = log.read_text() if log.exists() else ''
                 current = plistlib.loads((installed/'Contents/Info.plist').read_bytes())['CFBundleVersion']
-                if case == 'good' and current == '0.10.0' and not reopened:
+                if case == 'good' and current == UPDATE_VERSION and not reopened:
                     subprocess.run(['open','-n','-g',str(installed)],check=True)
                     reopened = True
-                if 'started 0.10.0' in text or 'did-abort-with-error' in text or 'timeout' in text or (case == 'manual' and 'did-find-valid-update' in text):
+                if REPLACEMENT_STARTED in text or 'did-abort-with-error' in text or 'timeout' in text or (case == 'manual' and 'did-find-valid-update' in text):
                     break
                 time.sleep(0.2)
             text = log.read_text() if log.exists() else ''
             print(case+':\n'+text,flush=True)
-            version = plistlib.loads((installed/'Contents/Info.plist').read_bytes())['CFBundleVersion']
-            if case == 'good':
-                assert version == '0.10.0' and 'started 0.10.0' in text, 'native install/relaunch did not complete'
-                subprocess.run(['codesign','--verify','--deep','--strict',str(installed)],check=True)
-            elif case == 'manual':
-                assert current == '0.9.9' and 'did-find-valid-update' in text, text
-            else:
-                assert version == '0.9.9' and 'did-abort-with-error' in text, 'tampered update was not rejected'
+            verify_result(case, installed, text)
         finally:
             # Terminate only processes identified by this fixture's private log.
             if log.exists():

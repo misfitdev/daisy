@@ -25,7 +25,13 @@ fn main() -> Result<()> {
         writeln!(file, "{message}").unwrap();
     };
     write(&format!("started {version} pid={}", std::process::id()));
-    if version == "0.10.0" {
+    if info
+        .as_dictionary()
+        .unwrap()
+        .get("DaisySmokeReplacement")
+        .and_then(plist::Value::as_boolean)
+        == Some(true)
+    {
         return Ok(());
     }
     let mtm = MainThreadMarker::new().context("requires the main thread")?;

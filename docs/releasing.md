@@ -10,7 +10,7 @@ Release CI reads the profile from the `DEVELOPER_ID_PROFILE_BASE64` repository s
 
 ## One-time setup
 
-The workflow needs seven repository secrets (or org-level secrets scoped to
+The workflow needs these repository secrets (or org-level secrets scoped to
 this repository):
 
 | Secret | What it contains |
@@ -41,6 +41,9 @@ gh secret set NOTARY_ISSUER_ID -R misfitdev/daisy
 gh secret set NOTARY_KEY -R misfitdev/daisy < AuthKey_XXXXXXXXXX.p8
 gh secret set HOMEBREW_TAP_TOKEN -R misfitdev/daisy
 ```
+
+Configure `SPARKLE_PRIVATE_KEY` using the export steps in
+[Update feed and framework](#update-feed-and-framework).
 
 Delete the local `.p12` and `.p8` after the secrets are stored.
 
