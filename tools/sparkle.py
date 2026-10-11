@@ -27,13 +27,22 @@ def fetch():
         archive.write_bytes(data)
     if hashlib.sha256(archive.read_bytes()).hexdigest() != SHA256:
         raise ValueError("cached native framework checksum mismatch")
-    if not (DEST / "Sparkle.framework").exists():
+    # Build from the verified archive: CI caches may retain only part of a tree.
+    with tempfile.TemporaryDirectory(dir=DEST) as staging:
+        unpacked = Path(staging)
         with tarfile.open(archive) as tar:
-            tar.extractall(DEST, filter="data")
-    info = plistlib.loads((DEST / "Sparkle.framework/Resources/Info.plist").read_bytes())
-    if info["CFBundleShortVersionString"] != VERSION:
-        raise ValueError("native framework version mismatch")
-    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(DEST / "Sparkle.framework")], check=True)
+            tar.extractall(unpacked, filter="data")
+        info = plistlib.loads((unpacked / "Sparkle.framework/Resources/Info.plist").read_bytes())
+        if info["CFBundleShortVersionString"] != VERSION:
+            raise ValueError("native framework version mismatch")
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(unpacked / "Sparkle.framework")], check=True)
+        for source in unpacked.iterdir():
+            destination = DEST / source.name
+            if destination.is_symlink() or destination.is_file():
+                destination.unlink()
+            elif destination.exists():
+                shutil.rmtree(destination)
+            source.rename(destination)
 
 
 def bundle(app):

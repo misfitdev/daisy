@@ -20,6 +20,7 @@ test: sparkle
     python3 tools/test_bundle_signing.py
     python3 tools/test_sparkle_appcast.py
     python3 tools/test_sparkle_native_checks.py
+    python3 tools/test_sparkle_fetch.py
 
 # Lint and check formatting
 lint: sparkle
