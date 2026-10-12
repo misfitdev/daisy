@@ -97,17 +97,30 @@ pub fn take_relaunch(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("reading update relaunch state"),
     };
+    let record: Relaunch = toml::from_str(&text).context("decoding update relaunch state")?;
     // Only the process that removes the handoff may use it.
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("consuming update relaunch state"),
     }
-    let record: Relaunch = toml::from_str(&text).context("decoding update relaunch state")?;
     Ok(
         (record.executable == executable && record.version == version && record.at <= now && now - record.at <= 300)
             .then_some(record.launch),
     )
+}
+
+pub fn startup_relaunch(explicit_home: bool, read: impl FnOnce() -> Result<Option<Launch>>) -> Result<Option<Launch>> {
+    match read() {
+        Ok(launch) => Ok(launch),
+        Err(error) if explicit_home => {
+            tracing::warn!(error = ?error, "update relaunch state could not be restored; using the explicit data directory");
+            Ok(None)
+        }
+        Err(error) => Err(error).context(
+            "Update relaunch state could not be restored. Start Daisy with --home pointing to your data directory to recover the selected profile.",
+        ),
+    }
 }
 
 pub fn restore_launch(
@@ -261,6 +274,47 @@ pub fn channel(policy: Policy, version: &Version, protocols: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_profile_recovers_from_unreadable_or_corrupt_relaunch_state() {
+        for corrupt in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let executable = directory.path().join("daisy");
+            let handoff = directory.path().join("handoff");
+            if corrupt {
+                std::fs::create_dir(&handoff).unwrap();
+                std::fs::write(relaunch_path(&handoff, &executable), "not valid TOML").unwrap();
+            } else {
+                std::fs::write(&handoff, "not a directory").unwrap();
+            }
+            let restored = startup_relaunch(true, || take_relaunch(&handoff, &executable, "1.2.4", 101)).unwrap();
+            let home = directory.path().join("selected-profile");
+            assert_eq!(
+                restore_launch(Some(home.clone()), Some("Selected system".into()), restored),
+                (Some(home), Some("Selected system".into()))
+            );
+        }
+    }
+
+    #[test]
+    fn failed_relaunch_requires_explicit_profile_instead_of_defaulting() {
+        let error = startup_relaunch(false, || anyhow::bail!("handoff is unreadable")).unwrap_err();
+        assert!(error.to_string().contains("--home"));
+        assert!(format!("{error:#}").contains("handoff is unreadable"));
+        assert_eq!(startup_relaunch(false, || Ok(None)).unwrap(), None);
+    }
+
+    #[test]
+    fn corrupt_relaunch_keeps_recovery_required_on_subsequent_launches() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("daisy");
+        std::fs::write(relaunch_path(directory.path(), &executable), "not valid TOML").unwrap();
+        for _ in 0..2 {
+            let error =
+                startup_relaunch(false, || take_relaunch(directory.path(), &executable, "1.2.4", 101)).unwrap_err();
+            assert!(error.to_string().contains("--home"));
+        }
+    }
 
     #[test]
     fn failed_relaunch_save_retains_the_continuation_for_retry() {

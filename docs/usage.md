@@ -155,6 +155,11 @@ Different releases can connect when they share a network protocol. See the
 
 An update relaunch preserves a data directory selected with `--home` and a name
 selected with `--name`.
+
+If Daisy cannot restore the update relaunch state, start the bundled binary with
+`--home` pointing to your data directory. An explicit data directory lets startup
+continue without the handoff; use `--name` to select the device name as well.
+
 If Daisy reports **Update restart postponed**, resolve the storage problem shown
 in the message, then click **Check Now** to resume the pending installation.
 

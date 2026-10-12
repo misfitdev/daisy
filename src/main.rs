@@ -165,12 +165,14 @@ fn main() -> Result<()> {
 
     macos::restore_pointer();
     let relaunch = if cli.command.is_none() {
-        daisy::update::take_relaunch(
-            &default_home()?,
-            &std::env::current_exe()?,
-            env!("CARGO_PKG_VERSION"),
-            daisy::trust::now(),
-        )?
+        daisy::update::startup_relaunch(cli.home.is_some(), || {
+            daisy::update::take_relaunch(
+                &default_home()?,
+                &std::env::current_exe()?,
+                env!("CARGO_PKG_VERSION"),
+                daisy::trust::now(),
+            )
+        })?
     } else {
         None
     };
