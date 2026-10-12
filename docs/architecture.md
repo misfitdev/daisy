@@ -58,6 +58,13 @@ command-line selections. CLI commands do not consume it.
 If saving fails, Daisy retains Sparkle's continuation and offers a retry through
 **Check Now**. A completed or cancelled update cycle clears the pending continuation.
 
+Startup decodes the handoff before removing it. A corrupt handoff remains in
+place so another launch cannot silently select the default trust profile.
+Handoff lookup or decoding failures allow GUI startup when `--home` explicitly
+selects the data directory; otherwise startup reports recovery instructions.
+The update unit tests cover both recovery paths and repeated corrupt-handoff
+launches.
+
 ## Threads and tasks
 
 - **AppKit main thread**: owns every native menu, window and control. It never waits on the network or reads trust files from an event callback.
