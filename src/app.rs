@@ -173,7 +173,8 @@ define_class!(
             let home = self.ivars().update_home.borrow();
             *self.ivars().settings.borrow_mut() = controller::load_settings(&home).unwrap_or_default();
             *self.ivars().update_last.borrow_mut() = crate::update::load_last_check(&home);
-            match crate::macos::update::Updater::new(self.mtm()) {
+            let launch = crate::update::Launch { home: home.clone(), name: self.ivars().local_name.borrow().clone() };
+            match crate::macos::update::Updater::new(self.mtm(), launch) {
                 Ok(updater) => { let _ = self.ivars().updater.set(updater); }
                 Err(error) => tracing::error!(error = ?error, "updates could not be initialized"),
             }
@@ -1314,6 +1315,12 @@ impl AppDelegate {
         };
         for event in updater.events() {
             self.handle_update_event(event);
+        }
+        if let Some(error) = updater.take_relaunch_error() {
+            self.ivars().update_checking.set(false);
+            self.ivars().update_failed.set(true);
+            self.refresh_update_status();
+            self.show_alert("Update restart postponed", &format!("Daisy could not save the selected data directory and name: {error}\n\nMake sure the data folder is writable and there is free disk space, then click Check Now to retry."), NSAlertStyle::Warning);
         }
     }
 

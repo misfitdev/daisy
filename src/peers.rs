@@ -6,7 +6,7 @@
 //! forgot, and every change drops trust that has expired.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -269,9 +269,7 @@ impl PeerStore {
                 .map(|signed| postcard::to_stdvec(signed).map(|bytes| to_hex(&bytes)))
                 .collect::<std::result::Result<_, _>>()?,
         };
-        let temporary = self.revocations.with_extension("tmp");
-        fs::write(&temporary, toml::to_string(&file)?).with_context(|| format!("creating {}", temporary.display()))?;
-        fs::rename(&temporary, &self.revocations).with_context(|| format!("saving {}", self.revocations.display()))?;
+        crate::state_file::write(&self.revocations, toml::to_string(&file)?.as_bytes())?;
         Ok(())
     }
 
@@ -293,9 +291,8 @@ impl PeerStore {
     }
 
     pub fn save_confirmation(&self, confirmation: &crate::setup::Confirmation<PublicKey>) -> Result<()> {
-        let temporary = self.confirmation.with_extension("tmp");
-        fs::write(&temporary, toml::to_string(confirmation)?)?;
-        fs::rename(&temporary, &self.confirmation).context("saving the checked screen arrangement")
+        crate::state_file::write(&self.confirmation, toml::to_string(confirmation)?.as_bytes())
+            .context("saving the checked screen arrangement")
     }
 
     /// Keeps `arrangement` for the next time the group meets.
@@ -314,9 +311,7 @@ impl PeerStore {
                 .collect(),
         };
         let text = toml::to_string(&file)?;
-        let temporary = self.arrangement.with_extension("tmp");
-        fs::write(&temporary, text).with_context(|| format!("creating {}", temporary.display()))?;
-        fs::rename(&temporary, &self.arrangement).with_context(|| format!("saving {}", self.arrangement.display()))
+        crate::state_file::write(&self.arrangement, text.as_bytes())
     }
 
     pub fn list(&self, now: Timestamp) -> Result<Vec<Peer>> {
@@ -629,18 +624,7 @@ impl PeerStore {
         };
         let text = format!("{HEADER}{}", toml::to_string(&file)?);
 
-        // write then rename, so a crash never leaves a half-written file
-        let temporary = self.path.with_extension("tmp");
-        let mut out = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)
-            .with_context(|| format!("creating {}", temporary.display()))?;
-        out.write_all(text.as_bytes())?;
-        out.sync_all()?;
-        fs::rename(&temporary, &self.path).with_context(|| format!("saving {}", self.path.display()))?;
+        crate::state_file::write(&self.path, text.as_bytes())?;
         Ok(())
     }
 }

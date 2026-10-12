@@ -164,8 +164,19 @@ fn main() -> Result<()> {
         .init();
 
     macos::restore_pointer();
-    let home = cli.home.map_or_else(default_home, Ok)?;
-    let name = cli.name.unwrap_or_else(computer_name);
+    let relaunch = if cli.command.is_none() {
+        daisy::update::take_relaunch(
+            &default_home()?,
+            &std::env::current_exe()?,
+            env!("CARGO_PKG_VERSION"),
+            daisy::trust::now(),
+        )?
+    } else {
+        None
+    };
+    let (home, name) = daisy::update::restore_launch(cli.home, cli.name, relaunch);
+    let home = home.map_or_else(default_home, Ok)?;
+    let name = name.unwrap_or_else(computer_name);
 
     match cli.command {
         None => daisy::app::run(home, name),

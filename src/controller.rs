@@ -4,9 +4,9 @@
 //! communicates with it through typed channels, so no native callback waits on
 //! network or disk work.
 
-use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::{ErrorKind, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::fs::{self, DirBuilder};
+use std::io::ErrorKind;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -1048,24 +1048,14 @@ fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
         .create(home)
         .with_context(|| format!("creating {}", home.display()))?;
     let path = home.join(SETTINGS_FILE);
-    let temporary = path.with_extension("tmp");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)
-        .with_context(|| format!("creating {}", temporary.display()))?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(toml::to_string_pretty(settings)?.as_bytes())?;
-    file.sync_all()?;
-    fs::rename(&temporary, &path).with_context(|| format!("saving {}", path.display()))?;
+    crate::state_file::write(&path, toml::to_string_pretty(settings)?.as_bytes())?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn preview_refuses_real_data_and_aliases_without_writing() {

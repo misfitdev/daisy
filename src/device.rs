@@ -1,8 +1,7 @@
 //! Device signatures. Production signing is performed only by the Secure Enclave.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -116,16 +115,7 @@ impl Signer {
     }
 
     fn save_reference(reference: &[u8], path: &Path) -> Result<()> {
-        let temporary = path.with_extension("tmp");
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(reference)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path).context("saving device identity")
+        crate::state_file::write(path, reference).context("saving device identity")
     }
 
     pub fn public(&self) -> PublicKey {

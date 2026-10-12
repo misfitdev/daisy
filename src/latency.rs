@@ -52,9 +52,7 @@ struct StatsFile {
 pub fn save(home: &std::path::Path, links: &[LinkStats]) -> anyhow::Result<()> {
     let text = toml::to_string(&StatsFile { links: links.to_vec() })?;
     let path = home.join(STATS_FILE);
-    let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, text)?;
-    std::fs::rename(&temporary, &path)?;
+    crate::state_file::write(&path, text.as_bytes())?;
     Ok(())
 }
 
