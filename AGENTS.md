@@ -35,6 +35,9 @@ runs an ad hoc build on throwaway sample peers for interface work. See
 its own exit status counts. Never pipe it through a command that can hide a
 failure.
 
+Use explicit operating-system labels for runners in Daisy-owned workflow jobs.
+Runner upgrades must be reviewed as workflow changes.
+
 For dependency, trust-boundary or release-workflow changes, also run:
 
 ```bash

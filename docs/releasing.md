@@ -1,5 +1,9 @@
 # Releasing
 
+Daisy's build and test jobs use `macos-26`; Pages and release support jobs use
+`ubuntu-24.04`. Runner upgrades are explicit workflow changes. The SLSA generator
+selects its own runners through its pinned upstream reusable workflow.
+
 Build and publish an official release. For a local development build, start with [Contributing](../CONTRIBUTING.md); for installing an existing release, see the [Getting started](getting-started.md).
 
 For maintainers. Official release artifacts are built, signed, notarized and published by `.github/workflows/release.yml` from a version tag.
