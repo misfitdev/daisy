@@ -42,8 +42,12 @@ def fixture_key(work):
 
 def verify_result(case, installed, text):
     version = plistlib.loads((installed/'Contents/Info.plist').read_bytes())['CFBundleVersion']
-    if case == 'good':
+    if case in ('good', 'relaunch', 'relaunch-retry'):
         assert version == UPDATE_VERSION and REPLACEMENT_STARTED in text, 'native installation and reopen did not complete'
+        if case in ('relaunch', 'relaunch-retry'):
+            assert 'restored selected profile' in text, 'native relaunch lost the selected profile'
+        if case == 'relaunch-retry':
+            assert 'retried relaunch after save failure' in text, 'postponed update was not retried'
         subprocess.run(['codesign','--verify','--deep','--strict',str(installed)],check=True)
     elif case == 'manual':
         assert version == INSTALLED_VERSION and 'did-find-valid-update' in text, text
@@ -73,7 +77,12 @@ def run_case(case, identity):
                         NSAppTransportSecurity=dict(NSAllowsArbitraryLoads=True), DaisySmokeLog=str(log),
                         DaisySmokeChannel=ROUTINE_CHANNEL if case == "incompatible" else "stable",
                         DaisySmokeReplacement=app == candidate,
-                        DaisySmokeManual=case == 'manual')
+                DaisySmokeManual=case == 'manual',
+                DaisySmokeRelaunch=case in ('relaunch', 'relaunch-retry'),
+                DaisySmokeRetry=case == 'relaunch-retry',
+                DaisySmokeFixtureUser=str(work/'fixture-user'),
+                DaisySmokeHome=str(work/'selected-profile'),
+                DaisySmokeRelaunchRoot=str(work/'fixture-user/Library/Application Support/daisy'))
             (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
             framework = app/'Contents/Frameworks/Sparkle.framework'
             framework.parent.mkdir()
@@ -103,7 +112,15 @@ def run_case(case, identity):
             with archive.open('ab') as changed:
                 changed.write(b'altered after signing')
         try:
-            subprocess.run(['open','-n','-g',str(installed)],check=True)
+            if case == 'relaunch-retry':
+                (work/'fixture-user').write_text('block the handoff directory')
+            command = ['open','-n','-g']
+            if case in ('relaunch', 'relaunch-retry'):
+                command += ['--env', 'HOME='+str(work/'fixture-user')]
+            command += [str(installed)]
+            if case in ('relaunch', 'relaunch-retry'):
+                command += ['--args', '--home', str(work/'selected-profile')]
+            subprocess.run(command,check=True)
             reopened = False
             deadline = time.monotonic()+60
             while time.monotonic()<deadline:
@@ -112,7 +129,8 @@ def run_case(case, identity):
                 if case == 'good' and current == UPDATE_VERSION and not reopened:
                     subprocess.run(['open','-n','-g',str(installed)],check=True)
                     reopened = True
-                if REPLACEMENT_STARTED in text or 'did-abort-with-error' in text or 'timeout' in text or (case == 'manual' and 'did-find-valid-update' in text):
+                completed = 'restored selected profile' in text if case in ('relaunch', 'relaunch-retry') else REPLACEMENT_STARTED in text
+                if completed or 'did-abort-with-error' in text or 'timeout' in text or (case == 'manual' and 'did-find-valid-update' in text):
                     break
                 time.sleep(0.2)
             text = log.read_text() if log.exists() else ''
@@ -133,11 +151,11 @@ def run_case(case, identity):
 if __name__ == '__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--identity',default='-')
-    parser.add_argument('--case',choices=['good','bad-feed','bad-archive','incompatible','manual'])
+    parser.add_argument('--case',choices=['good','bad-feed','bad-archive','incompatible','manual','relaunch','relaunch-retry'])
     args=parser.parse_args()
     identity=args.identity
     if identity == 'developer-id':
         result=subprocess.check_output(['security','find-identity','-v','-p','codesigning'],text=True)
         identity=re.search(r'([0-9A-F]{40}) "Developer ID Application:',result)[1]
-    for case in ([args.case] if args.case else ['good','bad-feed','bad-archive','incompatible','manual']):
+    for case in ([args.case] if args.case else ['good','bad-feed','bad-archive','incompatible','manual','relaunch','relaunch-retry']):
         run_case(case,identity)

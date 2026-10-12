@@ -67,9 +67,9 @@ impl Cache {
         getrandom::fill(&mut random)?;
         let path = self.root.join(format!("offer-{:032x}", u128::from_ne_bytes(random)));
         private_directory(&path)?;
-        if let Err(error) = fs::write(path.join(".budget"), format!("{bytes} {entries}")) {
+        if let Err(error) = crate::state_file::write(&path.join(".budget"), format!("{bytes} {entries}").as_bytes()) {
             remove(&path);
-            return Err(error.into());
+            return Err(error);
         }
         let lease = match OpenOptions::new()
             .read(true)
@@ -116,7 +116,7 @@ impl Cache {
                 && used.1.checked_add(entries).is_some_and(|n| n <= CACHE_ENTRIES),
             "clipboard file cache is full; restart this system to clear cached files"
         );
-        fs::write(staging.path.join(".budget"), format!("{bytes} {entries}"))?;
+        crate::state_file::write(&staging.path.join(".budget"), format!("{bytes} {entries}").as_bytes())?;
         File::create(staging.path.join(".published"))?.sync_all()?;
         File::open(&staging.path)?.sync_all()?;
         staging.published = true;

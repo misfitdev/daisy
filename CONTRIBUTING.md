@@ -15,6 +15,12 @@ just              # list the tasks
 
 ## Build and run a local app
 
+The application links the pinned Sparkle framework. Run `just sparkle` before
+invoking Cargo directly; the build, test, lint and bundle recipes prepare it
+automatically. `just clean` removes generated native build outputs, including the
+development application and framework, and the website build output. It leaves
+source, application data and site dependencies intact.
+
 Running the app or CLI with a persistent device identity requires a signed `Daisy.app` with an embedded provisioning profile for `dev.misfit.daisy`. Set `DAISY_PROVISIONING_PROFILE` to the profile’s path. With the profile set, `just app` defaults to a Developer ID Application certificate; set `DAISY_SIGN_IDENTITY` to select another certificate authorized by the profile. See [release setup](docs/releasing.md#one-time-setup) for the profile requirements. Unlock this system before creating or rotating its device key.
 
 ```bash
@@ -31,6 +37,17 @@ To try the interface without permissions or pairing, run `just dev`. It starts a
 ## Check a change
 
 `just check` runs clippy with warnings as errors, `rustfmt --check` and the tests. It must pass before a change is committed, and CI runs the same gate on macOS 26.
+
+Persisted application state uses `state_file::write`, backed by
+`atomic-write-file`. Callers create parent directories and retain their
+read-modify-write locks. The writer tests cover private permissions, interrupted
+writes and overlapping replacements; keep lock files and cache leases on stable
+inodes. See [saved state](docs/architecture.md#saved-state).
+
+Changes to native update behavior also need the
+[isolated signed-bundle checks](docs/releasing.md#update-feed-and-framework),
+which exercise Sparkle installation and signature verification with disposable
+applications and keys.
 
 ## Security review
 
@@ -182,9 +199,3 @@ Report security problems privately, never in a public issue; see [SECURITY.md](S
 ## License
 
 By contributing, you agree that your contributions are licensed under the same terms as the project, MIT or Apache-2.0 at the user's option, without additional terms.
-
-The application links a pinned native updater framework. Run `just sparkle`
-before invoking Cargo directly; build, test, lint and bundle recipes do this
-preparation automatically. `just clean` removes all generated native build
-outputs, including the development application and framework, and website
-build output. It leaves source, application data and site dependencies intact.

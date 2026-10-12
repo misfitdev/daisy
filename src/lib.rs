@@ -36,6 +36,7 @@ pub mod session;
 pub mod setup;
 pub mod shake;
 pub mod share;
+mod state_file;
 pub mod swipe;
 pub mod trust;
 pub mod update;

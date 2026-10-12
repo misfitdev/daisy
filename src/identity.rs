@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
@@ -128,19 +127,7 @@ impl Identity {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        // write then rename, so a crash never leaves a truncated key behind
-        let temporary = path.with_extension("tmp");
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)
-            .with_context(|| format!("creating {}", temporary.display()))?;
-        file.write_all(&self.private)?;
-        file.write_all(self.public.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temporary, path).with_context(|| format!("saving {}", path.display()))?;
+        crate::state_file::write(path, &[self.private.as_slice(), self.public.as_bytes()].concat())?;
         Ok(())
     }
 
@@ -191,6 +178,7 @@ fn from_hex(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::sync::mpsc;
     use std::time::Duration;
 

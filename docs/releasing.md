@@ -237,5 +237,7 @@ python3 tools/test_sparkle_native.py --identity developer-id
 ```
 
 This checks automatic installation on quit, reopening the resulting bundle,
+native install-and-relaunch with the selected data directory and display name,
+retry after an injected relaunch-state write failure,
 code-signature validity, and rejection of modified feeds and archives. It does
 not replace the installed application or use the production update signing key.

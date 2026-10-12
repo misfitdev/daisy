@@ -50,6 +50,24 @@ protocol for routine automatic updates. Release feeds contain signed entries
 for each supported protocol subset. A routine channel therefore cannot select
 a release that drops compatibility with a protocol this build supports.
 
+Before a native update relaunch, Daisy saves the selected data directory and
+display name in a private, atomic handoff. The next GUI launch consumes it once,
+before opening identity or trust state. The handoff is bound to the executable
+path and replacement version, expires after five minutes, and yields to explicit
+command-line selections. CLI commands do not consume it.
+An explicit home retains the handoff name only when its absolute path matches
+the saved home; selecting another profile discards the handoff name. An explicit
+name always overrides the saved name.
+If saving fails, Daisy retains Sparkle's continuation and offers a retry through
+**Check Now**. A completed or cancelled update cycle clears the pending continuation.
+
+Startup decodes the handoff before removing it. A corrupt handoff remains in
+place so another launch cannot silently select the default trust profile.
+Handoff lookup or decoding failures allow GUI startup when `--home` explicitly
+selects the data directory; otherwise startup reports recovery instructions.
+The update unit tests cover both recovery paths and repeated corrupt-handoff
+launches.
+
 ## Threads and tasks
 
 - **AppKit main thread**: owns every native menu, window and control. It never waits on the network or reads trust files from an event callback.
@@ -109,6 +127,12 @@ The command-line `connect` command runs `service::connect` as a loop. Once a ses
 `trust-v5/peers.toml` is the trust authority. Every change locks it, rereads it and writes it atomically. An active session watches the paired key, so a change from the menu-bar app or another process revokes control promptly. The UI aborts its current task immediately when its **Forget** action is used; the file watcher remains the external-edit backstop.
 
 `--home` or `DAISY_HOME` points all of these somewhere else and can be used to run two identities on one system for testing.
+
+`state_file` replaces persisted state through `atomic-write-file`. Each write
+uses a unique temporary file with owner-only permissions, then commits the
+complete contents atomically. A write that fails before commit leaves the
+destination unchanged. Callers retain their read-modify-write locks; cache
+leases and lock files keep stable inodes.
 
 ## Ownership handoff
 

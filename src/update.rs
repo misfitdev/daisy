@@ -3,6 +3,144 @@ use anyhow::{Context, Result};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Launch {
+    pub home: PathBuf,
+    pub name: String,
+}
+
+pub struct PendingRelaunch<T> {
+    pending: Option<(String, T)>,
+}
+
+impl<T> Default for PendingRelaunch<T> {
+    fn default() -> Self {
+        Self { pending: None }
+    }
+}
+
+impl<T> PendingRelaunch<T> {
+    pub fn postpone(&mut self, version: String, continuation: T) {
+        self.pending = Some((version, continuation));
+    }
+
+    pub fn clear(&mut self) {
+        self.pending = None;
+    }
+
+    pub fn retry(&mut self, save: impl FnOnce(&str) -> Result<()>) -> Result<Option<T>> {
+        if let Some((version, _)) = &self.pending {
+            save(version)?;
+        }
+        Ok(self.pending.take().map(|(_, continuation)| continuation))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Relaunch {
+    executable: PathBuf,
+    version: String,
+    at: crate::trust::Timestamp,
+    launch: Launch,
+}
+
+fn relaunch_path(directory: &Path, executable: &Path) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    directory.join(format!(
+        "update-relaunch-{}.toml",
+        archive_sha256(executable.as_os_str().as_bytes())
+    ))
+}
+
+/// Sparkle opens the replacement bundle without the original command-line arguments.
+pub fn save_relaunch(
+    directory: &Path,
+    executable: &Path,
+    version: &str,
+    launch: &Launch,
+    at: crate::trust::Timestamp,
+) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .with_context(|| format!("preparing update relaunch state in {}", directory.display()))?;
+    let launch = Launch {
+        home: std::path::absolute(&launch.home)?,
+        name: launch.name.clone(),
+    };
+    let record = Relaunch {
+        executable: executable.to_owned(),
+        version: version.to_owned(),
+        at,
+        launch,
+    };
+    crate::state_file::write(
+        &relaunch_path(directory, executable),
+        toml::to_string(&record)?.as_bytes(),
+    )
+}
+
+/// Consume a short-lived handoff only for this executable and release.
+pub fn take_relaunch(
+    directory: &Path,
+    executable: &Path,
+    version: &str,
+    now: crate::trust::Timestamp,
+) -> Result<Option<Launch>> {
+    let path = relaunch_path(directory, executable);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("reading update relaunch state"),
+    };
+    let record: Relaunch = toml::from_str(&text).context("decoding update relaunch state")?;
+    // Only the process that removes the handoff may use it.
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("consuming update relaunch state"),
+    }
+    Ok(
+        (record.executable == executable && record.version == version && record.at <= now && now - record.at <= 300)
+            .then_some(record.launch),
+    )
+}
+
+pub fn startup_relaunch(explicit_home: bool, read: impl FnOnce() -> Result<Option<Launch>>) -> Result<Option<Launch>> {
+    match read() {
+        Ok(launch) => Ok(launch),
+        Err(error) if explicit_home => {
+            tracing::warn!(error = ?error, "update relaunch state could not be restored; using the explicit data directory");
+            Ok(None)
+        }
+        Err(error) => Err(error).context(
+            "Update relaunch state could not be restored. Start Daisy with --home pointing to your data directory to recover the selected profile.",
+        ),
+    }
+}
+
+pub fn restore_launch(
+    home: Option<PathBuf>,
+    name: Option<String>,
+    relaunch: Option<Launch>,
+) -> (Option<PathBuf>, Option<String>) {
+    match (home, relaunch) {
+        (Some(home), relaunch) => {
+            let name = name.or_else(|| {
+                relaunch
+                    .filter(|launch| std::path::absolute(&home).is_ok_and(|path| path == launch.home))
+                    .map(|launch| launch.name)
+            });
+            (Some(home), name)
+        }
+        (None, Some(launch)) => (Some(launch.home), name.or(Some(launch.name))),
+        (None, None) => (None, name),
+    }
+}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Policy {
@@ -85,20 +223,7 @@ pub fn load_last_check(home: &std::path::Path) -> Option<LastCheck> {
 }
 
 pub fn save_last_check(home: &std::path::Path, last: &LastCheck) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let path = home.join(LAST_CHECK_FILE);
-    let temporary = path.with_extension("tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)
-        .with_context(|| format!("creating {}", temporary.display()))?;
-    file.write_all(toml::to_string(last)?.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&temporary, &path).with_context(|| format!("saving {}", path.display()))
+    crate::state_file::write(&home.join(LAST_CHECK_FILE), toml::to_string(last)?.as_bytes())
 }
 
 /// The gray status line in the Updates panel. `ago` renders a past time
@@ -156,6 +281,151 @@ pub fn channel(policy: Policy, version: &Version, protocols: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_profile_recovers_from_unreadable_or_corrupt_relaunch_state() {
+        for corrupt in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let executable = directory.path().join("daisy");
+            let handoff = directory.path().join("handoff");
+            if corrupt {
+                std::fs::create_dir(&handoff).unwrap();
+                std::fs::write(relaunch_path(&handoff, &executable), "not valid TOML").unwrap();
+            } else {
+                std::fs::write(&handoff, "not a directory").unwrap();
+            }
+            let restored = startup_relaunch(true, || take_relaunch(&handoff, &executable, "1.2.4", 101)).unwrap();
+            let home = directory.path().join("selected-profile");
+            assert_eq!(
+                restore_launch(Some(home.clone()), Some("Selected system".into()), restored),
+                (Some(home), Some("Selected system".into()))
+            );
+        }
+    }
+
+    #[test]
+    fn failed_relaunch_requires_explicit_profile_instead_of_defaulting() {
+        let error = startup_relaunch(false, || anyhow::bail!("handoff is unreadable")).unwrap_err();
+        assert!(error.to_string().contains("--home"));
+        assert!(format!("{error:#}").contains("handoff is unreadable"));
+        assert_eq!(startup_relaunch(false, || Ok(None)).unwrap(), None);
+    }
+
+    #[test]
+    fn corrupt_relaunch_keeps_recovery_required_on_subsequent_launches() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("daisy");
+        std::fs::write(relaunch_path(directory.path(), &executable), "not valid TOML").unwrap();
+        for _ in 0..2 {
+            let error =
+                startup_relaunch(false, || take_relaunch(directory.path(), &executable, "1.2.4", 101)).unwrap_err();
+            assert!(error.to_string().contains("--home"));
+        }
+    }
+
+    #[test]
+    fn failed_relaunch_save_retains_the_continuation_for_retry() {
+        let mut pending = PendingRelaunch::default();
+        pending.postpone("1.2.4".into(), "continuation");
+        assert!(pending.retry(|_| anyhow::bail!("storage unavailable")).is_err());
+        assert_eq!(
+            pending
+                .retry(|version| {
+                    assert_eq!(version, "1.2.4");
+                    Ok(())
+                })
+                .unwrap(),
+            Some("continuation")
+        );
+        assert_eq!(pending.retry(|_| panic!("already resumed")).unwrap(), None);
+        pending.postpone("1.2.4".into(), "cancelled");
+        pending.clear();
+        assert_eq!(pending.retry(|_| panic!("cancelled cycle")).unwrap(), None);
+    }
+
+    #[test]
+    fn relaunch_restores_the_selected_profile_once_for_the_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("Daisy.app/Contents/MacOS/daisy");
+        let launch = Launch {
+            home: directory.path().join("selected-profile"),
+            name: "Selected system".into(),
+        };
+        save_relaunch(directory.path(), &executable, "1.2.4", &launch, 100).unwrap();
+        let restored = take_relaunch(directory.path(), &executable, "1.2.4", 101).unwrap();
+        assert_eq!(restored, Some(launch.clone()));
+        assert_eq!(
+            restore_launch(None, None, restored),
+            (Some(launch.home.clone()), Some(launch.name.clone()))
+        );
+        assert_eq!(
+            take_relaunch(directory.path(), &executable, "1.2.4", 102).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn relaunch_preserves_name_for_matching_explicit_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("selected-profile");
+        let launch = Launch {
+            home: home.clone(),
+            name: "Selected system".into(),
+        };
+        assert_eq!(
+            restore_launch(Some(home.clone()), None, Some(launch.clone())),
+            (Some(home.clone()), Some(launch.name.clone()))
+        );
+        assert_eq!(
+            restore_launch(Some(home.clone()), Some("Chosen name".into()), Some(launch)),
+            (Some(home), Some("Chosen name".into()))
+        );
+
+        let relative = PathBuf::from("selected-profile");
+        let launch = Launch {
+            home: std::path::absolute(&relative).unwrap(),
+            name: "Selected system".into(),
+        };
+        assert_eq!(
+            restore_launch(Some(relative.clone()), None, Some(launch.clone())),
+            (Some(relative), Some(launch.name))
+        );
+    }
+
+    #[test]
+    fn relaunch_does_not_override_explicit_arguments_or_cross_bundles_or_releases() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("Daisy.app/Contents/MacOS/daisy");
+        let launch = Launch {
+            home: directory.path().join("selected-profile"),
+            name: "Selected system".into(),
+        };
+        let explicit = directory.path().join("explicit-profile");
+        assert_eq!(
+            restore_launch(Some(explicit.clone()), None, Some(launch.clone())),
+            (Some(explicit), None)
+        );
+        assert_eq!(
+            restore_launch(None, Some("Chosen name".into()), Some(launch.clone())),
+            (Some(launch.home.clone()), Some("Chosen name".into()))
+        );
+        save_relaunch(directory.path(), &executable, "1.2.4", &launch, 100).unwrap();
+        assert_eq!(
+            take_relaunch(directory.path(), &directory.path().join("other"), "1.2.4", 101).unwrap(),
+            None
+        );
+        assert_eq!(
+            take_relaunch(directory.path(), &executable, "1.2.5", 101).unwrap(),
+            None
+        );
+        for now in [99, 401] {
+            save_relaunch(directory.path(), &executable, "1.2.4", &launch, 100).unwrap();
+            assert_eq!(
+                take_relaunch(directory.path(), &executable, "1.2.4", now).unwrap(),
+                None
+            );
+        }
+    }
     #[test]
     fn routine_channel_requires_all_supported_protocols() {
         assert_eq!(

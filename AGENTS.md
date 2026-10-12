@@ -61,7 +61,23 @@ After publishing a release, the release workflow dispatches Pages on the
 default branch with an explicit release tag. Do not restore deployment from
 the tag's reusable workflow context. See `docs/releasing.md`.
 
+Build, test, lint and bundle recipes prepare the pinned Sparkle framework through
+`just sparkle`. Run it before invoking Cargo directly. Framework acquisition
+verifies the archive checksum and framework code signature. `just check` includes
+the bootstrap and appcast tests; changes to native update behavior also need the
+isolated signed-bundle checks in `docs/releasing.md#update-feed-and-framework`.
+
 ## Architecture
+
+- `src/state_file.rs` is the shared writer for persisted application state. Use
+  its atomic replacement with private permissions; callers retain directory
+  creation and read-modify-write locking. Keep lock files and cache leases on
+  stable inodes rather than replacing them.
+- `src/macos/update.rs` integrates Sparkle on the AppKit main thread;
+  `src/update.rs` owns update policy and compatibility decisions. Keep framework
+  acquisition, signing and feed generation aligned with `docs/releasing.md`.
+  Release artifacts and the appcast are covered by SLSA provenance and GitHub
+  attestations; Sparkle verifies signed feeds and application updates for installs.
 
 - `src/protocol.rs` is the only wire-message definition.
   `docs/protocol.md` explains it; code wins if they disagree.

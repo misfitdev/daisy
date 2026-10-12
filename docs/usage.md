@@ -134,6 +134,10 @@ hours. Choose what happens when a release is found:
 - **Auto-install every update** also accepts releases that may require updating
   other group members before they can reconnect.
 
+**Check Now** checks for the latest release regardless of the automatic-update
+policy. That release may require updating other group members before they can
+reconnect. Subsequent automatic checks use your selected policy.
+
 Turn automatic checks off to check only with **Check Now**. The status line
 shows the result and how long ago Daisy last checked successfully; that time
 survives restarts. Automatic downloads are also disabled when automatic checks
@@ -148,6 +152,20 @@ or use the [Homebrew upgrade steps](#homebrew).
 
 Different releases can connect when they share a network protocol. See the
 [protocol compatibility rules](protocol.md#handshake).
+
+An update relaunch preserves a data directory selected with `--home` and a name
+selected with `--name`.
+
+An explicit `--home` or `DAISY_HOME` retains the saved name when its absolute path
+matches the saved data directory. Selecting a different directory uses the
+system's name unless `--name` is supplied. An explicit `--name` always wins.
+
+If Daisy cannot restore the update relaunch state, start the bundled binary with
+`--home` pointing to your data directory. An explicit data directory lets startup
+continue without the handoff; use `--name` to select the device name as well.
+
+If Daisy reports **Update restart postponed**, resolve the storage problem shown
+in the message, then click **Check Now** to resume the pending installation.
 
 ## Homebrew
 

@@ -1,5 +1,6 @@
 """Fetch the pinned native framework and prepare its signed application bundle."""
 import argparse
+import fcntl
 import hashlib
 from pathlib import Path
 import plistlib
@@ -17,6 +18,12 @@ DEST = ROOT / "target/sparkle"
 
 def fetch():
     DEST.mkdir(parents=True, exist_ok=True)
+    with (DEST / ".fetch.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _fetch_locked()
+
+
+def _fetch_locked():
     archive = DEST / f"Sparkle-{VERSION}.tar.xz"
     if not archive.exists():
         url = f"https://github.com/sparkle-project/Sparkle/releases/download/{VERSION}/{archive.name}"
