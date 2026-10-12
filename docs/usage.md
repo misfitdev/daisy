@@ -156,6 +156,10 @@ Different releases can connect when they share a network protocol. See the
 An update relaunch preserves a data directory selected with `--home` and a name
 selected with `--name`.
 
+An explicit `--home` or `DAISY_HOME` retains the saved name when its absolute path
+matches the saved data directory. Selecting a different directory uses the
+system's name unless `--name` is supplied. An explicit `--name` always wins.
+
 If Daisy cannot restore the update relaunch state, start the bundled binary with
 `--home` pointing to your data directory. An explicit data directory lets startup
 continue without the handoff; use `--name` to select the device name as well.

@@ -129,7 +129,14 @@ pub fn restore_launch(
     relaunch: Option<Launch>,
 ) -> (Option<PathBuf>, Option<String>) {
     match (home, relaunch) {
-        (Some(home), _) => (Some(home), name),
+        (Some(home), relaunch) => {
+            let name = name.or_else(|| {
+                relaunch
+                    .filter(|launch| std::path::absolute(&home).is_ok_and(|path| path == launch.home))
+                    .map(|launch| launch.name)
+            });
+            (Some(home), name)
+        }
         (None, Some(launch)) => (Some(launch.home), name.or(Some(launch.name))),
         (None, None) => (None, name),
     }
@@ -354,6 +361,34 @@ mod tests {
         assert_eq!(
             take_relaunch(directory.path(), &executable, "1.2.4", 102).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn relaunch_preserves_name_for_matching_explicit_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("selected-profile");
+        let launch = Launch {
+            home: home.clone(),
+            name: "Selected system".into(),
+        };
+        assert_eq!(
+            restore_launch(Some(home.clone()), None, Some(launch.clone())),
+            (Some(home.clone()), Some(launch.name.clone()))
+        );
+        assert_eq!(
+            restore_launch(Some(home.clone()), Some("Chosen name".into()), Some(launch)),
+            (Some(home), Some("Chosen name".into()))
+        );
+
+        let relative = PathBuf::from("selected-profile");
+        let launch = Launch {
+            home: std::path::absolute(&relative).unwrap(),
+            name: "Selected system".into(),
+        };
+        assert_eq!(
+            restore_launch(Some(relative.clone()), None, Some(launch.clone())),
+            (Some(relative), Some(launch.name))
         );
     }
 

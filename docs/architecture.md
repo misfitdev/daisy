@@ -55,6 +55,9 @@ display name in a private, atomic handoff. The next GUI launch consumes it once,
 before opening identity or trust state. The handoff is bound to the executable
 path and replacement version, expires after five minutes, and yields to explicit
 command-line selections. CLI commands do not consume it.
+An explicit home retains the handoff name only when its absolute path matches
+the saved home; selecting another profile discards the handoff name. An explicit
+name always overrides the saved name.
 If saving fails, Daisy retains Sparkle's continuation and offers a retry through
 **Check Now**. A completed or cancelled update cycle clears the pending continuation.
 
