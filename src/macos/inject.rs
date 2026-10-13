@@ -179,7 +179,10 @@ impl Injector {
         if let Some(gap) = self.motion.note(now) {
             tracing::debug!(gap_ms = gap.as_millis() as u64, to = ?to, "injected motion resumed");
         }
+        // asking WindowServer where the cursor is costs a round trip on every
+        // replayed move, so only while a trace can record the answer
         if let Some(expected) = self.expected
+            && crate::diagnostics::hub().enabled()
             && let Some(actual) = super::pointer_location()
             && crate::input::strayed(expected, actual, STRAY)
             && self.strays.allows(now)

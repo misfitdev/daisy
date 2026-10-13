@@ -30,7 +30,7 @@ While the peer has control, the local pointer should stay still. On macOS 27, `C
 
 Daisy therefore hides the pointer and warps it back to the crossing point whenever it drifts more than 1.5 points. Post-warp input delay is disabled. A background app may change the cursor only after setting the private `SetsCursorInBackground` WindowServer connection property.
 
-The developer trace records where the pointer is at every freeze, thaw and warp: the location macOS reported, the pin, and the warp target. While pinned, a drift of more than 32 points is recorded as the pin escaping, at most twice a second. On the system replaying input, each move compares the cursor's actual position with where the previous move left it; a difference of more than 8 points is recorded as the cursor straying, which means something other than Daisy moved it. Both sides record forwarded or replayed motion that resumes after a pause of 100 ms or more, with the length of the pause.
+The developer trace records where the pointer is whenever it is frozen, shown again or sent home: the location macOS reported, the pin, and where it was moved. Warps that hold the pinned pointer in place are counted, not recorded one by one; a drift of more than 32 points is recorded as the pin escaping, at most twice a second. On the system replaying input, while a trace is collecting, each move compares the cursor's actual position with where the previous move left it; a difference of more than 8 points is recorded as the cursor straying, which means something other than Daisy moved it. Both sides record forwarded or replayed motion that resumes after a pause of 100 ms or more, with the length of the pause.
 
 ## Clicks
 
