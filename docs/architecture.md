@@ -167,3 +167,11 @@ credit prevent trace streams from accumulating ahead of input. The collector lab
 remote records with the channel key and streams them to the CLI. Overflow drops
 diagnostics and increments explicit loss counters. The native application also
 observes foreground-application changes without changing focus.
+
+The trace is meant to explain a pointer jump after the fact. Besides control
+transitions, it records pointer positions at every freeze, thaw and warp, the
+pin escaping on the driving system, the cursor straying from replayed moves on
+the driven system, motion resuming after a stall on either side, input queued
+behind the sharing loop, and a peer message that took long to handle. `just
+trace` runs the collector in the background until `just trace-stop`;
+`just trace-summary` lists what a trace recorded.

@@ -293,6 +293,7 @@ where
     let mut waiting = waiting;
     waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
     let trace = crate::diagnostics::hub();
+    let mut pace = Pace::default();
     loop {
         control.diagnostics.drain();
         let collecting = trace.collecting();
@@ -360,7 +361,7 @@ where
             let was_owner = state.owner() == key;
             let generation = was_owner.then(|| state.interrupt(control.now()));
             drop(state);
-            tracing::debug!(peer = %key, was_owner, generation = ?generation, "peer link ended");
+            tracing::debug!(peer = %key, was_owner, generation = ?generation, crossed = ?crossed, driven_by = ?driven_by, "peer link ended");
             if was_owner {
                 for action in release.target.reclaim() {
                     release.injector.execute(&action);
@@ -512,6 +513,7 @@ where
                     }
                     return result;
                 };
+                pace.outgoing(input.len(), control.now());
                 log_transition("outgoing", me, None, &message, &control);
                 match message {
                     Message::ControlClaim { .. } => {
@@ -556,6 +558,8 @@ where
             }
             event = received.recv() => {
                 let Some((peer, message)) = event else { continue };
+                pace.incoming(received.len(), control.now());
+                let handling = Instant::now();
                 let Some(link) = links.get_mut(&peer) else { continue };
                 let quiet = link.last_heard.elapsed();
                 link.last_heard = Instant::now();
@@ -786,6 +790,7 @@ where
                     arrange(&placement, release.target, pointer);
                 }
                 publish(&control, &links, &group.reports);
+                pace.handled(handling.elapsed(), control.now());
             }
         Ok(()) = choices.changed() => {
             let chosen = choices.borrow_and_update().clone();
@@ -874,6 +879,52 @@ async fn receive_file_message(messages: &mut Option<FileMessages>) -> Option<Mes
     }
 }
 
+/// Records, for the developer trace, input piling up behind this loop or
+/// one message taking long enough to hold up the ones behind it. Either
+/// shows as the pointer pausing and then jumping to catch up.
+struct Pace {
+    outgoing: crate::latency::Throttle,
+    incoming: crate::latency::Throttle,
+    handling: crate::latency::Throttle,
+}
+
+impl Default for Pace {
+    fn default() -> Self {
+        let every = Duration::from_millis(500);
+        Self {
+            outgoing: crate::latency::Throttle::new(every),
+            incoming: crate::latency::Throttle::new(every),
+            handling: crate::latency::Throttle::new(every),
+        }
+    }
+}
+
+impl Pace {
+    /// Forwarded input still queued behind the one being sent.
+    fn outgoing(&mut self, queued: usize, now: Duration) {
+        if queued >= BACKLOG && self.outgoing.allows(now) {
+            tracing::debug!(queued, "local input backlog");
+        }
+    }
+
+    /// Peer messages still queued behind the one being handled.
+    fn incoming(&mut self, queued: usize, now: Duration) {
+        if queued >= BACKLOG && self.incoming.allows(now) {
+            tracing::debug!(queued, "peer message backlog");
+        }
+    }
+
+    fn handled(&mut self, took: Duration, now: Duration) {
+        if took >= crate::latency::SPIKE && self.handling.allows(now) {
+            tracing::debug!(ms = took.as_millis() as u64, "slow peer message handling");
+        }
+    }
+}
+
+/// Queued input behind the message in hand that counts as a backlog: about
+/// a frame of motion at the usual report rate.
+const BACKLOG: usize = 8;
+
 fn log_transition(
     flow: &str,
     me: PublicKey,
@@ -881,14 +932,14 @@ fn log_transition(
     message: &Message,
     control: &crate::control::SharedControl,
 ) {
-    let (reason, generation, destination) = match message {
-        Message::ControlClaim { generation } => ("physical_input_claim", Some(*generation), None),
-        Message::ControlState { generation, owner } => ("initial_control_state", Some(*generation), Some(*owner)),
-        Message::Enter { generation, to, .. } => ("edge_enter", Some(*generation), Some(*to)),
-        Message::Leave { generation, to, .. } => ("edge_leave", Some(*generation), Some(*to)),
-        Message::Reclaim { generation } => ("emergency_return", Some(*generation), None),
-        Message::Activity { generation } => ("display_activity", Some(*generation), None),
-        Message::Locked { .. } => ("screen_lock_changed", None, None),
+    let (reason, generation, destination, at) = match message {
+        Message::ControlClaim { generation } => ("physical_input_claim", Some(*generation), None, None),
+        Message::ControlState { generation, owner } => ("initial_control_state", Some(*generation), Some(*owner), None),
+        Message::Enter { generation, to, at } => ("edge_enter", Some(*generation), Some(*to), Some(*at)),
+        Message::Leave { generation, to, at } => ("edge_leave", Some(*generation), Some(*to), Some(*at)),
+        Message::Reclaim { generation } => ("emergency_return", Some(*generation), None, None),
+        Message::Activity { generation } => ("display_activity", Some(*generation), None, None),
+        Message::Locked { .. } => ("screen_lock_changed", None, None, None),
         _ => return,
     };
     // Formatting must not extend the decision lock: capture treats contention
@@ -898,7 +949,7 @@ fn log_transition(
         (state.owner(), state.generation())
     };
     tracing::debug!(flow, system = %me, peer = ?peer, reason, generation = ?generation,
-        destination = ?destination, owner = %owner, current_generation,
+        destination = ?destination, at = ?at, owner = %owner, current_generation,
         local_busy = control.local_busy(), "sharing transition");
 }
 

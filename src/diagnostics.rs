@@ -388,6 +388,23 @@ pub struct CaptureEvent {
     pub event_type: Option<u32>,
     pub source_pid: Option<i64>,
     pub source_state: Option<i64>,
+    pub pointer: Option<PointerFacts>,
+}
+
+/// Where this system's cursor was when a decision was made about it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PointerFacts {
+    /// Where macOS had it.
+    pub location: Option<(f64, f64)>,
+    /// Where it is pinned while hidden.
+    pub pinned: Option<(f64, f64)>,
+    /// Where it is being warped to.
+    pub target: Option<(f64, f64)>,
+    /// Motion events seen while pinned, and how many needed a warp back.
+    pub held: u64,
+    pub warped: u64,
+    /// The pause before forwarded motion resumed.
+    pub gap_ms: Option<u64>,
 }
 
 pub struct CaptureQueue {
@@ -417,8 +434,11 @@ impl CaptureQueue {
     pub fn drain(&self) {
         let mut receiver = self.receiver.lock().unwrap_or_else(|e| e.into_inner());
         while let Ok(event) = receiver.try_recv() {
+            let pointer = event.pointer.unwrap_or_default();
             tracing::debug!(at_ms = event.at.as_millis() as u64, reason = event.reason, generation = ?event.generation,
                 event_type = ?event.event_type, source_pid = ?event.source_pid, source_state = ?event.source_state,
+                location = ?pointer.location, pinned = ?pointer.pinned, target = ?pointer.target,
+                held = pointer.held, warped = pointer.warped, gap_ms = ?pointer.gap_ms,
                 "local capture decision");
         }
         let lost = self.lost.swap(0, Ordering::AcqRel);
@@ -543,6 +563,7 @@ mod tests {
                 event_type: None,
                 source_pid: None,
                 source_state: None,
+                pointer: None,
             });
         }
         assert_eq!(control.diagnostics.lost.load(Ordering::Relaxed), 6);

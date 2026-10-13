@@ -44,7 +44,7 @@ link, and input and heartbeat queues take priority. Source and collector loss
 counters expose dropped diagnostics. Capture callbacks enqueue copy-only facts
 without formatting, waiting, or I/O. Added control diagnostics exclude keycodes,
 input payloads, and clipboard contents; traces include public system keys, process
-IDs, connection details, and errors. The normal stderr filter remains independent.
+IDs, connection details, pointer positions, and errors. The normal stderr filter remains independent.
 
 ## Pairing
 

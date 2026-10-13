@@ -655,6 +655,12 @@ impl Target {
     }
 }
 
+/// Whether `actual` is more than `tolerance` points from `expected` on
+/// either axis.
+pub fn strayed(expected: Point, actual: Point, tolerance: f64) -> bool {
+    (actual.0 - expected.0).abs() > tolerance || (actual.1 - expected.1).abs() > tolerance
+}
+
 /// Modifier transitions remain authoritative when a key event omits a held
 /// modifier from its flags. Forwarded keys must carry the complete chord.
 /// Brings `held` in line with a modifier event's flags: `code` is held when
@@ -705,6 +711,19 @@ impl Action {
             }),
             _ => None,
         }
+    }
+}
+
+/// The modifier a modifier key code stands for, for diagnostics.
+pub fn modifier_name(code: u16) -> &'static str {
+    match code {
+        56 | 60 => "shift",
+        59 | 62 => "control",
+        58 | 61 => "option",
+        55 | 54 => "command",
+        63 => "function",
+        57 => "caps_lock",
+        _ => "other",
     }
 }
 
