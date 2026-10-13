@@ -3,13 +3,22 @@
 // Apple's constant names, kept so they match the SDK headers
 #![allow(non_upper_case_globals)]
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::ffi::*;
 use super::pointer::Magnifier;
-use crate::input::{Action, KeyboardEvent, ScrollPhase};
+use crate::input::{Action, KeyboardEvent, Point, ScrollPhase};
+use crate::latency::{Gaps, Throttle};
 use crate::shake::ShakeDetector;
 use crate::swipe::SwipeDetector;
+
+/// How far the cursor may be from where the last move put it before the
+/// developer trace records that something else moved it.
+const STRAY: f64 = 8.0;
+/// How often a straying cursor is recorded while it keeps straying.
+const STRAY_REPORT: Duration = Duration::from_millis(500);
+/// The Fn or Globe key's modifier flag, from CGEventTypes.h.
+const FUNCTION_FLAG: u64 = 0x0080_0000;
 
 /// Posts input events as if they came from this system's own hardware.
 pub struct Injector {
@@ -26,6 +35,10 @@ pub struct Injector {
     swipes: SwipeDetector,
     // None when "Shake mouse pointer to locate" is off
     magnifier: Option<Magnifier>,
+    // where the last move put the cursor, until control arrives again
+    expected: Option<Point>,
+    strays: Throttle,
+    motion: Gaps,
 }
 
 // The event source is only used from the thread driving the injector, and
@@ -47,12 +60,16 @@ impl Injector {
             shake: ShakeDetector::default(),
             swipes: SwipeDetector::default(),
             magnifier: Magnifier::new(),
+            expected: None,
+            strays: Throttle::new(STRAY_REPORT),
+            motion: Gaps::default(),
         }
     }
 
     pub fn execute(&mut self, action: &Action) {
         match *action {
             Action::Move { to, delta, dragging } => {
+                self.observe_move(to);
                 let event_type = match dragging {
                     None => kCGEventMouseMoved,
                     Some(0) => kCGEventLeftMouseDragged,
@@ -100,6 +117,16 @@ impl Injector {
             Action::Scroll { dx, dy, phase } => post(scroll_event(self.source, dx, dy, phase)),
             Action::Key { .. } | Action::Modifiers { .. } => {
                 if let Some(key) = action.keyboard() {
+                    if key.modifier {
+                        // Tools that act on a Globe or Fn tap watch every
+                        // modifier event for this flag, whichever key it names.
+                        tracing::debug!(
+                            modifier = crate::input::modifier_name(key.code),
+                            down = key.down,
+                            function = key.flags & FUNCTION_FLAG != 0,
+                            "modifier replayed"
+                        );
+                    }
                     post(keyboard_event(self.source, key));
                 }
             }
@@ -144,6 +171,27 @@ impl Injector {
 }
 
 impl Injector {
+    /// Records, for the developer trace, a move that follows a stall or
+    /// finds the cursor away from where the last move left it: either shows
+    /// as a jump.
+    fn observe_move(&mut self, to: Point) {
+        let now = self.started.elapsed();
+        if let Some(gap) = self.motion.note(now) {
+            tracing::debug!(gap_ms = gap.as_millis() as u64, to = ?to, "injected motion resumed");
+        }
+        // asking WindowServer where the cursor is costs a round trip on every
+        // replayed move, so only while a trace can record the answer
+        if let Some(expected) = self.expected
+            && crate::diagnostics::hub().enabled()
+            && let Some(actual) = super::pointer_location()
+            && crate::input::strayed(expected, actual, STRAY)
+            && self.strays.allows(now)
+        {
+            tracing::debug!(expected = ?expected, actual = ?actual, to = ?to, "cursor strayed from injected moves");
+        }
+        self.expected = Some(to);
+    }
+
     /// Posts a modifier event that repeats the current modifier state. macOS
     /// counts it as input, restarting the idle timer behind the screen saver
     /// and lock, yet nothing changes for any app.
@@ -155,7 +203,11 @@ impl Injector {
                 return;
             }
             CGEventSetType(event, kCGEventFlagsChanged);
-            CGEventSetFlags(event, CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState));
+            let flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
+            if flags & FUNCTION_FLAG != 0 {
+                tracing::debug!("idle timer reset carries the function flag");
+            }
+            CGEventSetFlags(event, flags);
             post(event);
         }
     }
@@ -167,6 +219,8 @@ impl crate::share::Inject for Injector {
     }
 
     fn arrived(&mut self) {
+        self.expected = None;
+        self.motion = Gaps::default();
         self.activity.note();
         let now = self.started.elapsed();
         if !self.idle_reset.due(now) {
@@ -269,6 +323,15 @@ mod tests {
 
     use super::*;
 
+    /// Converting a CGEvent to an NSEvent goes through HIToolbox's type
+    /// manager, whose tables are not thread safe; concurrent tests crash in
+    /// it with a bus error.
+    static CONVERSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn converting() -> std::sync::MutexGuard<'static, ()> {
+        CONVERSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[repr(transparent)]
     struct Event(CGEventRef);
 
@@ -280,6 +343,7 @@ mod tests {
     #[test]
     fn appkit_reads_every_keyboard_modifier_combination_and_repeat() {
         use objc2_app_kit::NSEventType;
+        let _converting = converting();
         let source = unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) };
         let masks = [0x0002_0000, 0x0004_0000, 0x0008_0000, 0x0010_0000, 0x0080_0000];
         let all_flags = masks.iter().fold(0, |flags, mask| flags | mask);
@@ -335,6 +399,7 @@ mod tests {
     #[test]
     fn appkit_reads_left_and_right_modifier_transitions() {
         use objc2_app_kit::NSEventType;
+        let _converting = converting();
         for (code, flag) in [
             (55, 0x0010_0008),
             (54, 0x0010_0010),
@@ -376,6 +441,7 @@ mod tests {
 
     #[test]
     fn appkit_reads_a_replayed_scroll_as_trackpad_scrolling() {
+        let _converting = converting();
         for (phase, gesture, momentum) in [
             (ScrollPhase::MayBegin, NSEventPhase::MayBegin, NSEventPhase::None),
             (ScrollPhase::Began, NSEventPhase::Began, NSEventPhase::None),

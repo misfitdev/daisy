@@ -30,6 +30,8 @@ While the peer has control, the local pointer should stay still. On macOS 27, `C
 
 Daisy therefore hides the pointer and warps it back to the crossing point whenever it drifts more than 1.5 points. Post-warp input delay is disabled. A background app may change the cursor only after setting the private `SetsCursorInBackground` WindowServer connection property.
 
+The developer trace records where the pointer is whenever it is frozen, shown again or sent home: the location macOS reported, the pin, and where it was moved. Warps that hold the pinned pointer in place are counted, not recorded one by one; a drift of more than 32 points is recorded as the pin escaping, at most twice a second. On the system replaying input, while a trace is collecting, each move compares the cursor's actual position with where the previous move left it; a difference of more than 8 points is recorded as the cursor straying, which means something other than Daisy moved it. Both sides record forwarded or replayed motion that resumes after a pause of 100 ms or more, with the length of the pause.
+
 ## Clicks
 
 macOS 27 ignores synthetic clicks and drags without an event number. The system replaying input numbers them starting just above the event count macOS keeps. Click count comes from the system sending input, so double-click timing follows its settings.
@@ -52,7 +54,10 @@ the screen saver, which starts it and locks the screen; only input does. So
 at most every 2 seconds while activity arrives, the injector also posts a
 marked `kCGEventFlagsChanged` event that repeats the current modifier state.
 It changes nothing for apps, and Daisy's own event tap ignores it, so it never
-takes control. On macOS 26, measured on 2026-10-08 through `HIDIdleTime`,
+takes control. Tools that act on a Globe or Fn tap watch every modifier event
+for the function flag, whatever key it names, so the trace records each
+replayed modifier event with whether it carries that flag, and an idle reset
+whose flags carry it. On macOS 26, measured on 2026-10-08 through `HIDIdleTime`,
 macOS counts such an event as input at most about once every 5 seconds, so a
 following system's idle time stays under about 5 seconds while the group is
 in use and grows normally once activity stops. If the idle time still exceeds

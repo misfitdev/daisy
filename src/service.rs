@@ -72,7 +72,7 @@ where
     let mut discoverable = config.discoverable.clone();
     let mut first_seen: HashMap<[u8; discovery::NONCE_LEN], tokio::time::Instant> = HashMap::new();
     // peers with a link running or being opened
-    let busy = std::sync::Mutex::new(std::collections::HashSet::<PublicKey>::new());
+    let busy = std::sync::Mutex::new(Busy::default());
     let mut explicit = std::collections::HashSet::new();
     let mut running: Running<'_, Option<Opened>> = Running::default();
     loop {
@@ -95,11 +95,11 @@ where
                         Shared(&observer).connection_failed(&address, &anyhow::anyhow!("this group is full"));
                         continue;
                     }
-                    let (hub, observer) = (&hub, &observer);
+                    let (hub, observer, busy) = (&hub, &observer, &busy);
                     let mut prompt = prompt.clone();
                     running.push(async move {
-                        let result = connect_in_group(config, hub, &address, peer, &mut prompt, &mut Shared(observer)).await;
-                        Some(Opened { address, key: None, pairing: false, paired: false, result })
+                        let result = connect_in_group(config, hub, Some(busy), &address, peer, &mut prompt, &mut Shared(observer)).await;
+                        Some(Opened { address, claimed: None, pairing: false, paired: false, result })
                     });
                 }
                 result = listener.accept() => {
@@ -121,7 +121,7 @@ where
                         if opened.pairing && !opened.paired { gate().exchanged(false); }
                         explicit.remove(&opened.address);
                         if let Err(error) = opened.result { Shared(&observer).connection_failed(&opened.address, &error); }
-                        if let Some(key) = opened.key { busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&key); }
+                        if let Some(key) = opened.claimed { busy.lock().unwrap_or_else(|e| e.into_inner()).release(key); }
                     }
                     if hub.members() == 0 { break; }
                 }
@@ -164,7 +164,7 @@ where
                         let seen_for = now - first_seen[&heard.election];
                         if !discovery::opens_connection(own, election, &heard, offer, seen_for) { continue; }
                         let expected = match heard.seen { discovery::Seen::Paired(key) => Some(key), discovery::Seen::Pairing { .. } => None };
-                        if let Some(key) = expected && !busy.lock().unwrap_or_else(|e| e.into_inner()).insert(key) { continue; }
+                        if let Some(key) = expected && !busy.lock().unwrap_or_else(|e| e.into_inner()).open(key) { continue; }
                         let policy = gate().for_peer(expected.is_some());
                         if expected.is_none() && policy.is_none() { continue; }
                         // wait out the grace again, so two systems that both
@@ -173,20 +173,73 @@ where
                         let attempt = SessionConfig { pairing: policy, ..config };
                         let address = heard.address.to_string();
                         Shared(&observer).connecting(&address, peer_name(config.peers, expected).as_deref());
-                        let (hub, observer) = (&hub, &observer);
+                        let (hub, observer, busy) = (&hub, &observer, &busy);
                         let mut prompt = prompt.clone();
                         let gate_lock = &pairing;
                         let began_pairing = expected.is_none();
                         running.push(async move {
                             let mut expected = expected;
                             let mut watched = GateWatch { inner: Shared(observer), gate: gate_lock, paired: false };
-                            let (_, result) = connect_once(attempt, hub, &address, &mut expected, &mut prompt, &mut watched).await;
-                            Some(Opened { address, key: expected, pairing: began_pairing, paired: watched.paired, result })
+                            let claimed = expected;
+                            let (_, result) = connect_once(attempt, hub, Some(busy), &address, &mut expected, &mut prompt, &mut watched).await;
+                            Some(Opened { address, claimed, pairing: began_pairing, paired: watched.paired, result })
                         });
                     }
                 }
             }
         }
+    }
+}
+
+/// Peers with a link running or being opened, counted per peer: a link
+/// answered from a peer and one opened to it may overlap, and the peer is
+/// busy until the last of them ends.
+#[derive(Debug, Default)]
+struct Busy(HashMap<PublicKey, usize>);
+
+impl Busy {
+    /// Claims `key` for a link this system opens; false if it is busy already.
+    fn open(&mut self, key: PublicKey) -> bool {
+        if self.0.contains_key(&key) {
+            return false;
+        }
+        self.0.insert(key, 1);
+        true
+    }
+
+    /// A link with `key` is running, whichever system opened it.
+    fn hold(&mut self, key: PublicKey) {
+        *self.0.entry(key).or_insert(0) += 1;
+    }
+
+    /// Gives back one `open` or `hold`.
+    fn release(&mut self, key: PublicKey) {
+        if let Some(count) = self.0.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                self.0.remove(&key);
+            }
+        }
+    }
+}
+
+/// One running link's hold on its peer, given back when the link ends,
+/// however it ends.
+struct Held<'a> {
+    busy: &'a std::sync::Mutex<Busy>,
+    key: PublicKey,
+}
+
+impl<'a> Held<'a> {
+    fn new(busy: &'a std::sync::Mutex<Busy>, key: PublicKey) -> Self {
+        busy.lock().unwrap_or_else(|e| e.into_inner()).hold(key);
+        Self { busy, key }
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.busy.lock().unwrap_or_else(|e| e.into_inner()).release(self.key);
     }
 }
 
@@ -213,8 +266,8 @@ async fn listening_changed(listening: &mut Option<watch::Receiver<Listening>>) -
 /// How a link this system opened ended.
 struct Opened {
     address: String,
-    /// The peer, once known.
-    key: Option<PublicKey>,
+    /// The peer this dial claimed in `Busy` before connecting, to give back.
+    claimed: Option<PublicKey>,
     /// Whether it began as a pairing.
     pairing: bool,
     /// Whether that pairing succeeded.
@@ -619,7 +672,7 @@ where
     let pairing = std::sync::Mutex::new(PairingGate::new(config.pairing));
     let gate = || pairing.lock().unwrap_or_else(|e| e.into_inner());
     let observer = std::sync::Mutex::new(observer);
-    let busy = std::sync::Mutex::new(std::collections::HashSet::<PublicKey>::new());
+    let busy = std::sync::Mutex::new(Busy::default());
     let mut discoverable = config.discoverable.clone();
     let mut running: Running<'_, ()> = Running::default();
     let mut advertiser = advertise(&config, port, &gate(), *discoverable.borrow_and_update());
@@ -676,12 +729,13 @@ where
     O: ServiceObserver + Send,
 {
     let hub = Hub::new(&config);
-    connect_in_group(config, &hub, address, peer, prompt, observer).await
+    connect_in_group(config, &hub, None, address, peer, prompt, observer).await
 }
 
 async fn connect_in_group<P, O>(
     config: SessionConfig<'_>,
     hub: &Hub,
+    busy: Option<&std::sync::Mutex<Busy>>,
     address: &str,
     peer: Option<PublicKey>,
     prompt: &mut P,
@@ -706,7 +760,8 @@ where
             Ok(address) => {
                 observer.connecting(&address, peer_name(config.peers, expected).as_deref());
                 last_reached.clone_from(&address);
-                let (lasted, result) = connect_once(attempt, hub, &address, &mut expected, prompt, observer).await;
+                let (lasted, result) =
+                    connect_once(attempt, hub, busy, &address, &mut expected, prompt, observer).await;
                 started |= lasted.is_some();
                 if lasted.is_some_and(|lasted| lasted >= reconnect::STABLE) {
                     waits = reconnect::waits();
@@ -788,6 +843,7 @@ fn pairing_for_attempt(pairing: Pairing, reconnecting: bool) -> Pairing {
 async fn connect_once<P, O>(
     config: SessionConfig<'_>,
     hub: &Hub,
+    busy: Option<&std::sync::Mutex<Busy>>,
     address: &str,
     expected: &mut Option<PublicKey>,
     prompt: &mut P,
@@ -840,6 +896,7 @@ where
         }
         *expected = Some(channel.remote_key());
         let channel_key = channel.remote_key();
+        let _held = busy.map(|busy| Held::new(busy, channel_key));
         let started = tokio::time::Instant::now();
         let newly_paired = trust_status == Trust::NewlyPaired;
         let session = run_session(
@@ -867,7 +924,7 @@ async fn answer<P, O>(
     pairing: &std::sync::Mutex<PairingGate>,
     prompt: &mut P,
     observer: &mut O,
-    busy: &std::sync::Mutex<std::collections::HashSet<PublicKey>>,
+    busy: &std::sync::Mutex<Busy>,
 ) -> Result<String>
 where
     P: PairingPrompt + Send,
@@ -897,7 +954,7 @@ where
         config.peers.agree_side(&key, config.side, trust::now())?;
     }
     gate().paired(trust_status);
-    busy.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
+    let held = Held::new(busy, key);
     let newly_paired = trust_status == Trust::NewlyPaired;
     let result = run_session(
         channel,
@@ -909,7 +966,7 @@ where
         observer,
     )
     .await;
-    busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+    drop(held);
     observer.disconnected(&peer, key);
     result?;
     Ok(peer)
@@ -1504,6 +1561,39 @@ pub fn connect_address(address: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn each_link_gives_back_only_its_own_hold() {
+        let key = PublicKey::from_bytes(&[8; 32]).unwrap();
+        let busy = std::sync::Mutex::new(Busy::default());
+        let answered = Held::new(&busy, key);
+        // a pairing dial learns the key only once connected, and holds it then
+        let dialed = Held::new(&busy, key);
+        drop(dialed);
+        assert!(
+            !busy.lock().unwrap().open(key),
+            "the answered link still runs after the dial's link ends"
+        );
+        drop(answered);
+        assert!(busy.lock().unwrap().open(key));
+    }
+
+    #[test]
+    fn a_peer_stays_busy_until_its_last_link_ends() {
+        let key = PublicKey::from_bytes(&[7; 32]).unwrap();
+        let mut busy = Busy::default();
+        assert!(busy.open(key));
+        assert!(!busy.open(key), "one link at a time is opened to a peer");
+        // the peer dialed too, and that link outlives the one opened here
+        busy.hold(key);
+        busy.release(key);
+        assert!(!busy.open(key), "the answered link still runs");
+        busy.release(key);
+        assert!(busy.open(key));
+        busy.release(key);
+        busy.release(key);
+        assert!(busy.open(key), "releasing more than was held cannot wedge the peer");
+    }
+
     use super::*;
 
     #[tokio::test]
@@ -2190,6 +2280,7 @@ mod tests {
         let client = connect_once(
             config(&here, &clipboard),
             &hub,
+            None,
             &address,
             &mut expected,
             &mut prompt,

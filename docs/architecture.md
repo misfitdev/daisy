@@ -105,7 +105,7 @@ Whatever ends replay of remote input releases every key and button that system s
 
 ## Reconnecting
 
-While sharing remains enabled, nearby paired peers reconnect after network drops when trust remains valid and Bonjour can discover an advertising peer. The elected opener repeats the full handshake, device proof and trust checks. **Stop Sharing** ends connections without triggering reconnect. The native app adds explicit address attempts to the same listening and discovering group, sharing its input core and preserving existing links.
+While sharing remains enabled, nearby paired peers reconnect after network drops when trust remains valid and Bonjour can discover an advertising peer. The elected opener repeats the full handshake, device proof and trust checks. A peer is busy from the moment a link to it is being opened until the last link with it ends, so an answered link and one opened here may overlap without a new dial starting. When two links to one peer exist, the one opened by the lower key stays on both systems and the other ends as replaced; two links opened by the same side are a reconnect, and the newer stays. **Stop Sharing** ends connections without triggering reconnect. The native app adds explicit address attempts to the same listening and discovering group, sharing its input core and preserving existing links.
 
 The command-line `connect` command runs `service::connect` as a loop. Once a session has run, a drop is followed by a wait from `reconnect::waits()` and a fresh attempt: TCP connect, Noise handshake, a check that the key matches the peer of the first session, the trust check, then a new session. `reconnect::retryable` retries only failures of the connection itself (unreachable, reset, silent, timed out); trust, key, protocol, setup and local file errors stop the loop. The first attempt is never retried, and reconnects never pair. The listening peer needs nothing extra: it accepts every connection and runs each as its own link. A peer that closes after more than the silence limit counts as a lost connection, not a deliberate stop, so single-session trust keeps its reconnect grace.
 
@@ -167,3 +167,11 @@ credit prevent trace streams from accumulating ahead of input. The collector lab
 remote records with the channel key and streams them to the CLI. Overflow drops
 diagnostics and increments explicit loss counters. The native application also
 observes foreground-application changes without changing focus.
+
+The trace is meant to explain a pointer jump after the fact. Besides control
+transitions, it records pointer positions at every freeze, thaw and warp, the
+pin escaping on the driving system, the cursor straying from replayed moves on
+the driven system, motion resuming after a stall on either side, input queued
+behind the sharing loop, and a peer message that took long to handle. `just
+trace` runs the collector in the background until `just trace-stop`;
+`just trace-summary` lists what a trace recorded.

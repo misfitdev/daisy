@@ -24,6 +24,21 @@ pub use pointer::{main_run_loop_starting, restore as restore_pointer};
 
 use crate::input::Rect;
 
+/// Where macOS has the cursor now, in global points. A WindowServer round
+/// trip: never call it from the event tap, which has the event's own location.
+pub(crate) fn pointer_location() -> Option<(f64, f64)> {
+    // SAFETY: the event is created and released here
+    unsafe {
+        let event = ffi::CGEventCreate(std::ptr::null_mut());
+        if event.is_null() {
+            return None;
+        }
+        let location = ffi::CGEventGetLocation(event);
+        ffi::CFRelease(event.cast_const());
+        Some((location.x, location.y))
+    }
+}
+
 /// Lets this app change the cursor while another app is in front. A private
 /// window-server property; the Dock still controls the cursor over the Dock.
 pub(crate) fn set_cursor_in_background() {

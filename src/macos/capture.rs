@@ -12,6 +12,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
@@ -19,6 +20,7 @@ use tokio::sync::mpsc;
 use super::ffi::*;
 use super::swipe;
 use crate::control::SharedControl;
+use crate::diagnostics::PointerFacts;
 use crate::input::{Driver, Route, ScrollPhase};
 use crate::protocol::Message;
 use crate::swipe::SwipeStep;
@@ -38,11 +40,15 @@ pub struct Capture {
 
 /// How far the pinned cursor may drift before it is warped back, in points.
 const HOLD_SLACK: f64 = 1.5;
+/// Drift this far from the pin is recorded in the developer trace: the
+/// hidden cursor got away before a warp caught it.
+const ESCAPE: f64 = 32.0;
+/// How often an escape is recorded while it keeps happening.
+const ESCAPE_REPORT: Duration = Duration::from_millis(500);
 
 /// This system's cursor while the peer has control: hidden, and pinned
 /// where it crossed over. macOS 27 accepts but ignores detaching the cursor
 /// from the mouse, so pinning is done by warping it back as it drifts.
-#[derive(Default)]
 struct Cursor {
     pinned: Option<CGPoint>,
     // CGDisplayHideCursor counts calls, so every hide needs exactly one show
@@ -50,9 +56,24 @@ struct Cursor {
     // how often holding the cursor needed a warp, for diagnosing freezes
     held: u64,
     warped: u64,
+    escapes: crate::latency::Throttle,
+    motion: crate::latency::Gaps,
+    control: Arc<SharedControl>,
 }
 
 impl Cursor {
+    fn new(control: Arc<SharedControl>) -> Self {
+        Self {
+            pinned: None,
+            hidden: false,
+            held: 0,
+            warped: 0,
+            escapes: crate::latency::Throttle::new(ESCAPE_REPORT),
+            motion: crate::latency::Gaps::default(),
+            control,
+        }
+    }
+
     fn freeze(&mut self, at: CGPoint) {
         // SAFETY: plain values. Hiding re-attaches the cursor to the mouse,
         // so it must come before detaching.
@@ -68,9 +89,16 @@ impl Cursor {
         self.pinned = Some(at);
         self.held = 0;
         self.warped = 0;
+        self.escapes = crate::latency::Throttle::new(ESCAPE_REPORT);
+        self.motion = crate::latency::Gaps::default();
+        self.record("pointer_frozen", Some(at), None, None);
     }
 
-    fn thaw(&mut self, move_to: Option<CGPoint>) {
+    /// Shows the cursor, at `move_to` when given. `seen` is where the cursor
+    /// is now: the event's location on the tap thread, or what
+    /// [`current_location`] reports elsewhere.
+    fn thaw(&mut self, move_to: Option<CGPoint>, seen: Option<CGPoint>) {
+        self.record("pointer_thawed", seen, move_to, None);
         // SAFETY: plain values
         unsafe {
             if let Some(point) = move_to {
@@ -89,13 +117,51 @@ impl Cursor {
     fn hold(&mut self, location: CGPoint) {
         let Some(pinned) = self.pinned else { return };
         self.held += 1;
+        let now = self.control.now();
+        if let Some(gap) = self.motion.note(now) {
+            self.record("forwarded_motion_resumed", Some(location), None, Some(gap));
+        }
+        let drift = (location.x - pinned.x).abs().max((location.y - pinned.y).abs());
         // warps land on the pixel grid, so allow a little slack or every event warps
-        if (location.x - pinned.x).abs() > HOLD_SLACK || (location.y - pinned.y).abs() > HOLD_SLACK {
+        if drift > HOLD_SLACK {
             // SAFETY: plain value
             unsafe { CGWarpMouseCursorPosition(pinned) };
             self.warped += 1;
         }
+        if drift > ESCAPE && self.escapes.allows(now) {
+            self.record("pin_escaped", Some(location), None, None);
+        }
     }
+
+    fn facts(&self, location: Option<CGPoint>, target: Option<CGPoint>, gap: Option<Duration>) -> PointerFacts {
+        let point = |point: CGPoint| (point.x, point.y);
+        PointerFacts {
+            location: location.map(point),
+            pinned: self.pinned.map(point),
+            target: target.map(point),
+            held: self.held,
+            warped: self.warped,
+            gap_ms: gap.map(|gap| gap.as_millis() as u64),
+        }
+    }
+
+    fn record(&self, reason: &'static str, location: Option<CGPoint>, target: Option<CGPoint>, gap: Option<Duration>) {
+        self.control.diagnostics.record(crate::diagnostics::CaptureEvent {
+            at: self.control.now(),
+            reason,
+            generation: None,
+            event_type: None,
+            source_pid: None,
+            source_state: None,
+            pointer: Some(self.facts(location, target, gap)),
+        });
+    }
+}
+
+/// Where macOS has the cursor now. Asks WindowServer, so never from the
+/// event tap, which has the event's own location.
+fn current_location() -> Option<CGPoint> {
+    super::pointer_location().map(|(x, y)| CGPoint { x, y })
 }
 
 // Owned by the tap thread; only ever handed to CFRunLoopStop, which may be
@@ -116,9 +182,10 @@ struct Context {
 }
 
 impl Context {
-    /// Whether this system's input is going to a peer it drives.
-    fn driving(&self) -> bool {
-        try_lock(&self.driver).is_some_and(|driver| driver.is_remote())
+    /// Whether this system's input is going to a peer it drives; `None`
+    /// when the session holds the driver for the instant it takes to ask.
+    fn driving(&self) -> Option<bool> {
+        try_lock(&self.driver).map(|driver| driver.is_remote())
     }
 
     /// The generation to stamp input with while the session holds the
@@ -126,6 +193,11 @@ impl Context {
     /// peers reject the stale stamp like any queued input.
     fn last_generation(&self) -> Option<u64> {
         self.sent_generation.load(Ordering::Acquire).checked_sub(1)
+    }
+
+    /// The cursor's pin state, when the lock is free; never waits for it.
+    fn pointer_facts(&self, location: Option<CGPoint>) -> Option<PointerFacts> {
+        try_lock(&self.cursor).map(|cursor| cursor.facts(location, None, None))
     }
 
     fn diagnose_recovery(&self, reason: &'static str) {
@@ -136,21 +208,23 @@ impl Context {
             event_type: None,
             source_pid: None,
             source_state: None,
+            pointer: self.pointer_facts(None),
         });
     }
     fn diagnose(&self, reason: &'static str, generation: Option<u64>, event_type: u32, event: CGEventRef) {
         let origin = !event.is_null() && event_type < kCGEventTapDisabledByTimeout;
         // SAFETY: actual input events remain valid for this callback. Tap
         // notifications never dereference their optional event pointer.
-        let (source_pid, source_state) = if origin {
+        let (source_pid, source_state, location) = if origin {
             unsafe {
                 (
                     Some(CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID)),
                     Some(CGEventGetIntegerValueField(event, kCGEventSourceStateID)),
+                    Some(CGEventGetLocation(event)),
                 )
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
         self.control.diagnostics.record(crate::diagnostics::CaptureEvent {
             at: self.control.now(),
@@ -159,22 +233,29 @@ impl Context {
             event_type: Some(event_type),
             source_pid,
             source_state,
+            pointer: self.pointer_facts(location),
         });
     }
     /// Sends input as part of this system's control, stamped with its
     /// generation. Input made while the peer has control is not sent: it
     /// hands control back to this system instead.
-    fn send_stamped(&self, stamp: impl FnOnce(u64) -> Message) -> bool {
+    fn send_stamped(&self, seen: CGPoint, stamp: impl FnOnce(u64) -> Message) -> bool {
         let control = &self.control;
         let Some(state) = try_lock(&control.state) else {
             // The session task holds this lock only briefly, as on every
             // heartbeat. While driving a peer, this system still has control.
-            if self.driving()
+            let driving = self.driving();
+            if driving == Some(true)
                 && let Some(generation) = self.last_generation()
             {
-                return self.send(stamp(generation));
+                return self.send(seen, stamp(generation));
             }
-            self.release_local();
+            self.diagnose_recovery(match driving {
+                None => "driver_lock_contention_while_sending",
+                Some(true) => "no_generation_while_sending",
+                Some(false) => "not_driving_while_sending",
+            });
+            self.release_local(seen);
             return false;
         };
         if !state.owns() {
@@ -185,7 +266,7 @@ impl Context {
                 driver.reclaim();
             }
             if let Some(mut cursor) = try_lock(&self.cursor) {
-                cursor.thaw(None);
+                cursor.thaw(None, Some(seen));
             }
             control.interrupted.store(true, Ordering::Release);
             control.wake();
@@ -194,10 +275,10 @@ impl Context {
         let generation = state.generation();
         drop(state);
         self.sent_generation.store(generation + 1, Ordering::Release);
-        self.send(stamp(generation))
+        self.send(seen, stamp(generation))
     }
 
-    fn send(&self, message: Message) -> bool {
+    fn send(&self, seen: CGPoint, message: Message) -> bool {
         match self.messages.try_send(message) {
             Ok(()) => true,
             Err(error) => {
@@ -205,7 +286,7 @@ impl Context {
                     mpsc::error::TrySendError::Full(_) => "capture_input_queue_full",
                     mpsc::error::TrySendError::Closed(_) => "capture_input_queue_closed",
                 });
-                self.recover_local();
+                self.recover_local(seen);
                 false
             }
         }
@@ -216,28 +297,28 @@ impl Context {
         self.overflow.store(true, Ordering::Release);
     }
 
-    fn cursor_or_recover(&self) -> Option<std::sync::MutexGuard<'_, Cursor>> {
+    fn cursor_or_recover(&self, seen: CGPoint) -> Option<std::sync::MutexGuard<'_, Cursor>> {
         match try_lock(&self.cursor) {
             Some(cursor) => Some(cursor),
             None => {
                 self.diagnose_recovery("cursor_lock_contention");
-                self.recover_local();
+                self.recover_local(seen);
                 None
             }
         }
     }
 
-    fn recover_local(&self) {
-        self.release_local();
+    fn recover_local(&self, seen: CGPoint) {
+        self.release_local(seen);
         self.overflow.store(true, Ordering::Release);
     }
 
-    fn release_local(&self) {
+    fn release_local(&self, seen: CGPoint) {
         if let Some(mut driver) = try_lock(&self.driver) {
             driver.reclaim();
         }
         if let Some(mut cursor) = try_lock(&self.cursor) {
-            cursor.thaw(None);
+            cursor.thaw(None, Some(seen));
         }
     }
 }
@@ -255,7 +336,7 @@ impl Capture {
         allow_background_cursor_changes();
         std::hint::black_box(swipe::can_recognize());
         let driver = Arc::new(Mutex::new(Driver::new(layout, me)));
-        let cursor = Arc::new(Mutex::new(Cursor::default()));
+        let cursor = Arc::new(Mutex::new(Cursor::new(control.clone())));
         let overflowed = Arc::new(AtomicBool::new(false));
         let (ready, started) = std_mpsc::channel();
 
@@ -285,7 +366,8 @@ impl Capture {
     /// where it left when `None`.
     pub fn leave(&self, at: Option<crate::input::Point>) {
         let point = lock(&self.driver).leave(at);
-        lock(&self.cursor).thaw(point.map(|point| CGPoint { x: point.0, y: point.1 }));
+        let seen = current_location();
+        lock(&self.cursor).thaw(point.map(|point| CGPoint { x: point.0, y: point.1 }), seen);
     }
 }
 
@@ -309,7 +391,8 @@ impl crate::share::Pointer for Capture {
     }
     fn yield_control(&mut self) {
         lock(&self.driver).reclaim();
-        lock(&self.cursor).thaw(None);
+        let seen = current_location();
+        lock(&self.cursor).thaw(None, seen);
     }
     fn arrange(&mut self, layout: crate::layout::Group<crate::identity::PublicKey>) {
         lock(&self.driver).arrange(layout);
@@ -319,7 +402,8 @@ impl crate::share::Pointer for Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         lock(&self.driver).reclaim();
-        lock(&self.cursor).thaw(None);
+        let seen = current_location();
+        lock(&self.cursor).thaw(None, seen);
         // SAFETY: the run loop belongs to the tap thread, which is still
         // joinable; stopping it from another thread is allowed
         unsafe { CFRunLoopStop(self.run_loop.0) };
@@ -437,6 +521,11 @@ fn handle(context: &Context, event_type: u32, event: CGEventRef) -> bool {
     here
 }
 
+fn event_location(event: CGEventRef) -> CGPoint {
+    // SAFETY: event is valid for the duration of the callback
+    unsafe { CGEventGetLocation(event) }
+}
+
 fn scroll_phase(event: CGEventRef) -> Option<ScrollPhase> {
     // SAFETY: event is valid for the duration of the callback
     unsafe {
@@ -503,7 +592,12 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
         // While this system drives a peer, its own input is never a claim,
         // even if the session holds the decision lock for an instant; the
         // event is routed below like any other.
-        if !(state.is_none() && context.driving()) {
+        let driving = if state.is_none() {
+            context.driving()
+        } else {
+            Some(false)
+        };
+        if driving != Some(true) {
             let Some(mut state) = state else {
                 // Remote injection may hold the decision lock briefly. The local
                 // event still passes immediately; cleanup and the claim run on the
@@ -512,9 +606,18 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
                     driver.reclaim();
                 }
                 if let Some(mut cursor) = try_lock(&context.cursor) {
-                    cursor.thaw(None);
+                    cursor.thaw(None, Some(event_location(event)));
                 }
-                context.diagnose("physical_input_lock_contention", None, event_type, event);
+                context.diagnose(
+                    if driving.is_none() {
+                        "physical_input_driver_lock_contention"
+                    } else {
+                        "physical_input_lock_contention"
+                    },
+                    None,
+                    event_type,
+                    event,
+                );
                 control.interrupted.store(true, Ordering::Release);
                 control.wake();
                 return true;
@@ -540,10 +643,10 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
                 // the session task holds the cursor while yielding control;
                 // it thaws it there, so a busy lock needs nothing here
                 if let Some(mut cursor) = try_lock(&context.cursor) {
-                    cursor.thaw(None);
+                    cursor.thaw(None, Some(event_location(event)));
                 }
                 if let Some(generation) = claim {
-                    context.send(Message::ControlClaim { generation });
+                    context.send(event_location(event), Message::ControlClaim { generation });
                 }
                 // This first event belongs to the system being touched, including if
                 // its pointer happens to be resting at the shared screen edge.
@@ -555,8 +658,7 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
         return handle_gesture(context, event);
     }
 
-    // SAFETY: event is valid for the duration of the callback
-    let location = unsafe { CGEventGetLocation(event) };
+    let location = event_location(event);
     // SAFETY: event is valid for the duration of the callback
     let route = unsafe {
         let integer = |field| CGEventGetIntegerValueField(event, field);
@@ -603,29 +705,29 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
         Route::Drop => false,
         Route::Enter { to, at } => {
             // hide and pin the pointer here while it moves on the peer
-            let Some(mut cursor) = context.cursor_or_recover() else {
+            let Some(mut cursor) = context.cursor_or_recover(location) else {
                 return true;
             };
             cursor.freeze(location);
             drop(cursor);
-            !context.send_stamped(|generation| Message::Enter { generation, to, at })
+            !context.send_stamped(location, |generation| Message::Enter { generation, to, at })
         }
         Route::Forward(event) => {
             if matches!(event, crate::input::InputEvent::Motion { .. }) {
-                let Some(mut cursor) = context.cursor_or_recover() else {
+                let Some(mut cursor) = context.cursor_or_recover(location) else {
                     return true;
                 };
                 cursor.hold(location);
             }
-            !context.send_stamped(|generation| Message::Input { generation, event })
+            !context.send_stamped(location, |generation| Message::Input { generation, event })
         }
         Route::Reclaim { home } => {
             if let Some(mut cursor) = try_lock(&context.cursor) {
-                cursor.thaw(home.map(|(x, y)| CGPoint { x, y }));
+                cursor.thaw(home.map(|(x, y)| CGPoint { x, y }), Some(location));
             } else {
                 context.stop_for_contention();
             }
-            context.send_stamped(|generation| {
+            context.send_stamped(location, |generation| {
                 context.diagnose("emergency_return_shortcut", Some(generation), event_type, event);
                 Message::Reclaim { generation }
             });
@@ -633,6 +735,9 @@ fn decide(context: &Context, event_type: u32, event: CGEventRef) -> bool {
         }
         Route::Home { at: (x, y) } => {
             context.diagnose("emergency_return_home", None, event_type, event);
+            if let Some(cursor) = try_lock(&context.cursor) {
+                cursor.record("pointer_warped_home", Some(location), Some(CGPoint { x, y }), None);
+            }
             // SAFETY: plain value
             unsafe { CGWarpMouseCursorPosition(CGPoint { x, y }) };
             false
@@ -658,8 +763,9 @@ fn handle_gesture(context: &Context, event: CGEventRef) -> bool {
     };
     let route = driver.swipe(step);
     drop(driver);
+    let location = event_location(event);
     match route {
-        Route::Forward(event) => !context.send_stamped(|generation| Message::Input { generation, event }),
+        Route::Forward(event) => !context.send_stamped(location, |generation| Message::Input { generation, event }),
         Route::Local => true,
         _ => false,
     }
@@ -702,7 +808,7 @@ mod tests {
                 crate::layout::Group::alone(test_key(1), vec![SQUARE]),
                 test_key(1),
             ))),
-            cursor: Arc::new(Mutex::new(Cursor::default())),
+            cursor: Arc::new(Mutex::new(Cursor::new(control.clone()))),
             messages,
             overflow: Arc::new(AtomicBool::new(false)),
             tap: std::ptr::null_mut(),
@@ -740,7 +846,7 @@ mod tests {
                 crate::layout::Group::alone(me, vec![SQUARE]),
                 me,
             ))),
-            cursor: Arc::new(Mutex::new(Cursor::default())),
+            cursor: Arc::new(Mutex::new(Cursor::new(control.clone()))),
             messages,
             overflow: Arc::new(AtomicBool::new(false)),
             tap: std::ptr::null_mut(),
@@ -793,7 +899,7 @@ mod tests {
         let (messages, mut input) = mpsc::channel(4);
         let context = Context {
             driver: driver.clone(),
-            cursor: Arc::new(Mutex::new(Cursor::default())),
+            cursor: Arc::new(Mutex::new(Cursor::new(control.clone()))),
             messages,
             overflow: Arc::new(AtomicBool::new(false)),
             tap: std::ptr::null_mut(),
@@ -839,7 +945,8 @@ mod tests {
             Route::Enter { .. }
         ));
 
-        let cursor = Arc::new(Mutex::new(Cursor::default()));
+        let control = Arc::new(SharedControl::new(test_key(1), test_key(2)));
+        let cursor = Arc::new(Mutex::new(Cursor::new(control.clone())));
         let (messages, _receiver) = mpsc::channel(1);
         let overflow = Arc::new(AtomicBool::new(false));
         let context = Context {
@@ -848,12 +955,12 @@ mod tests {
             messages,
             overflow: overflow.clone(),
             tap: std::ptr::null_mut(),
-            control: Arc::new(SharedControl::new(test_key(1), test_key(2))),
+            control,
             sent_generation: AtomicU64::new(0),
         };
 
         let _held = lock(&context.cursor);
-        assert!(context.cursor_or_recover().is_none());
+        assert!(context.cursor_or_recover(CGPoint { x: 0.0, y: 250.0 }).is_none());
         assert!(!lock(&driver).is_remote());
         assert!(overflow.load(Ordering::Acquire));
     }

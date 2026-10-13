@@ -178,6 +178,49 @@ impl Meter {
     }
 }
 
+/// A pause in a stream of events long enough to show as a jump when the
+/// events resume: a mouse moving at a modest pace covers a hand's width in
+/// this time.
+pub const STALL: Duration = Duration::from_millis(100);
+
+/// Notices when a stream of events resumes after a stall.
+#[derive(Debug, Default)]
+pub struct Gaps {
+    last: Option<Duration>,
+}
+
+impl Gaps {
+    /// An event arrived at `at`. Returns the pause before it when that was a
+    /// stall.
+    pub fn note(&mut self, at: Duration) -> Option<Duration> {
+        let gap = self.last.map(|last| at.saturating_sub(last));
+        self.last = Some(at);
+        gap.filter(|gap| *gap >= STALL)
+    }
+}
+
+/// Lets a repeated report through once per interval.
+#[derive(Debug)]
+pub struct Throttle {
+    every: Duration,
+    last: Option<Duration>,
+}
+
+impl Throttle {
+    pub fn new(every: Duration) -> Self {
+        Self { every, last: None }
+    }
+
+    /// Whether a report at `now` may go out; counts it as sent if so.
+    pub fn allows(&mut self, now: Duration) -> bool {
+        if self.last.is_some_and(|last| now.saturating_sub(last) < self.every) {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +344,24 @@ mod tests {
         }
         assert!(meter.waiting.len() <= WINDOW * 2);
         assert_eq!(meter.answered(999, ms(999_005)), Some(ms(5)));
+    }
+
+    #[test]
+    fn a_stream_resuming_after_a_stall_reports_the_pause_once() {
+        let mut gaps = Gaps::default();
+        assert_eq!(gaps.note(ms(0)), None, "the first event has no gap");
+        assert_eq!(gaps.note(ms(8)), None);
+        assert_eq!(gaps.note(ms(8 + 99)), None, "just under a stall");
+        assert_eq!(gaps.note(ms(8 + 99 + 100)), Some(ms(100)));
+        assert_eq!(gaps.note(ms(8 + 99 + 100 + 8)), None, "the stream is flowing again");
+    }
+
+    #[test]
+    fn a_throttle_lets_one_report_through_per_interval() {
+        let mut throttle = Throttle::new(ms(500));
+        assert!(throttle.allows(ms(1000)));
+        assert!(!throttle.allows(ms(1499)));
+        assert!(throttle.allows(ms(1500)));
+        assert!(!throttle.allows(ms(1600)));
     }
 }
