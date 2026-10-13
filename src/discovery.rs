@@ -208,6 +208,21 @@ pub fn opens_connection(
     }
 }
 
+/// Two links to the same paired peer: whether the existing one stays and
+/// the new one is dropped. The link opened by the lower key wins, so both
+/// systems keep the same connection when they dial each other at once; two
+/// links opened by the same side are a reconnect, and the newer wins.
+pub fn keeps_existing_link(own: PublicKey, peer: PublicKey, existing_initiator: bool, new_initiator: bool) -> bool {
+    let opened_by_lower = |initiator: bool| {
+        if initiator {
+            own.as_bytes() < peer.as_bytes()
+        } else {
+            peer.as_bytes() < own.as_bytes()
+        }
+    };
+    opened_by_lower(existing_initiator) && !opened_by_lower(new_initiator)
+}
+
 /// Whether this system, rather than the other, opens a pairing connection,
 /// given each side's `(member, since, nonce)`. The opener types the code and
 /// the other shows it, so the code appears on the system just added: a
@@ -360,6 +375,25 @@ mod tests {
         member: false,
         since: 1_000,
     };
+
+    #[test]
+    fn crossed_links_keep_the_one_the_opener_made_on_both_systems() {
+        let (low, high) = (
+            PublicKey::from_bytes(&[1; 32]).unwrap(),
+            PublicKey::from_bytes(&[2; 32]).unwrap(),
+        );
+        // the lower key dialed, then the higher key's dial arrived
+        assert!(keeps_existing_link(low, high, true, false));
+        assert!(keeps_existing_link(high, low, false, true));
+        // the higher key's dial arrived first, then the lower key's
+        assert!(!keeps_existing_link(low, high, false, true));
+        assert!(!keeps_existing_link(high, low, true, false));
+        // the same side connected again: a reconnect, so the newer wins
+        assert!(!keeps_existing_link(low, high, true, true));
+        assert!(!keeps_existing_link(high, low, false, false));
+        assert!(!keeps_existing_link(low, high, false, false));
+        assert!(!keeps_existing_link(high, low, true, true));
+    }
 
     #[test]
     fn paired_peers_elect_exactly_one_opener() {

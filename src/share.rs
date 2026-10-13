@@ -413,6 +413,14 @@ where
                         agreed_tx: joining.agreed_tx,
                         done: Some(joining.done),
                     };
+                    if let Some(existing) = links.get(&key)
+                        && crate::discovery::keeps_existing_link(me, key, existing.initiator, link.initiator)
+                    {
+                        tracing::debug!(peer = %key, "second link dropped; the one the opener made stays");
+                        link.finish(Err(Replaced.into()));
+                        publish(&control, &links, &group.reports);
+                        continue;
+                    }
                     let state = control.state.lock().unwrap_or_else(|e| e.into_inner());
                     let current = Message::ControlState {
                         generation: state.generation(),

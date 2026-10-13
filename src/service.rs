@@ -72,7 +72,7 @@ where
     let mut discoverable = config.discoverable.clone();
     let mut first_seen: HashMap<[u8; discovery::NONCE_LEN], tokio::time::Instant> = HashMap::new();
     // peers with a link running or being opened
-    let busy = std::sync::Mutex::new(std::collections::HashSet::<PublicKey>::new());
+    let busy = std::sync::Mutex::new(Busy::default());
     let mut explicit = std::collections::HashSet::new();
     let mut running: Running<'_, Option<Opened>> = Running::default();
     loop {
@@ -121,7 +121,7 @@ where
                         if opened.pairing && !opened.paired { gate().exchanged(false); }
                         explicit.remove(&opened.address);
                         if let Err(error) = opened.result { Shared(&observer).connection_failed(&opened.address, &error); }
-                        if let Some(key) = opened.key { busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&key); }
+                        if let Some(key) = opened.key { busy.lock().unwrap_or_else(|e| e.into_inner()).release(key); }
                     }
                     if hub.members() == 0 { break; }
                 }
@@ -164,7 +164,7 @@ where
                         let seen_for = now - first_seen[&heard.election];
                         if !discovery::opens_connection(own, election, &heard, offer, seen_for) { continue; }
                         let expected = match heard.seen { discovery::Seen::Paired(key) => Some(key), discovery::Seen::Pairing { .. } => None };
-                        if let Some(key) = expected && !busy.lock().unwrap_or_else(|e| e.into_inner()).insert(key) { continue; }
+                        if let Some(key) = expected && !busy.lock().unwrap_or_else(|e| e.into_inner()).open(key) { continue; }
                         let policy = gate().for_peer(expected.is_some());
                         if expected.is_none() && policy.is_none() { continue; }
                         // wait out the grace again, so two systems that both
@@ -185,6 +185,37 @@ where
                         });
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Peers with a link running or being opened, counted per peer: a link
+/// answered from a peer and one opened to it may overlap, and the peer is
+/// busy until the last of them ends.
+#[derive(Debug, Default)]
+struct Busy(HashMap<PublicKey, usize>);
+
+impl Busy {
+    /// Claims `key` for a link this system opens; false if it is busy already.
+    fn open(&mut self, key: PublicKey) -> bool {
+        if self.0.contains_key(&key) {
+            return false;
+        }
+        self.0.insert(key, 1);
+        true
+    }
+
+    /// A link the peer opened is running.
+    fn answer(&mut self, key: PublicKey) {
+        *self.0.entry(key).or_insert(0) += 1;
+    }
+
+    fn release(&mut self, key: PublicKey) {
+        if let Some(count) = self.0.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                self.0.remove(&key);
             }
         }
     }
@@ -619,7 +650,7 @@ where
     let pairing = std::sync::Mutex::new(PairingGate::new(config.pairing));
     let gate = || pairing.lock().unwrap_or_else(|e| e.into_inner());
     let observer = std::sync::Mutex::new(observer);
-    let busy = std::sync::Mutex::new(std::collections::HashSet::<PublicKey>::new());
+    let busy = std::sync::Mutex::new(Busy::default());
     let mut discoverable = config.discoverable.clone();
     let mut running: Running<'_, ()> = Running::default();
     let mut advertiser = advertise(&config, port, &gate(), *discoverable.borrow_and_update());
@@ -867,7 +898,7 @@ async fn answer<P, O>(
     pairing: &std::sync::Mutex<PairingGate>,
     prompt: &mut P,
     observer: &mut O,
-    busy: &std::sync::Mutex<std::collections::HashSet<PublicKey>>,
+    busy: &std::sync::Mutex<Busy>,
 ) -> Result<String>
 where
     P: PairingPrompt + Send,
@@ -897,7 +928,7 @@ where
         config.peers.agree_side(&key, config.side, trust::now())?;
     }
     gate().paired(trust_status);
-    busy.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
+    busy.lock().unwrap_or_else(|e| e.into_inner()).answer(key);
     let newly_paired = trust_status == Trust::NewlyPaired;
     let result = run_session(
         channel,
@@ -909,7 +940,7 @@ where
         observer,
     )
     .await;
-    busy.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+    busy.lock().unwrap_or_else(|e| e.into_inner()).release(key);
     observer.disconnected(&peer, key);
     result?;
     Ok(peer)
@@ -1504,6 +1535,23 @@ pub fn connect_address(address: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_peer_stays_busy_until_its_last_link_ends() {
+        let key = PublicKey::from_bytes(&[7; 32]).unwrap();
+        let mut busy = Busy::default();
+        assert!(busy.open(key));
+        assert!(!busy.open(key), "one link at a time is opened to a peer");
+        // the peer dialed too, and that link outlives the one opened here
+        busy.answer(key);
+        busy.release(key);
+        assert!(!busy.open(key), "the answered link still runs");
+        busy.release(key);
+        assert!(busy.open(key));
+        busy.release(key);
+        busy.release(key);
+        assert!(busy.open(key), "releasing more than was held cannot wedge the peer");
+    }
+
     use super::*;
 
     #[tokio::test]
