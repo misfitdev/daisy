@@ -63,7 +63,40 @@ pub(super) fn run() {
 
     peer_row_dialogs_are_sheets(mtm, &target, home.path());
     update_controls_report_and_follow_the_switch(mtm, &target);
+    an_update_relaunch_closes_the_advanced_sheet(mtm, &target);
     arrangement_confirmation(mtm);
+}
+
+/// macOS refuses to quit an app with a sheet open, so an update's relaunch
+/// waited while Advanced, where Check Now lives, was still showing.
+fn an_update_relaunch_closes_the_advanced_sheet(mtm: objc2_foundation::MainThreadMarker, target: &super::AppDelegate) {
+    use objc2::{DefinedClass, MainThreadOnly};
+    use objc2_app_kit::{NSBackingStoreType, NSWindow, NSWindowStyleMask};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let advanced = &target.ivars().advanced.get().expect("Advanced was built above").window;
+    // SAFETY: a plain titled window, retained for the rest of the check.
+    let main = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(400.0, 300.0)),
+            NSWindowStyleMask::Titled,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    // SAFETY: the window stays retained by `main` until the check ends.
+    unsafe { main.setReleasedWhenClosed(false) };
+    main.beginSheet_completionHandler(advanced, None);
+    wait_for("the Advanced sheet to attach", || main.attachedSheet().is_some());
+
+    let resumed = std::cell::Cell::new(false);
+    crate::macos::update::relaunch(mtm, || {
+        assert!(main.attachedSheet().is_none(), "no sheet may hold up the relaunch");
+        resumed.set(true);
+    });
+    assert!(resumed.get(), "the relaunch goes ahead");
+    main.close();
 }
 
 fn arrangement_confirmation(mtm: objc2_foundation::MainThreadMarker) {
