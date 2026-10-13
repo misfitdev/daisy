@@ -125,42 +125,61 @@ app *args: bundle
 trace output="$HOME/daisy-trace.ndjson":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -f "{{trace_pid}}" ] && kill -0 "$(cat "{{trace_pid}}")" 2>/dev/null; then
-        echo "a trace collector is already running (pid $(cat "{{trace_pid}}")); run 'just trace-stop' first" >&2
+    pidfile="{{trace_pid}}"
+    {{collector}}
+    if pid="$(collector_pid)"; then
+        echo "a trace collector is already running (pid $pid); run 'just trace-stop' first" >&2
         exit 1
     fi
+    rm -f "{{trace_pid}}"
     if [ -e "{{output}}" ]; then
         mv -f "{{output}}" "{{output}}.$(date +%Y%m%d-%H%M%S)"
     fi
     nohup "{{installed}}/Contents/MacOS/daisy" trace --output "{{output}}" </dev/null >"{{trace_log}}" 2>&1 &
-    echo $! > "{{trace_pid}}"
+    pid=$!
+    printf '%s\n%s\n' "$pid" "$(started_at "$pid")" > "{{trace_pid}}"
     sleep 2
-    if ! kill -0 "$(cat "{{trace_pid}}")" 2>/dev/null; then
+    if ! collector_pid >/dev/null; then
         cat "{{trace_log}}" >&2
         rm -f "{{trace_pid}}"
         exit 1
     fi
-    echo "collecting into {{output}} (pid $(cat "{{trace_pid}}"))"
+    echo "collecting into {{output}} (pid $pid)"
 
 # Stop the background trace collector started by `just trace`
 trace-stop:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ ! -f "{{trace_pid}}" ]; then
+    pidfile="{{trace_pid}}"
+    {{collector}}
+    if pid="$(collector_pid)"; then
+        kill -INT "$pid"
+    else
         echo "no trace collector is running" >&2
-        exit 0
     fi
-    kill -INT "$(cat "{{trace_pid}}")" 2>/dev/null || true
     rm -f "{{trace_pid}}"
 
 # Summarize a trace: what was recorded, and every pointer decision in order
 trace-summary file="$HOME/daisy-trace.ndjson":
     duckdb -c "select record.target as target, record.fields.message as message, count(*) as n from read_ndjson('{{file}}', ignore_errors=true) group by all order by n desc"
-    duckdb -c "select record.unix_ms as unix_ms, substr(system, 1, 8) as system, record.fields.message as message, record.fields.reason as reason, record.fields.location as location, record.fields.pinned as pinned, record.fields.target as target, record.fields.at as at, record.fields.gap_ms as gap_ms, record.fields.queued as queued, record.fields.ms as ms from read_ndjson('{{file}}', ignore_errors=true) where record.fields.message in ('local capture decision', 'sharing transition', 'injected motion resumed', 'cursor strayed from injected moves', 'local input backlog', 'peer message backlog', 'slow peer message handling', 'slow round trip to the peer', 'edge leave decision', 'remote transition decision') order by record.unix_ms, record.sequence"
+    duckdb -c "select record.unix_ms as unix_ms, substr(system, 1, 8) as system, record.fields.message as message, record.fields.reason as reason, record.fields.location as location, record.fields.pinned as pinned, record.fields.target as target, record.fields.at as at, record.fields.gap_ms as gap_ms, record.fields.queued as queued, record.fields.ms as ms from read_ndjson('{{file}}', ignore_errors=true) where record.fields.message in ('local capture decision', 'sharing transition', 'injected motion resumed', 'cursor strayed from injected moves', 'local input backlog', 'peer message backlog', 'slow peer message handling', 'slow round trip to the peer', 'edge leave decision', 'remote transition decision', 'modifier replayed', 'idle timer reset carries the function flag') order by record.unix_ms, record.sequence"
 
 installed := "/Applications/Daisy.app"
 trace_pid := "$HOME/Library/Application Support/daisy/trace-collector.pid"
 trace_log := "$HOME/Library/Application Support/daisy/trace-collector.log"
+# The recorded pid is the collector only while that process still has the
+# start time recorded with it; a pid reused by another process never matches.
+collector := '''started_at() {
+        ps -p "$1" -o lstart= 2>/dev/null | xargs
+    }
+    collector_pid() {
+        [ -f "$pidfile" ] || return 1
+        local pid started
+        { read -r pid; read -r started; } < "$pidfile" || return 1
+        [ -n "$pid" ] && [ "$(started_at "$pid")" = "$started" ] || return 1
+        ps -p "$pid" -o command= | grep -q "daisy trace" || return 1
+        echo "$pid"
+    }'''
 
 # Run an ad hoc Daisy.app on throwaway data with sample peers, to try the
 # interface without permissions, pairing or this system's real peers
