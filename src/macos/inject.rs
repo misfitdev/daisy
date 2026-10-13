@@ -269,6 +269,15 @@ mod tests {
 
     use super::*;
 
+    /// Converting a CGEvent to an NSEvent goes through HIToolbox's type
+    /// manager, whose tables are not thread safe; concurrent tests crash in
+    /// it with a bus error.
+    static CONVERSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn converting() -> std::sync::MutexGuard<'static, ()> {
+        CONVERSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[repr(transparent)]
     struct Event(CGEventRef);
 
@@ -280,6 +289,7 @@ mod tests {
     #[test]
     fn appkit_reads_every_keyboard_modifier_combination_and_repeat() {
         use objc2_app_kit::NSEventType;
+        let _converting = converting();
         let source = unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) };
         let masks = [0x0002_0000, 0x0004_0000, 0x0008_0000, 0x0010_0000, 0x0080_0000];
         let all_flags = masks.iter().fold(0, |flags, mask| flags | mask);
@@ -335,6 +345,7 @@ mod tests {
     #[test]
     fn appkit_reads_left_and_right_modifier_transitions() {
         use objc2_app_kit::NSEventType;
+        let _converting = converting();
         for (code, flag) in [
             (55, 0x0010_0008),
             (54, 0x0010_0010),
@@ -376,6 +387,7 @@ mod tests {
 
     #[test]
     fn appkit_reads_a_replayed_scroll_as_trackpad_scrolling() {
+        let _converting = converting();
         for (phase, gesture, momentum) in [
             (ScrollPhase::MayBegin, NSEventPhase::MayBegin, NSEventPhase::None),
             (ScrollPhase::Began, NSEventPhase::Began, NSEventPhase::None),
