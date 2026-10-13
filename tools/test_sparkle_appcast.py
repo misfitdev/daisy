@@ -27,6 +27,23 @@ class Appcast(unittest.TestCase):
         self.assertEqual(len([item for item in root.findall('channel/item')
                               if item.findtext(f'{{{feed.NS}}}version') == INSTALLED_VERSION]), 4)
 
+    def test_release_notes_list_changes_then_protocol_versions(self):
+        notes = "## [1.2.3] - 2026-10-13\n\n### Bug Fixes\n\n- Stop <b>storms</b> & jumps\n- Keep peers busy\n"
+        text = feed.release_notes_html(notes, [6, 7])
+        self.assertIn("<h3>Bug Fixes</h3><ul><li>Stop &lt;b&gt;storms&lt;/b&gt; &amp; jumps</li><li>Keep peers busy</li></ul>", text)
+        self.assertTrue(text.endswith("<h3>Supported protocol versions</h3><ul><li>6</li><li>7</li></ul>"))
+        self.assertNotIn("1.2.3", text, "the dialog already names the version")
+        self.assertIn("<style>", text)
+        self.assertIn("Maintenance changes only.", feed.release_notes_html("## [1.2.4] - 2026-10-14\n", [7]))
+
+    def test_each_feed_entry_carries_the_release_notes(self):
+        root = ET.fromstring('<rss version="2.0"><channel><title>Daisy Updates</title></channel></rss>')
+        feed.add_release(root, dict(version=INSTALLED_VERSION, protocol=7, supported_protocols=[6, 7]), 42, 'signature',
+                         "### Features\n\n- Trace pointer jumps\n")
+        descriptions = {item.findtext('description') for item in root.findall('channel/item')}
+        self.assertEqual(len(descriptions), 1)
+        self.assertIn("<li>Trace pointer jumps</li>", descriptions.pop())
+
     def test_changed_archive_is_rejected_before_signing_or_feed_download(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

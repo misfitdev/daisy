@@ -225,7 +225,11 @@ Ad hoc CI packages contain the framework but do not generate production feeds.
 
 `tools/sparkle_appcast.py` verifies the preceding feed's signature, retains its
 older entries, adds the current release in stable and major/protocol channels,
-signs the final ZIP, and signs the feed. The resulting `appcast.xml` is uploaded
+signs the final ZIP, and signs the feed. Each entry's description is what the
+update dialog shows: the release's changelog from `just notes`, then its
+supported protocol versions, as styled HTML. `cliff.toml` reads the conventional
+commit lines in a squash-merge body, so a version PR's notes list each change
+it contains rather than its title. The resulting `appcast.xml` is uploaded
 with the release assets and included in artifact attestations and SLSA subjects.
 The release workflow dispatches Pages with its explicit tag; Pages downloads
 that release's feed to `site/public/updates/appcast.xml` before building. PR site
