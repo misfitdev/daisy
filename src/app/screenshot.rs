@@ -10,7 +10,7 @@ use objc2::runtime::AnyObject;
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSBitmapImageFileType, NSBitmapImageRep, NSView,
 };
-use objc2_foundation::{MainThreadMarker, NSDictionary, NSObject, NSString};
+use objc2_foundation::{MainThreadMarker, NSDictionary, NSObject};
 
 use super::map::Shown;
 use super::window::{MainViews, PeerRow};
@@ -53,8 +53,7 @@ pub fn save(path: &Path) -> Result<()> {
             hint: String::new(),
         },
     ]);
-    views.title.setStringValue(&NSString::from_str("Connected to Studio"));
-    views.detail.setStringValue(&NSString::from_str("4 ms"));
+    views.show_status("", "");
     views.show_peers(
         &[PeerRow {
             name: "Studio".to_owned(),

@@ -50,7 +50,7 @@ Using a system's own keyboard or trackpad takes control there immediately. Momen
 
 **Control-Option-Command-Escape** returns control to the system you are at and centers its pointer on the main display. Disconnecting or stopping sharing also releases held remote input.
 
-Check the window title for **Connected**, **Not Sharing** or the current connection state. Under **Peers**, each row shows **Connected** with round-trip latency, **Not connected**, or **Locked**. The system in control has a coral daisy in the arrangement. The menu-bar flower has a yellow center when connected and a gray center otherwise.
+Under **Peers**, each row shows **Connected** with round-trip latency, **Not connected**, or **Locked**. Setup, reconnection and error messages appear below the display arrangement when needed. The system in control has a coral daisy in the arrangement. The menu-bar flower has a yellow center when connected and a gray center otherwise.
 
 ## Keyboard
 
