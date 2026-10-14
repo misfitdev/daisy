@@ -36,6 +36,11 @@ class Appcast(unittest.TestCase):
         self.assertIn("<style>", text)
         self.assertIn("Maintenance changes only.", feed.release_notes_html("## [1.2.4] - 2026-10-14\n", [7]))
 
+    def test_scope_and_breaking_markers_render_as_html(self):
+        text = feed.release_notes_html("### Bug Fixes\n\n- *(update)* [**breaking**] Restart <now>\n", [7])
+        self.assertIn("<li><em>update:</em> <strong>Breaking:</strong> Restart &lt;now&gt;</li>", text)
+        self.assertNotIn("*", text.split("</style>")[1])
+
     def test_each_feed_entry_carries_the_release_notes(self):
         root = ET.fromstring('<rss version="2.0"><channel><title>Daisy Updates</title></channel></rss>')
         feed.add_release(root, dict(version=INSTALLED_VERSION, protocol=7, supported_protocols=[6, 7]), 42, 'signature',

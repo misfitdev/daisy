@@ -38,6 +38,14 @@ NOTES_STYLE = (
 )
 
 
+def change_html(item):
+    """One changelog line as HTML. git-cliff marks a scope as `*(scope)*` and a
+    breaking change as `[**breaking**]` for Markdown release pages."""
+    text = html.escape(item)
+    text = re.sub(r"^\*\(([^)]*)\)\* ", r"<em>\1:</em> ", text)
+    return re.sub(r"\[\*\*breaking\*\*\] ", "<strong>Breaking:</strong> ", text)
+
+
 def release_notes_html(notes, protocols):
     """The update dialog's text: the changelog git-cliff renders for this
     release, then the protocol versions it can talk to."""
@@ -54,7 +62,7 @@ def release_notes_html(notes, protocols):
             close_list()
             parts.append(f"<h3>{html.escape(line[4:])}</h3>")
         elif line.startswith("- "):
-            items.append(html.escape(line[2:]))
+            items.append(change_html(line[2:]))
     close_list()
     if len(parts) == 1:
         parts.append("<p>Maintenance changes only.</p>")
