@@ -3,6 +3,7 @@ import copy
 from datetime import datetime, timezone
 from email.utils import format_datetime
 import hashlib
+import html
 from itertools import combinations
 import os
 from pathlib import Path
@@ -27,7 +28,50 @@ def signing_args():
     return ["--ed-key-file", key] if key else ["--account", "dev.misfit.daisy.sparkle"]
 
 
-def add_release(root, manifest, size, signature):
+# Sparkle shows the description in a web view; without a style it uses a
+# large serif default. Matches the system's dialog text in light and dark.
+NOTES_STYLE = (
+    "<style>:root{color-scheme:light dark}"
+    "body{font:13px -apple-system,system-ui,sans-serif;margin:4px 2px;line-height:1.4}"
+    "h3{font-size:13px;font-weight:600;margin:10px 0 2px}h3:first-child{margin-top:0}"
+    "ul{margin:0;padding-left:20px}li{margin:1px 0}</style>"
+)
+
+
+def change_html(item):
+    """One changelog line as HTML. git-cliff marks a scope as `*(scope)*` and a
+    breaking change as `[**breaking**]` for Markdown release pages."""
+    text = html.escape(item)
+    text = re.sub(r"^\*\(([^)]*)\)\* ", r"<em>\1:</em> ", text)
+    return re.sub(r"\[\*\*breaking\*\*\] ", "<strong>Breaking:</strong> ", text)
+
+
+def release_notes_html(notes, protocols):
+    """The update dialog's text: the changelog git-cliff renders for this
+    release, then the protocol versions it can talk to."""
+    parts, items = [NOTES_STYLE], []
+
+    def close_list():
+        if items:
+            parts.append("<ul>" + "".join(f"<li>{item}</li>" for item in items) + "</ul>")
+            items.clear()
+
+    for line in notes.splitlines():
+        line = line.strip()
+        if line.startswith("### "):
+            close_list()
+            parts.append(f"<h3>{html.escape(line[4:])}</h3>")
+        elif line.startswith("- "):
+            items.append(change_html(line[2:]))
+    close_list()
+    if len(parts) == 1:
+        parts.append("<p>Maintenance changes only.</p>")
+    parts.append("<h3>Supported protocol versions</h3>")
+    parts.append("<ul>" + "".join(f"<li>{protocol}</li>" for protocol in protocols) + "</ul>")
+    return "".join(parts)
+
+
+def add_release(root, manifest, size, signature, notes=""):
     version = manifest["version"]
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("feed requires a stable release version")
@@ -53,7 +97,7 @@ def add_release(root, manifest, size, signature):
         ET.SubElement(item, f"{{{NS}}}shortVersionString").text = version
         ET.SubElement(item, f"{{{NS}}}channel").text = name
         ET.SubElement(item, f"{{{NS}}}minimumSystemVersion").text = "26.0"
-        ET.SubElement(item, "description").text = "Supported network protocols: " + ", ".join(map(str, protocols)) + "."
+        ET.SubElement(item, "description").text = release_notes_html(notes, protocols)
         ET.SubElement(item, "enclosure", {
             "url": f"https://github.com/misfitdev/daisy/releases/download/v{version}/Daisy-{version}-macos-arm64.zip",
             "length": str(size), "type": "application/octet-stream",
@@ -83,7 +127,7 @@ def previous_feed():
     return ET.fromstring(data)
 
 
-def generate(archive, manifest_path, output):
+def generate(archive, manifest_path, output, notes_path=None):
     manifest = tomllib.loads(manifest_path.read_text())
     if manifest["format"] != 2 or archive.name != f"Daisy-{manifest['version']}-macos-arm64.zip":
         raise ValueError("release archive does not match metadata")
@@ -91,13 +135,15 @@ def generate(archive, manifest_path, output):
     if hashlib.sha256(data).hexdigest() != manifest["archive_sha256"]:
         raise ValueError("release archive checksum does not match metadata")
     signature = subprocess.check_output([str(SIGNER), *signing_args(), "-p", str(archive)], text=True).strip()
-    root = add_release(previous_feed(), manifest, len(data), signature)
+    notes = notes_path.read_text() if notes_path else ""
+    root = add_release(previous_feed(), manifest, len(data), signature, notes)
     ET.indent(root)
     ET.ElementTree(root).write(output, encoding="utf-8", xml_declaration=True)
     subprocess.run([str(SIGNER), *signing_args(), str(output)], check=True)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        sys.exit("usage: sparkle_appcast.py ARCHIVE MANIFEST OUTPUT")
-    generate(*(Path(arg) for arg in sys.argv[1:]))
+    if len(sys.argv) != 5:
+        sys.exit("usage: sparkle_appcast.py ARCHIVE MANIFEST NOTES OUTPUT")
+    archive, manifest, notes, output = (Path(arg) for arg in sys.argv[1:])
+    generate(archive, manifest, output, notes)

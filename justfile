@@ -301,13 +301,14 @@ package: bundle
     done
     cargo run --release --quiet --example update_manifest -- "$zip" > "{{dist}}/Daisy-$version-update.toml"
     if [ "$identity" != "-" ]; then
-        python3 tools/sparkle_appcast.py "$zip" "{{dist}}/Daisy-$version-update.toml" "{{dist}}/appcast.xml"
+        {{just_executable()}} notes > "{{dist}}/Daisy-$version-notes.md"
+        python3 tools/sparkle_appcast.py "$zip" "{{dist}}/Daisy-$version-update.toml" "{{dist}}/Daisy-$version-notes.md" "{{dist}}/appcast.xml"
     fi
     ls -l "{{dist}}"
 
-# Release notes for the current version, from conventional commits
+# Release notes for the tagged commit, or for unreleased commits, from conventional commits
 notes:
-    @git cliff --latest --strip header 2>/dev/null || git cliff --unreleased --strip header
+    @git cliff --current --strip header 2>/dev/null || git cliff --unreleased --strip header
 
 # Serve the website locally at http://localhost:4321/
 site-dev:

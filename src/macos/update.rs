@@ -59,7 +59,7 @@ impl Updater {
                     pending.borrow_mut().postpone(update.version, continuation);
                     let result = pending.borrow_mut().retry(|version| before_relaunch(version));
                     match result {
-                        Ok(Some(continuation)) => continuation.resume(mtm),
+                        Ok(Some(continuation)) => relaunch(mtm, || continuation.resume(mtm)),
                         Ok(None) => {}
                         Err(error) => {
                             tracing::error!(error = ?error, "update postponed: relaunch state could not be saved");
@@ -98,7 +98,7 @@ impl Updater {
             .borrow_mut()
             .retry(|version| (self.save_relaunch)(version))?;
         if let Some(continuation) = pending {
-            continuation.resume(self.mtm);
+            relaunch(self.mtm, || continuation.resume(self.mtm));
             return Ok(());
         }
         self.native.set_allowed_channels(Some(vec!["stable".to_owned()]))?;
@@ -111,5 +111,21 @@ impl Updater {
 
     pub fn take_relaunch_error(&self) -> Option<String> {
         self.relaunch_error.borrow_mut().take()
+    }
+}
+
+/// Lets an update's relaunch go ahead. macOS refuses to quit an app while a
+/// sheet is open, so the relaunch would wait until someone closed it, with
+/// the update window covering the main one; every sheet is closed first.
+pub fn relaunch(mtm: MainThreadMarker, resume: impl FnOnce()) {
+    end_sheets(mtm);
+    resume();
+}
+
+fn end_sheets(mtm: MainThreadMarker) {
+    for window in objc2_app_kit::NSApplication::sharedApplication(mtm).windows() {
+        while let Some(sheet) = window.attachedSheet() {
+            window.endSheet(&sheet);
+        }
     }
 }
