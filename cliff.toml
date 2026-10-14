@@ -12,7 +12,7 @@ body = """
     ## [unreleased]
 {% endif %}\
 {% for group, commits in commits | group_by(attribute="group") %}\
-{% if group is not containing("Release summary") %}
+{% if group is not containing("Unlisted") %}
     ### {{ group | striptags | trim | upper_first }}
     {% for commit in commits | unique(attribute="message") %}
         - {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
@@ -51,9 +51,6 @@ require_conventional = false
 split_commits = true
 # An array of regex based parsers to modify commit messages prior to further processing.
 commit_preprocessors = [
-  # a version PR's squash title, "0.10.1: summary (#47)", is a release, not a
-  # change; it must still pass so the commits in its body are read
-  { pattern = '^\d+\.\d+\.\d+: ', replace = "release: " },
   { pattern = '(?m)^\* ', replace = "" },
   # a squash title repeats a commit from its body, apart from the PR number
   { pattern = '^([^\n]*) \(#\d+\)', replace = "$1" },
@@ -74,13 +71,13 @@ commit_parsers = [
     { message = "^perf", group = "<!-- 2 -->Performance" },
     { body = ".*security", group = "<!-- 3 -->Security" },
     { message = "^doc", group = "<!-- 4 -->Documentation" },
-    # housekeeping means nothing to someone installing a release
-    { message = "^(chore|ci|build|test|style|refactor)", skip = true },
+    # Nothing is skipped: a skipped squash title takes the commits in its body
+    # with it. Housekeeping, prose titles such as "Show release notes (#48)"
+    # and version titles such as "0.10.1: summary" go to a group the template
+    # leaves out, which means nothing to someone installing a release.
+    { message = "^(chore|ci|build|test|style|refactor)", group = "<!-- 9 -->Unlisted" },
     { message = "^revert", group = "<!-- 5 -->Reverts" },
-    { message = "^release", group = "<!-- 9 -->Release summary" },
-    # only the types above reach release notes; prose in a squashed body that
-    # happens to look like "word: text" must not
-    { message = ".*", skip = true },
+    { message = ".*", group = "<!-- 9 -->Unlisted" },
 ]
 # Exclude commits that are not matched by any commit parser.
 filter_commits = false
