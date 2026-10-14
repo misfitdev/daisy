@@ -21,7 +21,7 @@ pub const WIDTH: f64 = 560.0;
 const MARGIN: f64 = 20.0;
 const ROW: f64 = 38.0;
 const PEER_ROW: f64 = 50.0;
-const HERO: f64 = 214.0;
+const HERO: f64 = 166.0;
 const GROUP_WIDTH: f64 = WIDTH - 2.0 * MARGIN;
 const ADVANCED_WIDTH: f64 = 460.0;
 
@@ -93,8 +93,8 @@ pub struct MainViews {
     pub window: Retained<NSWindow>,
     root: Retained<Panel>,
     pub arrange: Retained<ArrangeView>,
-    pub title: Retained<NSTextField>,
-    pub detail: Retained<NSTextField>,
+    title: Retained<NSTextField>,
+    detail: Retained<NSTextField>,
     peers_heading: Retained<NSTextField>,
     add_peer: Retained<NSButton>,
     peers: Retained<Panel>,
@@ -215,6 +215,7 @@ impl MainViews {
         views.root.addSubview(&escape_key(sel!(closeKeyWindow:), target, mtm));
         views.show_peers(&[], target);
         views.show_check(false, &[]);
+        views.show_status("Not Sharing", "");
         views.window.center();
         views
     }
@@ -225,7 +226,7 @@ impl MainViews {
         } else {
             format!("Cannot reach: {}. Drag the screens closer together.", names.join(", "))
         };
-        if self.question.isHidden() == !checking && self.unreachable.stringValue().to_string() == caption {
+        if self.question.isHidden() != checking && self.unreachable.stringValue().to_string() == caption {
             return;
         }
         self.question.setHidden(!checking);
@@ -239,13 +240,44 @@ impl MainViews {
                 .max(18.0)
         });
         self.unreachable.setFrameSize(NSSize::new(GROUP_WIDTH, caption_height));
-        let extra = if checking { 46.0 + caption_height } else { 0.0 };
         self.arrange.set_check(checking);
-        self.hero.setFrameSize(NSSize::new(WIDTH, HERO + extra));
-        self.rule.setFrameOrigin(NSPoint::new(0.0, HERO + extra));
+        self.layout_hero();
+    }
+
+    pub fn show_status(&self, title: &str, detail: &str) {
+        if self.title.stringValue().to_string() == title
+            && self.detail.stringValue().to_string() == detail
+            && self.title.isHidden() == title.is_empty()
+            && self.detail.isHidden() == detail.is_empty()
+        {
+            return;
+        }
+        self.title.setStringValue(&NSString::from_str(title));
+        self.detail.setStringValue(&NSString::from_str(detail));
+        self.title.setHidden(title.is_empty());
+        self.detail.setHidden(detail.is_empty());
+        self.layout_hero();
+    }
+
+    fn layout_hero(&self) {
+        let extra = if self.question.isHidden() {
+            0.0
+        } else {
+            46.0 + self.unreachable.frame().size.height
+        };
         self.arrange.setFrameOrigin(NSPoint::new(MARGIN, 14.0 + extra));
-        self.title.setFrameOrigin(NSPoint::new(MARGIN, 152.0 + extra));
-        self.detail.setFrameOrigin(NSPoint::new(MARGIN, 176.0 + extra));
+        let mut y = 152.0 + extra;
+        if !self.title.isHidden() {
+            self.title.setFrameOrigin(NSPoint::new(MARGIN, y));
+            y += 24.0;
+        }
+        if !self.detail.isHidden() {
+            self.detail.setFrameOrigin(NSPoint::new(MARGIN, y));
+            y += 24.0;
+        }
+        let height = y + HERO - 152.0;
+        self.hero.setFrameSize(NSSize::new(WIDTH, height));
+        self.rule.setFrameOrigin(NSPoint::new(0.0, height));
         self.layout();
     }
 

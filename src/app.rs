@@ -1052,8 +1052,7 @@ impl AppDelegate {
                 })
                 .collect();
             views.show_check(arranged.as_ref().is_some_and(|view| view.check.is_some()), &unreachable);
-            views.title.setStringValue(&NSString::from_str(&copy.title));
-            views.detail.setStringValue(&NSString::from_str(&copy.detail));
+            views.show_status(if copy.connected { "" } else { &copy.title }, &copy.detail);
             views.arrange.show(shown);
         }
         if let Some(item) = self.ivars().status_item.get()
@@ -1657,7 +1656,7 @@ fn status_copy(status: &Status, links: &std::collections::BTreeMap<crate::identi
                 latencies => format!("{title} · {}", latencies.join(", ")),
             };
             let detail = match locked.as_slice() {
-                [] => latencies.join(" · "),
+                [] => String::new(),
                 [one] => format!("{one} is locked; unlock it there."),
                 many => format!("{} are locked; unlock them there.", many.join(", ")),
             };
