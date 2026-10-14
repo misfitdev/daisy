@@ -552,7 +552,9 @@ where
                         {
                             ended.push((key, Err(error)));
                         }
-                        if reclaiming { crossed = None; }
+                        if reclaiming && let Some(peer) = crossed.take() {
+                            sharing.expect_snapshot(Some(peer));
+                        }
                     }
                 }
             }
@@ -3588,10 +3590,88 @@ mod tests {
         assert_eq!(board.clipboard().content(), Some(text("copied on the peer")));
     }
 
-    /// The peer takes control of this system, something new is copied here
-    /// while the peer is in control, then the peer hands control back with
-    /// `hand_back`.
-    /// Returns what this system sent from then on.
+    /// An image copied on the driven peer follows the recovery shortcut home.
+    async fn clipboard_after_local_recovery_shortcut(ids: bool) {
+        let (local, mut peer) = if ids {
+            id_channels_with_capacity(1 << 17).await
+        } else {
+            channels().await
+        };
+        let control = control(&local, true);
+        let them = local.remote_key();
+        let me = me_of(&control);
+        let (capture, input) = mpsc::channel(16);
+        let mut board = no_clipboard();
+        let copied = crate::clipboard::Content {
+            png: Some(vec![7; crate::clipboard::CHUNK_LEN + 1]),
+            ..Default::default()
+        };
+        let script = async {
+            capture
+                .send(Message::Enter {
+                    generation: 0,
+                    to: them,
+                    at: (999.0, 3.0),
+                })
+                .await
+                .unwrap();
+            while !matches!(next(&mut peer).await, Message::Enter { .. }) {}
+            round_trip(&mut peer, 1).await;
+            capture.send(Message::Reclaim { generation: 0 }).await.unwrap();
+            while !matches!(next(&mut peer).await, Message::Reclaim { .. }) {}
+            let mut theirs = board_with(copied.clone(), true);
+            let parts = if ids {
+                let copy = theirs.offer(them, me).unwrap();
+                peer.send(&Message::ClipboardOffer { copy }).await.unwrap();
+                assert_eq!(next_clipboard(&mut peer).await, Message::ClipboardRequest { copy });
+                theirs.requested(them, me, copy, false).unwrap()()
+            } else {
+                theirs.crossing(me).unwrap()()
+            };
+            for part in parts {
+                peer.send(&Message::Clipboard { part }).await.unwrap();
+            }
+            round_trip(&mut peer, 2).await;
+            drop(capture);
+            drop(peer);
+        };
+        let (mut pointer, mut injector) = (Returned::default(), Recorded::default());
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let (_, result) = tokio::time::timeout(Duration::from_secs(2), async { tokio::join!(script, session) })
+            .await
+            .unwrap();
+        result.unwrap();
+        assert_eq!(
+            board
+                .clipboard()
+                .content()
+                .and_then(|content| content.png)
+                .map(|png| png.len()),
+            copied.png.as_ref().map(Vec::len)
+        );
+        assert_eq!(board.clipboard().content(), Some(copied));
+    }
+
+    #[tokio::test]
+    async fn recovery_shortcut_receives_the_requested_image_copy() {
+        clipboard_after_local_recovery_shortcut(true).await;
+    }
+
+    #[tokio::test]
+    async fn recovery_shortcut_receives_an_older_peers_image_snapshot() {
+        clipboard_after_local_recovery_shortcut(false).await;
+    }
+
+    /// The peer takes control, a new copy is made here, then control returns.
+    /// Returns what this system sent after `hand_back`.
     async fn clipboard_after_handing_back(hand_back: &[Message]) -> Vec<Message> {
         let (local, mut peer) = channels().await;
         let control = control(&local, false);
