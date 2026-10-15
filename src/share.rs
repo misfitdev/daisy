@@ -560,7 +560,8 @@ where
             }
             event = received.recv() => {
                 let Some((peer, message)) = event else { continue };
-                pace.incoming(received.len(), control.now());
+                let queued_before = received.len();
+                pace.incoming(queued_before, control.now());
                 let handling = Instant::now();
                 let Some(link) = links.get_mut(&peer) else { continue };
                 let quiet = link.last_heard.elapsed();
@@ -570,6 +571,7 @@ where
                     Err(SessionError::Closed) => { ended.push((peer, closed_after(quiet))); continue; }
                     Err(error) => { ended.push((peer, Err(error.into()))); continue; }
                 };
+                let kind = message_kind(&message);
                 log_transition("incoming", me, Some(peer), &message, &control);
                 let outcome: Result<()> = (|| {
                     match message {
@@ -792,7 +794,7 @@ where
                     arrange(&placement, release.target, pointer);
                 }
                 publish(&control, &links, &group.reports);
-                pace.handled(handling.elapsed(), control.now());
+                pace.handled(peer, kind, queued_before, handling.elapsed(), control.now());
             }
         Ok(()) = choices.changed() => {
             let chosen = choices.borrow_and_update().clone();
@@ -916,10 +918,52 @@ impl Pace {
         }
     }
 
-    fn handled(&mut self, took: Duration, now: Duration) {
+    fn handled(&mut self, peer: PublicKey, kind: &'static str, queued_before: usize, took: Duration, now: Duration) {
         if took >= crate::latency::SPIKE && self.handling.allows(now) {
-            tracing::debug!(ms = took.as_millis() as u64, "slow peer message handling");
+            tracing::debug!(
+                peer = %peer,
+                kind,
+                queued_before,
+                ms = took.as_millis() as u64,
+                "slow peer message handling"
+            );
         }
+    }
+}
+
+fn message_kind(message: &Message) -> &'static str {
+    match message {
+        Message::Hello { .. } => "Hello",
+        Message::PairingKeyExchange { .. } => "PairingKeyExchange",
+        Message::PairingConfirmation { .. } => "PairingConfirmation",
+        Message::Ping { .. } => "Ping",
+        Message::Pong { .. } => "Pong",
+        Message::Clipboard { .. } => "Clipboard",
+        Message::Layout { .. } => "Layout",
+        Message::ControlClaim { .. } => "ControlClaim",
+        Message::Enter { .. } => "Enter",
+        Message::Input { .. } => "Input",
+        Message::Leave { .. } => "Leave",
+        Message::Reclaim { .. } => "Reclaim",
+        Message::ControlState { .. } => "ControlState",
+        Message::Displays { .. } => "Displays",
+        Message::Arrangement { .. } => "Arrangement",
+        Message::Locked { .. } => "Locked",
+        Message::SigningKey { .. } => "SigningKey",
+        Message::Introduce { .. } => "Introduce",
+        Message::Revoke { .. } => "Revoke",
+        Message::DeviceProof { .. } => "DeviceProof",
+        Message::Activity { .. } => "Activity",
+        Message::TraceControl { .. } => "TraceControl",
+        Message::TraceRecord { .. } => "TraceRecord",
+        Message::TraceAck { .. } => "TraceAck",
+        Message::FilesOffer { .. } => "FilesOffer",
+        Message::FilesRelease { .. } => "FilesRelease",
+        Message::FilesRequest { .. } => "FilesRequest",
+        Message::FilesPart { .. } => "FilesPart",
+        Message::ClipboardOffer { .. } => "ClipboardOffer",
+        Message::ClipboardRequest { .. } => "ClipboardRequest",
+        Message::ArrangementConfirmed { .. } => "ArrangementConfirmed",
     }
 }
 
