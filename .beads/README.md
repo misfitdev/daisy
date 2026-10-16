@@ -8,24 +8,21 @@ to the Daisy Git repository. The JSONL export is local only and ignored by Git.
 
 ## Fresh clone
 
-Configure DoltHub authentication before connecting. Beads 1.3 adopts Git's
-`origin` as a Dolt remote during initialization, so replace that mapping with
-Daisy's DoltHub remote:
+Configure DoltHub authentication before connecting. Initialize the local
+database by cloning the shared database with Beads' supported `--remote` flow:
 
 ```bash
-bd init --non-interactive --skip-agents
-bd dolt remote remove origin
-bd dolt remote add origin <private-dolthub-remote>
-bd dolt pull --remote origin
+bd init --non-interactive --skip-agents --remote <private-dolthub-remote>
 bd config set dolt.auto-push true
 bd config set export.auto false
 ```
 
 Replace `<private-dolthub-remote>` with the private remote locator configured
-for the clone. The Dolt remote named `origin` is separate from Daisy's Git
-remote. Pull before working in another clone; Beads auto-pushes issue changes
-but does not auto-pull changes from other clones. Avoid concurrent edits from
-multiple clones; pull and resolve any Dolt conflicts before continuing.
+for the clone. Before working in another clone, run `bd dolt pull` and resolve
+any Dolt conflicts. Beads auto-pushes issue changes but does not auto-pull
+changes from other clones. Auto-push may be delayed or fail. Before switching
+clones, run `bd dolt push` and confirm it succeeds. Avoid concurrent edits from
+multiple clones.
 
 Confirm the workspace:
 
