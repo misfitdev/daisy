@@ -1051,7 +1051,11 @@ impl AppDelegate {
                         .unwrap_or_else(|| "Peer".to_owned())
                 })
                 .collect();
-            views.show_check(arranged.as_ref().is_some_and(|view| view.check.is_some()), &unreachable);
+            views.show_check(
+                arranged.as_ref().is_some_and(|view| view.check.is_some()),
+                arranged.as_ref().is_some_and(|view| view.restored),
+                &unreachable,
+            );
             views.show_status(if copy.connected { "" } else { &copy.title }, &copy.detail);
             views.arrange.show(shown);
         }

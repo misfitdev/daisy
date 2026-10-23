@@ -117,6 +117,22 @@ pub struct PeerRow {
     pub trust: String,
 }
 
+/// The line above the arrangement: who is out of reach while it is being
+/// checked, or that it was restored. `None` when there is nothing to say.
+pub fn caption(checking: bool, restored: bool, names: &[String]) -> Option<String> {
+    if checking {
+        Some(if names.is_empty() {
+            "Drag the screens to match your desk.".to_owned()
+        } else {
+            format!("Cannot reach: {}. Drag the screens closer together.", names.join(", "))
+        })
+    } else if restored {
+        Some("Restored the layout from last time these screens were together.".to_owned())
+    } else {
+        None
+    }
+}
+
 impl MainViews {
     /// Every control sends its action to `target`.
     pub fn new(mtm: MainThreadMarker, target: &AnyObject) -> Self {
@@ -214,24 +230,27 @@ impl MainViews {
         };
         views.root.addSubview(&escape_key(sel!(closeKeyWindow:), target, mtm));
         views.show_peers(&[], target);
-        views.show_check(false, &[]);
+        views.show_check(false, false, &[]);
         views.show_status("Not Sharing", "");
         views.window.center();
         views
     }
 
-    pub fn show_check(&self, checking: bool, names: &[String]) {
-        let caption = if names.is_empty() {
-            "Drag the screens to match your desk.".to_owned()
-        } else {
-            format!("Cannot reach: {}. Drag the screens closer together.", names.join(", "))
-        };
-        if self.question.isHidden() != checking && self.unreachable.stringValue().to_string() == caption {
+    pub fn show_check(&self, checking: bool, restored: bool, names: &[String]) {
+        let shown = caption(checking, restored, names);
+        let caption = shown.clone().unwrap_or_default();
+        if self.question.isHidden() != checking
+            && self.unreachable.isHidden() == shown.is_none()
+            && self.unreachable.stringValue().to_string() == caption
+        {
             return;
         }
         self.question.setHidden(!checking);
-        self.unreachable.setHidden(!checking);
+        self.unreachable.setHidden(shown.is_none());
         self.looks_right.setHidden(!checking);
+        // below the question while checking, or in its place
+        self.unreachable
+            .setFrameOrigin(NSPoint::new(MARGIN, if checking { 38.0 } else { 14.0 }));
         self.unreachable.setStringValue(&NSString::from_str(&caption));
         self.unreachable.setToolTip(Some(&NSString::from_str(&caption)));
         let caption_height = self.unreachable.cell().map_or(18.0, |cell| {
@@ -260,10 +279,12 @@ impl MainViews {
     }
 
     fn layout_hero(&self) {
-        let extra = if self.question.isHidden() {
-            0.0
-        } else {
+        let extra = if !self.question.isHidden() {
             46.0 + self.unreachable.frame().size.height
+        } else if !self.unreachable.isHidden() {
+            8.0 + self.unreachable.frame().size.height
+        } else {
+            0.0
         };
         self.arrange.setFrameOrigin(NSPoint::new(MARGIN, 14.0 + extra));
         let mut y = 152.0 + extra;
@@ -667,4 +688,25 @@ fn icon_button(
 
 pub(super) fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_restored_layout_says_so_unless_it_is_being_checked() {
+        assert_eq!(super::caption(false, false, &[]), None);
+        assert_eq!(
+            super::caption(false, true, &[]).as_deref(),
+            Some("Restored the layout from last time these screens were together.")
+        );
+        let names = ["Studio".to_owned()];
+        assert_eq!(
+            super::caption(true, true, &names).as_deref(),
+            Some("Cannot reach: Studio. Drag the screens closer together.")
+        );
+        assert_eq!(
+            super::caption(true, false, &[]).as_deref(),
+            Some("Drag the screens to match your desk.")
+        );
+    }
 }

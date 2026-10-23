@@ -325,6 +325,7 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
                     unreachable: layout.unreachable(me),
                     layout,
                     check,
+                    restored: false,
                 }));
                 let Some(command) = commands.blocking_recv() else {
                     break;

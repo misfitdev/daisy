@@ -92,8 +92,8 @@ isolated signed-bundle checks in `docs/releasing.md#update-feed-and-framework`.
   Noise key and device key; a matching Noise key never overrides a device mismatch.
 - Pure decision modules contain no macOS calls and are unit tested directly:
   `input`, `swipe`, `shake`, `pairing`, `trust`, `session`, `control`,
-  `latency`, `share`, `layout`, `install` and `setup`. Keep new decisions
-  out of `src/app/` and the network loops so they can be tested this way;
+  `latency`, `share`, `layout`, `recall`, `install` and `setup`. Keep new
+  decisions out of `src/app/` and the network loops so they can be tested this way;
   the pairing gate (`service::PairingGate`) and opener election
   (`discovery::pairing_opener`) are examples.
 - `src/macos/` carries out decisions and nothing more. Undocumented

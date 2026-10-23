@@ -30,6 +30,7 @@ pub mod pairing;
 pub mod peers;
 pub mod permissions;
 pub mod protocol;
+pub mod recall;
 pub mod reconnect;
 pub mod service;
 pub mod session;

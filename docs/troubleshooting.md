@@ -46,6 +46,12 @@ If the change was unexpected or cannot be explained, keep the connection closed 
 
 Daisy ends a silent connection after three seconds to release remote input. Repeated reconnecting is a symptom, not proof of a particular network fault.
 
+## Screens moved when a system joined
+
+1. **Check:** The arrangement says **Restored the layout from last time these screens were together.** Daisy started from the arrangement last confirmed for these systems and displays.
+2. **Try:** Drag the screens to match your desk.
+3. **Expect:** The new arrangement is remembered for this combination and used the next time it comes back.
+
 ## Repeated “Pasting from…” banners
 
 macOS Universal Clipboard can fetch an image while Daisy reads the clipboard, producing repeated banners, especially with a screenshot on the source clipboard.

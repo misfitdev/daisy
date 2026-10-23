@@ -1458,6 +1458,18 @@ async fn run_core_once(
             }
         }
     }));
+    let (save_layouts, mut layout_saving) = mpsc::unbounded_channel::<crate::recall::Memory<_>>();
+    let layout_store = peers.clone();
+    let _layout_saving = AbortOnDrop(tokio::spawn(async move {
+        while let Some(layouts) = layout_saving.recv().await {
+            if let Err(error) = layout_store.save_layouts(&layouts) {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "the remembered screen arrangements could not be saved"
+                );
+            }
+        }
+    }));
     let group = share::Group {
         files: hub.files.clone(),
         displays: watched,
@@ -1467,6 +1479,8 @@ async fn run_core_once(
         saved: peers.arrangement(),
         saved_confirmation: peers.confirmation(),
         save_confirmation,
+        layouts: peers.layouts(),
+        save_layouts,
         save,
         reports: reports.clone(),
         locked,

@@ -145,40 +145,31 @@ fn arrangement_confirmation(mtm: objc2_foundation::MainThreadMarker) {
         unreachable: layout.unreachable(me),
         layout: layout.clone(),
         check: None,
+        restored: false,
     }));
     assert!(
         !views.window.isVisible(),
         "an unchanged reconnect leaves the window alone"
     );
+    // a drop out of reach lands within it, so it confirms without asking
     target
         .ivars()
         .controller
         .send(Command::Place(peer, (6000.0, 0.0)))
         .unwrap();
-    wait_for("a newly stranded arrangement", || {
+    wait_for("a drop out of reach to land within it", || {
         drain();
-        !views.question.isHidden()
+        store
+            .confirmation()
+            .is_some_and(|saved| saved.version > confirmed.version)
+            && target
+                .ivars()
+                .arranged
+                .borrow()
+                .as_ref()
+                .is_some_and(|arranged| arranged.unreachable.is_empty())
     });
-    target
-        .ivars()
-        .controller
-        .send(Command::Place(peer, (1512.0, 0.0)))
-        .unwrap();
-    wait_for("a fixing drag to dismiss", || {
-        drain();
-        views.question.isHidden()
-    });
-    assert!(store.confirmation().unwrap().version > confirmed.version);
-    assert!(
-        target
-            .ivars()
-            .arranged
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .unreachable
-            .is_empty()
-    );
+    assert!(views.question.isHidden());
     target.ivars().controller.shutdown().unwrap();
     views.window.close();
 }

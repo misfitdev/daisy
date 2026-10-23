@@ -26,11 +26,11 @@ Both systems must be reachable over TCP port 24850, the default. For a new peer,
 
 Open Daisy. The arrangement at the top shows every display in the group.
 
-**With a pointer:** drag the peer's displays to match your desk. Its displays move together and snap near another edge or corner. Displays from different systems cannot overlap.
+**With a pointer:** drag the peer's displays to match your desk. Its displays move together. An edge that comes into line with another display holds there for a moment; keep dragging to move it out of line. Displays from different systems cannot overlap, and every system stays within the pointer's reach: a drop that would leave one out of reach lands against the nearest edge it can reach.
 
 **With a keyboard:** select the arrangement, press **[** or **]** to choose a peer, then use the **arrow keys** to place it against that side.
 
-Changes apply across the group and are saved. If two systems change the arrangement, the later change wins. Adding, removing or rearranging a display updates the layout and moves any system that would overlap.
+Changes apply across the group and are saved. If two systems change the arrangement, the later change wins. Adding, removing or rearranging a display updates the layout and moves any system that would overlap or be left out of reach.
 
 When a new member joins, displays change, or a member cannot be reached,
 Daisy opens the arrangement and asks **Is this where your screens are?**
@@ -39,6 +39,8 @@ a drag that connects the whole group dismisses the question. Choose
 **Looks Right** to keep the arrangement as shown. Confirmation is shared
 with peers that support it and saved across restarts. Reconnecting with
 unchanged displays does not ask again after confirmation.
+
+Daisy remembers the arrangement you confirmed for each combination of systems and displays. When that combination comes back, such as a monitor moving from one system to another or the same peers meeting again, the group starts from that arrangement without asking, and the arrangement says it was restored. A restored arrangement never undoes what you have arranged since: if the systems already here sit differently than they did then, they stay put and only the newcomer returns, beside the system it was nearest. A member leaving never rearranges the rest.
 
 [Move control](#move-control) across any nearby edge or corner; the arrangement is not a single chain.
 

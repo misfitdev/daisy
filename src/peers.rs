@@ -75,6 +75,7 @@ pub struct PeerStore {
     lock: PathBuf,
     arrangement: PathBuf,
     confirmation: PathBuf,
+    layouts: PathBuf,
     revocations: PathBuf,
 }
 
@@ -118,6 +119,7 @@ impl PeerStore {
             lock: home.join("peers.lock"),
             arrangement: home.join("arrangement.toml"),
             confirmation: home.join("arrangement-confirmation.toml"),
+            layouts: home.join("layouts.toml"),
             revocations: home.join("revocations.toml"),
         })
     }
@@ -293,6 +295,19 @@ impl PeerStore {
     pub fn save_confirmation(&self, confirmation: &crate::setup::Confirmation<PublicKey>) -> Result<()> {
         crate::state_file::write(&self.confirmation, toml::to_string(confirmation)?.as_bytes())
             .context("saving the checked screen arrangement")
+    }
+
+    /// The arrangement remembered for each setup; none if they cannot be read.
+    pub fn layouts(&self) -> crate::recall::Memory<PublicKey> {
+        fs::read_to_string(&self.layouts)
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_layouts(&self, layouts: &crate::recall::Memory<PublicKey>) -> Result<()> {
+        crate::state_file::write(&self.layouts, toml::to_string(layouts)?.as_bytes())
+            .context("saving the remembered screen arrangements")
     }
 
     /// Keeps `arrangement` for the next time the group meets.
@@ -900,6 +915,27 @@ mod tests {
             .save_arrangement(&(43, key(1), vec![(key(1), (0.0, 0.0))]))
             .unwrap();
         assert_eq!(store.confirmation().unwrap().version, 42);
+    }
+
+    #[test]
+    fn remembered_layouts_survive_reopening_and_a_damaged_file_is_forgotten() {
+        let (store, dir) = store();
+        assert_eq!(store.layouts(), crate::recall::Memory::default());
+        let screen = |width| crate::input::Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: 800.0,
+        };
+        let mut layouts = crate::recall::Memory::default();
+        layouts.remember(
+            crate::recall::setup([(key(1), &[screen(1000.0)][..]), (key(2), &[screen(1200.0)][..])]),
+            &[(key(1), (0.0, 0.0)), (key(2), (1000.0, 0.0))].into_iter().collect(),
+        );
+        store.save_layouts(&layouts).unwrap();
+        assert_eq!(PeerStore::open(dir.path()).unwrap().layouts(), layouts);
+        fs::write(dir.path().join("trust-v5/layouts.toml"), "not toml [").unwrap();
+        assert_eq!(store.layouts(), crate::recall::Memory::default());
     }
 
     #[test]

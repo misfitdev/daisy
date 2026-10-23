@@ -53,6 +53,9 @@ pub struct ArrangementView {
     pub layout: Layout,
     pub check: Option<Confirmation>,
     pub unreachable: Vec<PublicKey>,
+    /// Whether this is the arrangement remembered from the last time these
+    /// members met with these displays.
+    pub restored: bool,
 }
 
 impl Default for ArrangementView {
@@ -61,6 +64,7 @@ impl Default for ArrangementView {
             layout: Layout { members: Vec::new() },
             check: None,
             unreachable: Vec::new(),
+            restored: false,
         }
     }
 }
@@ -112,6 +116,9 @@ pub struct Group {
     pub save: mpsc::UnboundedSender<crate::peers::Arrangement>,
     pub saved_confirmation: Option<Confirmation>,
     pub save_confirmation: mpsc::UnboundedSender<Confirmation>,
+    /// The arrangement last confirmed for each setup, and where to keep them.
+    pub layouts: crate::recall::Memory<PublicKey>,
+    pub save_layouts: mpsc::UnboundedSender<crate::recall::Memory<PublicKey>>,
     /// Each link as a person sees it.
     pub reports: std::sync::Arc<tokio::sync::watch::Sender<Reports>>,
     /// Whether this system's screen is locked, as it changes.
@@ -175,6 +182,8 @@ where
         save: mpsc::unbounded_channel().0,
         saved_confirmation: None,
         save_confirmation: mpsc::unbounded_channel().0,
+        layouts: crate::recall::Memory::default(),
+        save_layouts: mpsc::unbounded_channel().0,
         reports: std::sync::Arc::new(tokio::sync::watch::Sender::new(Reports::new())),
         locked: tokio::sync::watch::channel(false).1,
         trust: mpsc::unbounded_channel().0,
@@ -265,6 +274,10 @@ where
     let mut confirmed = group.saved_confirmation.clone();
     let mut kept_confirmation = confirmed.clone();
     let mut pending_confirmations = VecDeque::new();
+    let mut layouts = group.layouts;
+    // members whose displays arrived or changed, to recall a layout for
+    let mut arrived: Vec<PublicKey> = Vec::new();
+    let mut restored: Option<(u64, PublicKey)> = None;
     let mut review_changed = true;
     let mut target = Target::new(placement.group(), me);
     let release = ReleaseOnDrop {
@@ -336,6 +349,7 @@ where
                 unreachable: layout.unreachable(me),
                 layout,
                 check,
+                restored: restored == Some(placement.version()),
             };
             group.arranged.send_if_modified(|current| {
                 if *current == view {
@@ -352,6 +366,11 @@ where
             if let Some(confirmation) = &confirmed {
                 let _ = group.save_confirmation.send(confirmation.clone());
                 broadcast_confirmation(&links, confirmation, &mut ended);
+                if (confirmation.version, confirmation.author) == placement.version()
+                    && layouts.remember(placement.setup(), &placement.placed())
+                {
+                    let _ = group.save_layouts.send(layouts.clone());
+                }
             }
         }
         for (key, result) in ended.drain(..) {
@@ -639,6 +658,7 @@ where
                             let displays = crate::layout::plausible(displays)
                                 .context("the peer sent displays that cannot be real")?;
                             if placement.show(peer, displays) {
+                                arrived.push(peer);
                                 rearranged = true;
                             }
                         }
@@ -790,6 +810,12 @@ where
                 if rearranged {
                     review_changed = true;
                     rearranged = false;
+                    for key in std::mem::take(&mut arrived) {
+                        if recall(&mut placement, &mut layouts, &mut confirmed, &mut restored, key, me) {
+                            let _ = group.save_layouts.send(layouts.clone());
+                            broadcast(&links, arrangement(&placement), &mut ended);
+                        }
+                    }
                     settle(&mut placement, &links, &mut ended);
                     arrange(&placement, release.target, pointer);
                 }
@@ -824,7 +850,10 @@ where
                 if placement.show(me, mine.clone()) {
                 review_changed = true;
                     broadcast(&links, Message::Displays { displays: mine }, &mut ended);
-                    if placement.clear_overlaps(now_ms()) {
+                    if recall(&mut placement, &mut layouts, &mut confirmed, &mut restored, me, me) {
+                        let _ = group.save_layouts.send(layouts.clone());
+                        broadcast(&links, arrangement(&placement), &mut ended);
+                    } else if placement.repair(now_ms()) {
                         broadcast(&links, arrangement(&placement), &mut ended);
                     }
                     arrange(&placement, release.target, pointer);
@@ -997,6 +1026,39 @@ fn log_transition(
     tracing::debug!(flow, system = %me, peer = ?peer, reason, generation = ?generation,
         destination = ?destination, at = ?at, owner = %owner, current_generation,
         local_busy = control.local_busy(), "sharing transition");
+}
+
+/// Starts from the arrangement remembered for the present setup now that
+/// `arrived` joined or its displays changed, kept clear and within reach.
+/// The whole remembered arrangement was confirmed before, so it counts as
+/// confirmed again. Returns whether anything was recalled.
+fn recall(
+    placement: &mut crate::layout::Placement<PublicKey>,
+    layouts: &mut crate::recall::Memory<PublicKey>,
+    confirmed: &mut Option<Confirmation>,
+    restored: &mut Option<(u64, PublicKey)>,
+    arrived: PublicKey,
+    me: PublicKey,
+) -> bool {
+    let setup = placement.setup();
+    // a restored arrangement was not made by a person, so it never holds the next one back
+    let arranged = confirmed.as_ref().filter(|_| *restored != Some(placement.version()));
+    let Some(recalled) = layouts.recall(
+        &setup,
+        &placement.placed(),
+        arranged.map(|confirmation| &confirmation.members),
+        arrived,
+    ) else {
+        return false;
+    };
+    placement.restore(&recalled.offsets, now_ms());
+    placement.repair(now_ms());
+    let layout = placement.group();
+    if recalled.whole && layout.unreachable(me).is_empty() {
+        *confirmed = Some(Confirmation::new(&layout, placement.version()));
+        *restored = Some(placement.version());
+    }
+    true
 }
 
 /// Places any member that has no place yet beside this system, on the side
@@ -2138,6 +2200,8 @@ mod tests {
             save: mpsc::unbounded_channel().0,
             saved_confirmation: None,
             save_confirmation: mpsc::unbounded_channel().0,
+            layouts: crate::recall::Memory::default(),
+            save_layouts: mpsc::unbounded_channel().0,
             reports: Arc::new(watch::Sender::new(Reports::new())),
             locked: watch::channel(false).1,
             trust: mpsc::unbounded_channel().0,
@@ -2183,6 +2247,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_remembered_setup_is_restored_without_asking_and_a_new_one_asks() {
+        for remembered in [true, false] {
+            let (control, _members, membership, mut far, _ended, keys) = group_of(1, None).await;
+            let me = me_of(&control);
+            let peer = keys[0];
+            let mut local = group(&control);
+            if remembered {
+                local.layouts.remember(
+                    crate::recall::setup([(me, &[SCREEN][..]), (peer, &[SCREEN][..])]),
+                    &[(me, (0.0, 0.0)), (peer, (1000.0, 0.0))].into_iter().collect(),
+                );
+            }
+            let (choose, choices) = watch::channel(None);
+            local.choices = choices;
+            let mut view = local.arranged.subscribe();
+            let task = start_arrangement_session(local, membership);
+            far[0]
+                .send(&Message::Displays { displays: vec![SCREEN] })
+                .await
+                .unwrap();
+            let shown = view_when(&mut view, |v| v.layout.members.len() == 2).await;
+            let offset = shown.layout.members.iter().find(|m| m.key == peer).unwrap().offset;
+            if remembered {
+                assert_eq!(offset, (1000.0, 0.0), "where it was confirmed, not its paired side");
+                assert!(shown.restored && shown.check.is_none());
+                // once a person moves it, it is not what was restored
+                choose.send_replace(Some(Choice::Move((peer, (1000.0, 250.0)))));
+                let moved = view_when(&mut view, |v| !v.restored).await;
+                assert!(moved.check.is_none());
+            } else {
+                assert_eq!(offset, (-1000.0, 0.0), "on its paired side");
+                assert!(!shown.restored && shown.check.is_some());
+            }
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_member_leaving_never_restores_a_remembered_arrangement() {
+        let (control, _members, membership, mut far, _ended, keys) = group_of(2, None).await;
+        let me = me_of(&control);
+        let (stays, leaves) = (keys[0], keys[1]);
+        let mut local = group(&control);
+        // these two were last confirmed with the one that stays below
+        local.layouts.remember(
+            crate::recall::setup([(me, &[SCREEN][..]), (stays, &[SCREEN][..])]),
+            &[(me, (0.0, 0.0)), (stays, (0.0, 500.0))].into_iter().collect(),
+        );
+        local.saved = Some((
+            10,
+            me,
+            vec![(me, (0.0, 0.0)), (stays, (1000.0, 0.0)), (leaves, (2000.0, 0.0))],
+        ));
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        // the one that leaves arrives first, so the pair alone only appears when it goes
+        far[1]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        view_when(&mut view, |v| v.layout.members.iter().any(|m| m.key == leaves)).await;
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        let all = view_when(&mut view, |v| v.layout.members.len() == 3).await;
+        assert!(
+            all.layout
+                .members
+                .iter()
+                .any(|m| m.key == stays && m.offset == (1000.0, 0.0))
+        );
+        drop(far.remove(1));
+        let left = view_when(&mut view, |v| v.layout.members.len() == 2).await;
+        task.abort();
+        let offset = left.layout.members.iter().find(|m| m.key == stays).unwrap().offset;
+        assert_eq!(offset, (1000.0, 0.0));
+        assert!(!left.restored);
+    }
+
+    #[tokio::test]
+    async fn a_restored_arrangement_never_holds_back_a_larger_one() {
+        let (control, _members, membership, mut far, _ended, keys) = group_of(2, None).await;
+        let me = me_of(&control);
+        let (first, second) = (keys[0], keys[1]);
+        let mut local = group(&control);
+        // the pair alone sat with the first on the left; all three in a row to the right
+        local.layouts.remember(
+            crate::recall::setup([(me, &[SCREEN][..]), (first, &[SCREEN][..])]),
+            &[(me, (0.0, 0.0)), (first, (-1000.0, 0.0))].into_iter().collect(),
+        );
+        local.layouts.remember(
+            crate::recall::setup([(me, &[SCREEN][..]), (first, &[SCREEN][..]), (second, &[SCREEN][..])]),
+            &[(me, (0.0, 0.0)), (first, (1000.0, 0.0)), (second, (2000.0, 0.0))]
+                .into_iter()
+                .collect(),
+        );
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        view_when(&mut view, |v| v.restored && v.layout.members.len() == 2).await;
+        far[1]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        let all = view_when(&mut view, |v| v.layout.members.len() == 3).await;
+        task.abort();
+        let at = |key| all.layout.members.iter().find(|m| m.key == key).unwrap().offset;
+        let (here, a, b) = (at(me), at(first), at(second));
+        assert_eq!((a.0 - here.0, a.1 - here.1), (1000.0, 0.0), "{:?}", all.layout.members);
+        assert_eq!((b.0 - here.0, b.1 - here.1), (2000.0, 0.0));
+        assert!(all.restored);
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_drag_is_remembered_for_its_setup() {
+        let (control, _members, membership, mut far, _ended, keys) = group_of(1, None).await;
+        let me = me_of(&control);
+        let peer = keys[0];
+        let mut local = group(&control);
+        let (choose, choices) = watch::channel(None);
+        local.choices = choices;
+        let (save, mut saved) = mpsc::unbounded_channel();
+        local.save_layouts = save;
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        view_when(&mut view, |v| v.layout.members.len() == 2).await;
+        choose.send_replace(Some(Choice::Move((peer, (1000.0, 250.0)))));
+        let mut layouts = tokio::time::timeout(Duration::from_secs(2), saved.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        let setup = crate::recall::setup([(me, &[SCREEN][..]), (peer, &[SCREEN][..])]);
+        let recalled = layouts
+            .recall(&setup, &[(me, (0.0, 0.0))].into_iter().collect(), None, peer)
+            .unwrap();
+        assert!(recalled.offsets.contains(&(peer, (1000.0, 250.0))), "{recalled:?}");
+    }
+
+    #[tokio::test]
     async fn checking_or_fixing_an_arrangement_clears_both_systems_and_survives_reconnect() {
         let (control, _members, membership, mut far, _ended, keys) = group_of(1, None).await;
         let me = me_of(&control);
@@ -2222,13 +2434,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(checked.covers(&Confirmation::new(&local_view.borrow().layout, (10, me))));
+        // a drop out of reach lands against the nearest edge and needs no check
         choose.send_replace(Some(Choice::Move((peer, (6000.0, 0.0)))));
-        view_when(&mut local_view, |v| v.check.is_some()).await;
-        view_when(&mut remote_view, |v| v.check.is_some()).await;
-        choose.send_replace(Some(Choice::Move((peer, (1000.0, 0.0)))));
         let fixed = view_when(&mut local_view, |v| v.unreachable.is_empty() && v.check.is_none()).await;
         view_when(&mut remote_view, |v| v.unreachable.is_empty() && v.check.is_none()).await;
         assert_eq!(fixed.layout.members.len(), 2);
+        let moved = fixed.layout.members.iter().find(|member| member.key == peer).unwrap();
+        assert_eq!(moved.offset, (1000.0, 0.0));
         local_task.abort();
         remote_task.abort();
         let saved = kept.recv().await.unwrap();

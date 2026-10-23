@@ -19,13 +19,16 @@ use super::{coral_color, flower_image};
 use crate::control::Link;
 use crate::identity::PublicKey;
 use crate::input::{Rect, Side};
-use crate::layout::{Group, Offset};
+use crate::layout::{Detent, Group, Member, Offset};
 
 /// Display sizes are drawn at most this fraction of their size, so one
 /// display alone is not drawn huge.
 const MAX_SCALE: f64 = 0.1;
 const MARGIN: f64 = 6.0;
 const INACTIVE_ALPHA: f64 = 0.45;
+/// How close, in view points, a dragged edge comes to a line before it
+/// holds there. Display points are too small to aim at in the drawing.
+const DETENT: f64 = 6.0;
 
 /// One system as the arrangement shows it.
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +106,20 @@ pub fn scene(
             }
         })
         .collect()
+}
+
+/// The group the scene draws, for placing a member within it.
+pub fn group(scene: &[Shown]) -> Group<PublicKey> {
+    Group {
+        members: scene
+            .iter()
+            .map(|shown| Member {
+                key: shown.key,
+                displays: shown.displays.clone(),
+                offset: shown.offset,
+            })
+            .collect(),
+    }
 }
 
 /// How the group's space maps onto a view: `scale` points of view per point
@@ -199,6 +216,7 @@ pub struct ArrangeIvars {
     checking: Cell<bool>,
     scene: RefCell<Vec<Shown>>,
     drag: Cell<Option<Drag>>,
+    detent: RefCell<Detent>,
     /// A member a person just placed, for the action to read.
     placed: Cell<Option<(PublicKey, Offset)>>,
     /// The peer the arrow keys move.
@@ -264,6 +282,7 @@ define_class!(
             drop(scene);
             if let Some(index) = grabbed {
                 self.ivars().drag.set(Some((index, point, (0.0, 0.0))));
+                self.ivars().detent.replace(Detent::default());
             }
         }
 
@@ -273,9 +292,9 @@ define_class!(
                 return;
             };
             let point = self.convertPoint_fromView(event.locationInWindow(), None);
-            self.ivars()
-                .drag
-                .set(Some((index, grabbed, (point.x - grabbed.x, point.y - grabbed.y))));
+            let now = (event.timestamp() * 1000.0) as u64;
+            let by = self.hold(index, (point.x - grabbed.x, point.y - grabbed.y), now);
+            self.ivars().drag.set(Some((index, grabbed, by)));
             self.redraw();
         }
 
@@ -383,6 +402,7 @@ impl ArrangeView {
             checking: Cell::new(false),
             scene: RefCell::new(Vec::new()),
             drag: Cell::new(None),
+            detent: RefCell::new(Detent::default()),
             placed: Cell::new(None),
             selected: Cell::new(None),
             target: RefCell::new(Weak::from(target)),
@@ -391,6 +411,28 @@ impl ArrangeView {
         });
         // SAFETY: initWithFrame: is NSView's designated initializer
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    /// `by`, how far member `index` was dragged in view points, with its
+    /// edges held in line where the detent catches them.
+    fn hold(&self, index: usize, by: (f64, f64), now: u64) -> (f64, f64) {
+        let scene = self.ivars().scene.borrow();
+        let Some(shown) = scene.get(index) else {
+            return by;
+        };
+        let fit = self.fit(&scene);
+        let moved = fit.to_group(by);
+        let wanted = (shown.offset.0 + moved.0, shown.offset.1 + moved.1);
+        let reach = fit.to_group((DETENT, 0.0)).0;
+        let held = self
+            .ivars()
+            .detent
+            .borrow_mut()
+            .follow(&group(&scene), shown.key, wanted, reach, now);
+        (
+            (held.0 - shown.offset.0) * fit.scale,
+            (held.1 - shown.offset.1) * fit.scale,
+        )
     }
 
     /// Makes `key` the peer the arrow keys move, and takes the keyboard.
@@ -681,6 +723,12 @@ mod tests {
         let studio = shown.iter().find(|shown| !shown.me).unwrap();
         assert_eq!((studio.name.as_str(), studio.offset), ("Studio", (1512.0, 0.0)));
         assert_eq!(relation(studio, &shown[0]), "right of");
+    }
+
+    #[test]
+    fn the_scene_places_members_in_the_group_it_was_drawn_from() {
+        let shown = scene(key(1), &names(), Some(&pair()), &[LAPTOP], &BTreeMap::new());
+        assert_eq!(group(&shown), pair());
     }
 
     #[test]

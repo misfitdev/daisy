@@ -4,8 +4,9 @@
 //! Each system's displays keep the arrangement macOS gives them, in that
 //! system's own points with y growing downward. A group places each
 //! system's displays as one unit by an offset into a shared space. Systems
-//! may sit anywhere, with gaps or touching only at a corner, but their
-//! displays never overlap.
+//! may sit with small gaps or touching only at a corner, but their displays
+//! never overlap, and every system stays within the pointer's reach of the
+//! rest.
 
 use std::collections::BTreeMap;
 
@@ -16,6 +17,9 @@ pub const SNAP: f64 = 8.0;
 /// How far past its own displays the pointer may travel to reach another
 /// system's, so small gaps and corners still connect.
 pub const REACH: f64 = 40.0;
+
+/// How long a dragged edge stays in line before dragging on pulls it out.
+pub const HOLD_MS: u64 = 250;
 
 /// The most displays a system's list may hold; macOS lists at most 16.
 pub const MAX_DISPLAYS: usize = 16;
@@ -175,10 +179,80 @@ impl<K: Copy + PartialEq> Group<K> {
     }
 
     /// Where `key`'s displays go when dropped at `wanted`: snapped flush or
-    /// into line when an edge comes within `SNAP`, then moved the shortest
-    /// distance that clears every other system.
-    pub fn place(&self, key: K, wanted: Offset) -> Offset {
-        self.settle(key, self.snap(key, wanted))
+    /// into line when an edge comes within `SNAP`, moved the shortest
+    /// distance that clears every other system, then kept within reach of
+    /// `from`.
+    pub fn place(&self, from: K, key: K, wanted: Offset) -> Offset {
+        self.reconnect(from, key, self.settle(key, self.snap(key, wanted)))
+    }
+
+    /// `wanted` if `key` there overlaps no other system and leaves every
+    /// member `from` reaches now still reachable; otherwise the nearest
+    /// offset that does, flush against a display `from` reaches. Members
+    /// already out of reach do not hold `key` back. `wanted` when nothing
+    /// fits.
+    pub fn reconnect(&self, from: K, key: K, wanted: Offset) -> Offset {
+        let Some(member) = self.member(key) else {
+            return wanted;
+        };
+        let stranded = self.unreachable(from);
+        let fits = |offset: Offset| {
+            !self.overlaps(key, offset)
+                && self
+                    .moved(key, offset)
+                    .unreachable(from)
+                    .iter()
+                    .all(|other| *other != key && stranded.contains(other))
+        };
+        if fits(wanted) {
+            return wanted;
+        }
+        let reached: Vec<Rect> = self
+            .members
+            .iter()
+            .filter(|other| other.key != key && !stranded.contains(&other.key))
+            .flat_map(|other| other.displays.iter().map(|display| shifted(display, other.offset)))
+            .collect();
+        let others: Vec<Rect> = self.others(key).collect();
+        let mut candidates = Vec::new();
+        for display in &member.displays {
+            for target in &reached {
+                // where the two meet edge to edge, from one end to the other
+                let (across, down) = clear_of(display, target);
+                // along a flush edge: nearest `wanted`, at either end, or
+                // just clear of any display in the way
+                let along = |[low, high]: [f64; 2], wanted: f64, ends: &dyn Fn(&Rect) -> [f64; 2]| {
+                    let mut stops = vec![wanted.clamp(low, high), low, high];
+                    stops.extend(others.iter().flat_map(ends).filter(|stop| (low..=high).contains(stop)));
+                    stops
+                };
+                let ys = along(down, wanted.1, &|other| clear_of(display, other).1);
+                let xs = along(across, wanted.0, &|other| clear_of(display, other).0);
+                for x in across {
+                    candidates.extend(ys.iter().map(|&y| (x, y)));
+                }
+                for y in down {
+                    candidates.extend(xs.iter().map(|&x| (x, y)));
+                }
+            }
+        }
+        let distance = |(x, y): &Offset| (x - wanted.0).powi(2) + (y - wanted.1).powi(2);
+        candidates.sort_by(|a, b| distance(a).total_cmp(&distance(b)));
+        candidates
+            .into_iter()
+            .find(|&candidate| fits(candidate))
+            .unwrap_or(wanted)
+    }
+
+    /// This group with `key`'s displays at `offset`.
+    fn moved(&self, key: K, offset: Offset) -> Self {
+        let mut group = self.clone();
+        for member in &mut group.members {
+            if member.key == key {
+                member.offset = offset;
+            }
+        }
+        group
     }
 
     /// The offset nearest `wanted` at which `key` overlaps no other system.
@@ -195,8 +269,9 @@ impl<K: Copy + PartialEq> Group<K> {
         let (mut xs, mut ys) = (vec![wanted.0], vec![wanted.1]);
         for display in &member.displays {
             for other in self.others(key) {
-                xs.extend([other.x - display.x - display.width, other.x + other.width - display.x]);
-                ys.extend([other.y - display.y - display.height, other.y + other.height - display.y]);
+                let (across, down) = clear_of(display, &other);
+                xs.extend(across);
+                ys.extend(down);
             }
         }
         let distance = |(x, y): Offset| (x - wanted.0).powi(2) + (y - wanted.1).powi(2);
@@ -210,40 +285,42 @@ impl<K: Copy + PartialEq> Group<K> {
     /// `wanted`, with each axis moved to make an edge flush with or in line
     /// with another system's when it is within `SNAP`.
     pub fn snap(&self, key: K, wanted: Offset) -> Offset {
+        let (xs, ys) = self.lines(key);
+        (nearest(wanted.0, &xs, SNAP), nearest(wanted.1, &ys, SNAP))
+    }
+
+    /// The offsets on each axis that put an edge of `key`'s displays flush
+    /// with or in line with another system's.
+    fn lines(&self, key: K) -> (Vec<f64>, Vec<f64>) {
         let Some(member) = self.member(key) else {
-            return wanted;
-        };
-        let nearest = |current: f64, targets: &mut dyn Iterator<Item = f64>| {
-            targets
-                .filter(|target| (target - current).abs() <= SNAP)
-                .min_by(|a, b| (a - current).abs().total_cmp(&(b - current).abs()))
-                .unwrap_or(current)
+            return (Vec::new(), Vec::new());
         };
         let others: Vec<Rect> = self.others(key).collect();
-        let mut x_moves = member.displays.iter().flat_map(|display| {
-            others.iter().flat_map(move |other| {
+        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+        for display in &member.displays {
+            for other in &others {
                 // flush either side, or left or right edges in line
-                [
-                    other.x - display.width,
-                    other.x + other.width,
-                    other.x,
-                    other.x + other.width - display.width,
-                ]
-                .map(|edge| edge - display.x)
-            })
-        });
-        let mut y_moves = member.displays.iter().flat_map(|display| {
-            others.iter().flat_map(move |other| {
-                [
-                    other.y - display.height,
-                    other.y + other.height,
-                    other.y,
-                    other.y + other.height - display.height,
-                ]
-                .map(|edge| edge - display.y)
-            })
-        });
-        (nearest(wanted.0, &mut x_moves), nearest(wanted.1, &mut y_moves))
+                xs.extend(
+                    [
+                        other.x - display.width,
+                        other.x + other.width,
+                        other.x,
+                        other.x + other.width - display.width,
+                    ]
+                    .map(|edge| edge - display.x),
+                );
+                ys.extend(
+                    [
+                        other.y - display.height,
+                        other.y + other.height,
+                        other.y,
+                        other.y + other.height - display.height,
+                    ]
+                    .map(|edge| edge - display.y),
+                );
+            }
+        }
+        (xs, ys)
     }
 
     /// Where the pointer goes when it moves by `delta` from `at`, in the
@@ -312,6 +389,12 @@ impl<K: Copy + Ord> Placement<K> {
         self.me
     }
 
+    /// Makes this a new version authored here, newer than any seen before
+    /// even within the same millisecond.
+    fn bump(&mut self, now: u64) {
+        self.version = (now.max(self.version.0 + 1), self.me);
+    }
+
     /// Which arrangement this is; changes whenever it does.
     pub fn version(&self) -> (u64, K) {
         self.version
@@ -325,6 +408,31 @@ impl<K: Copy + Ord> Placement<K> {
     /// A member left; its offset is kept for when it returns.
     pub fn remove(&mut self, key: K) -> bool {
         key != self.me && self.displays.remove(&key).is_some()
+    }
+
+    /// Every present member and its displays.
+    pub fn setup(&self) -> crate::recall::Setup<K> {
+        crate::recall::setup(self.displays.iter().map(|(key, displays)| (*key, displays.as_slice())))
+    }
+
+    /// Where each present member with an agreed offset sits.
+    pub fn placed(&self) -> BTreeMap<K, Offset> {
+        self.displays
+            .keys()
+            .filter_map(|key| Some((*key, *self.offsets.get(key)?)))
+            .collect()
+    }
+
+    /// Puts members at `offsets`, as a new version if that moved any.
+    pub fn restore(&mut self, offsets: &[(K, Offset)], now: u64) -> bool {
+        let mut moved = false;
+        for (key, offset) in offsets {
+            moved = self.offsets.insert(*key, *offset) != Some(*offset) || moved;
+        }
+        if moved {
+            self.bump(now);
+        }
+        moved
     }
 
     /// Present members with displays but no agreed offset.
@@ -353,9 +461,9 @@ impl<K: Copy + Ord> Placement<K> {
             displays: theirs.clone(),
             offset: wanted,
         });
-        let settled = group.settle(key, wanted);
+        let settled = group.reconnect(self.me, key, group.settle(key, wanted));
         self.offsets.insert(key, settled);
-        self.version = (now.max(self.version.0 + 1), self.me);
+        self.bump(now);
         true
     }
 
@@ -374,34 +482,36 @@ impl<K: Copy + Ord> Placement<K> {
                 offset: wanted,
             });
         }
-        let placed = group.place(key, wanted);
+        let placed = group.place(self.me, key, wanted);
         if self.offsets.get(&key) == Some(&placed) {
             return false;
         }
         self.offsets.insert(key, placed);
-        self.version = (now.max(self.version.0 + 1), self.me);
+        self.bump(now);
         true
     }
 
-    /// Moves any member that now overlaps another, as after a display was
-    /// added or resized, the shortest way clear, as a new version.
-    pub fn clear_overlaps(&mut self, now: u64) -> bool {
+    /// Moves any member that now overlaps another or is out of reach, as
+    /// after a display was added, removed or resized, the shortest way clear
+    /// and back within reach, as a new version.
+    pub fn repair(&mut self, now: u64) -> bool {
         let mut moved = false;
         for key in self.offsets.keys().copied().collect::<Vec<_>>() {
             if key == self.me {
                 continue;
             }
             let group = self.group();
-            let Some(offset) = self.offsets.get(&key).copied() else {
+            let Some(offset) = group.member(key).map(|member| member.offset) else {
                 continue;
             };
-            if group.overlaps(key, offset) {
-                self.offsets.insert(key, group.settle(key, offset));
+            let fixed = group.reconnect(self.me, key, group.settle(key, offset));
+            if fixed != offset {
+                self.offsets.insert(key, fixed);
                 moved = true;
             }
         }
         if moved {
-            self.version = (now.max(self.version.0 + 1), self.me);
+            self.bump(now);
         }
         moved
     }
@@ -446,6 +556,75 @@ impl<K: Copy + Ord> Placement<K> {
     }
 }
 
+/// Holds a dragged member's edges in line with another system's as a drag
+/// passes them. Each axis catches the nearest line within `reach`, keeps it
+/// for at least `HOLD_MS`, and lets go once dragged past `reach` after that.
+/// A line let go of is not caught again in the same drag, so an edge can
+/// rest just out of line.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Detent {
+    x: Catch,
+    y: Catch,
+}
+
+impl Detent {
+    /// Where `key`'s displays are shown when dragged to `wanted` at `now`,
+    /// in milliseconds.
+    pub fn follow<K: Copy + PartialEq>(
+        &mut self,
+        group: &Group<K>,
+        key: K,
+        wanted: Offset,
+        reach: f64,
+        now: u64,
+    ) -> Offset {
+        let (xs, ys) = group.lines(key);
+        (
+            self.x.follow(wanted.0, &xs, reach, now),
+            self.y.follow(wanted.1, &ys, reach, now),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Catch {
+    /// The line held and when it was caught.
+    held: Option<(f64, u64)>,
+    released: Vec<f64>,
+}
+
+impl Catch {
+    fn follow(&mut self, wanted: f64, lines: &[f64], reach: f64, now: u64) -> f64 {
+        if let Some((line, since)) = self.held {
+            if (wanted - line).abs() <= reach || now.saturating_sub(since) < HOLD_MS {
+                return line;
+            }
+            self.held = None;
+            self.released.push(line);
+        }
+        let open: Vec<f64> = lines
+            .iter()
+            .copied()
+            .filter(|line| !self.released.contains(line))
+            .collect();
+        let line = nearest(wanted, &open, reach);
+        if line != wanted {
+            self.held = Some((line, now));
+        }
+        line
+    }
+}
+
+/// The line in `lines` nearest `current` within `within`, or `current`.
+fn nearest(current: f64, lines: &[f64], within: f64) -> f64 {
+    lines
+        .iter()
+        .copied()
+        .filter(|line| (line - current).abs() <= within)
+        .min_by(|a, b| (a - current).abs().total_cmp(&(b - current).abs()))
+        .unwrap_or(current)
+}
+
 /// The offset that puts `peer`'s displays on `side` of `local`'s, flush
 /// and aligned at the top or left. `local` sits at the origin.
 pub fn beside(local: &[Rect], peer: &[Rect], side: Side) -> Offset {
@@ -479,7 +658,8 @@ pub fn bounds(displays: &[Rect]) -> Option<Rect> {
     })
 }
 
-fn shifted(display: &Rect, offset: Offset) -> Rect {
+/// `display` moved by `offset`.
+pub fn shifted(display: &Rect, offset: Offset) -> Rect {
     Rect {
         x: display.x + offset.0,
         y: display.y + offset.1,
@@ -505,6 +685,15 @@ fn touching(a: &Rect, b: &Rect) -> bool {
         return true;
     }
     entry(b, (ax, ay), ((bx - ax) / length, (by - ay) / length)).is_some_and(|distance| distance <= REACH)
+}
+
+/// The offsets at which `display`, in its own coordinates, sits just clear
+/// of `other`: left or right of it, and above or below it.
+fn clear_of(display: &Rect, other: &Rect) -> ([f64; 2], [f64; 2]) {
+    (
+        [other.x - display.x - display.width, other.x + other.width - display.x],
+        [other.y - display.y - display.height, other.y + other.height - display.y],
+    )
 }
 
 /// Sharing more than an edge or a corner.
@@ -648,7 +837,7 @@ mod tests {
         let group = group(vec![PEER], (0.0, 0.0));
         assert_eq!(group.snap(1, (1517.0, 6.0)), (1512.0, 0.0));
         assert_eq!(group.snap(1, (1530.0, 30.0)), (1530.0, 30.0));
-        assert_eq!(group.place(1, (1507.0, 3.0)), (1512.0, 0.0));
+        assert_eq!(group.place(0, 1, (1507.0, 3.0)), (1512.0, 0.0));
     }
 
     #[test]
@@ -755,10 +944,10 @@ mod tests {
         let mut here = Placement::new(0u8, vec![LAPTOP]);
         here.show(1, vec![PEER]);
         here.place(1, Side::Above, 1);
-        assert!(!here.clear_overlaps(2), "nothing overlaps yet");
+        assert!(!here.repair(2), "nothing overlaps yet");
         // an external display appears above the laptop, where the peer sits
         here.show(0, vec![LAPTOP, EXTERNAL]);
-        assert!(here.clear_overlaps(3));
+        assert!(here.repair(3));
         let group = here.group();
         let offset = group.members.iter().find(|m| m.key == 1).unwrap().offset;
         assert!(!group.overlaps(1, offset), "{offset:?}");
@@ -883,5 +1072,96 @@ mod tests {
             [2, 3],
             "two internally connected pairs are still disconnected"
         );
+    }
+
+    fn offset_of(placement: &Placement<u8>, key: u8) -> Offset {
+        placement.group().members.iter().find(|m| m.key == key).unwrap().offset
+    }
+
+    #[test]
+    fn a_drop_out_of_reach_lands_on_the_nearest_edge_it_can_reach() {
+        let mut here = Placement::new(0u8, vec![LAPTOP]);
+        here.show(1, vec![PEER]);
+        here.place(1, Side::Right, 1);
+        // far to the right, a little low: back against the laptop's right edge
+        assert!(here.put(1, (4000.0, 50.0), 2));
+        assert_eq!(offset_of(&here, 1), (1512.0, 50.0));
+        // far below and to the left: against the bottom edge, as far left as
+        // the edges still meet
+        assert!(here.put(1, (-3000.0, 2500.0), 3));
+        assert_eq!(offset_of(&here, 1), (-1440.0, 982.0));
+        // a small gap is within reach and stays
+        assert!(here.put(1, (1512.0 + 30.0, 0.0), 4));
+        assert_eq!(offset_of(&here, 1), (1542.0, 0.0));
+        assert!(here.group().unreachable(0).is_empty());
+    }
+
+    #[test]
+    fn a_drop_never_strands_a_member_reached_through_it() {
+        let mut here = Placement::new(0u8, vec![LAPTOP]);
+        here.show(1, vec![PEER]);
+        here.show(2, vec![PEER]);
+        here.adopt(1, 0, &[(0, (0.0, 0.0)), (1, (1512.0, 0.0)), (2, (2952.0, 0.0))]);
+        // 2 is reached only through 1; moving 1 below the laptop would strand it
+        here.put(1, (0.0, 982.0), 2);
+        let group = here.group();
+        assert!(group.unreachable(0).is_empty(), "{:?}", group.members);
+        assert!(!group.overlaps(1, offset_of(&here, 1)));
+    }
+
+    #[test]
+    fn a_member_already_out_of_reach_does_not_hold_a_drop_back() {
+        let mut here = Placement::new(0u8, vec![LAPTOP]);
+        here.show(1, vec![PEER]);
+        here.show(2, vec![PEER]);
+        here.adopt(1, 0, &[(0, (0.0, 0.0)), (1, (1512.0, 0.0)), (2, (9000.0, 9000.0))]);
+        // 1 is still brought back within reach though 2 never can be
+        assert!(here.put(1, (4000.0, 50.0), 2));
+        assert_eq!(offset_of(&here, 1), (1512.0, 50.0));
+    }
+
+    #[test]
+    fn a_display_removed_here_brings_a_stranded_member_back_within_reach() {
+        let mut here = Placement::new(0u8, vec![LAPTOP, EXTERNAL]);
+        here.show(1, vec![PEER]);
+        // above the external display, well clear of the laptop
+        here.place(1, Side::Above, 1);
+        assert!(!here.repair(2), "nothing is out of reach yet");
+        // the external display is unplugged
+        here.show(0, vec![LAPTOP]);
+        assert_eq!(here.group().unreachable(0), [1]);
+        assert!(here.repair(3));
+        let group = here.group();
+        assert!(group.unreachable(0).is_empty(), "{:?}", offset_of(&here, 1));
+        assert!(!group.overlaps(1, offset_of(&here, 1)));
+    }
+
+    #[test]
+    fn a_dragged_edge_holds_in_line_for_a_beat_then_lets_go() {
+        let group = group(vec![PEER], (1512.0, 0.0));
+        let reach = 60.0;
+        let mut detent = Detent::default();
+        // caught flush with the laptop's right edge and in line with its top
+        assert_eq!(detent.follow(&group, 1, (1540.0, 20.0), reach, 0), (1512.0, 0.0));
+        // dragged well past the line before the beat is up: still held
+        assert_eq!(
+            detent.follow(&group, 1, (1650.0, 20.0), reach, HOLD_MS - 1),
+            (1512.0, 0.0)
+        );
+        // after the beat, dragging on lets the x line go; y is still within reach
+        assert_eq!(detent.follow(&group, 1, (1650.0, 20.0), reach, HOLD_MS), (1650.0, 0.0));
+        // coming back near the line let go of does not catch it again
+        assert_eq!(
+            detent.follow(&group, 1, (1530.0, 20.0), reach, HOLD_MS + 10),
+            (1530.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn a_drag_away_from_every_line_follows_the_pointer() {
+        let group = group(vec![PEER], (1512.0, 0.0));
+        let mut detent = Detent::default();
+        assert_eq!(detent.follow(&group, 1, (3000.0, 2000.0), 60.0, 0), (3000.0, 2000.0));
+        assert_eq!(detent.follow(&group, 1, (3100.0, 2100.0), 60.0, 1000), (3100.0, 2100.0));
     }
 }
