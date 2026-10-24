@@ -65,6 +65,7 @@ pub(super) fn run() {
     update_controls_report_and_follow_the_switch(mtm, &target);
     an_update_relaunch_closes_the_advanced_sheet(mtm, &target);
     arrangement_confirmation(mtm);
+    super::map::native_presentation(mtm, &target);
     form_sheets_wrap_and_grow(mtm, &target);
     retention_edits_keep_deadlines_explicit(mtm, &target);
 }
@@ -217,7 +218,7 @@ fn peer_row_dialogs_are_sheets(
         side: crate::input::Side::Right,
         side_chosen: 0,
         signing: None,
-        introduced_by: None,
+        admitted_at: now,
     }];
 
     let open = |action| {

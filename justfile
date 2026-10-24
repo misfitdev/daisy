@@ -218,7 +218,6 @@ dev:
     last_seen = $now
     side = "Left"
     side_chosen = 0
-    introduced_by = "$studio"
     EOF
     local_key="$(printf '00%.0s' {1..32})"
     laptop="$(printf '22%.0s' {1..32})"

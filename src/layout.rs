@@ -688,7 +688,8 @@ pub fn shifted(display: &Rect, offset: Offset) -> Rect {
     }
 }
 
-fn touching(a: &Rect, b: &Rect) -> bool {
+/// Whether two displays meet or are separated by a gap the pointer can cross.
+pub(crate) fn touching(a: &Rect, b: &Rect) -> bool {
     let closest = |low: f64, high: f64, other_low: f64, other_high: f64| {
         if high < other_low {
             (high, other_low)

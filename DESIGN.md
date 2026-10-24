@@ -406,8 +406,22 @@ action only; it never lectures about codes.
 
 In the arrangement, the system in control is outlined in coral rather than
 filled, so coral stays an action color. Peer displays show an open-hand cursor.
-Peer rows show connection state and who introduced the peer; the key fingerprint
-is a tooltip, so it is never mistaken for a code.
+Peer rows show connection state, including **In use**, and matching numbered
+identifiers. Small arrangement displays show only their number; full names stay
+in the list. This system is number 1. The key fingerprint is a tooltip.
+All display borders draw after links and labels. Coral emphasis and native
+keyboard focus sit inside the display boundary, preserving apparent alignment.
+
+The arrangement uses one motion language: spring settling after pointer drops,
+smooth reframing, a brief bloom when control changes, and a small arrival for
+new members. Dragging holds its coordinate mapping until release. Keyboard
+placement and Reduce Motion are immediate; settled and hidden views stop their
+timer. Motion changes only the drawn pose, never the agreed layout or routing.
+Every display has a flower: yellow centers mean a live connection and gray means
+o live session. Flat anodized-gray U links join nearby live displays, using the
+same reachability geometry as input crossing. Links remain rigid as they tug;
+labels stay legible above them. A coral outline and **In use** text identify the
+system in control, so ownership never depends on color or animation alone.
 
 Conditional rows close up when hidden. Granted permissions retain a quiet text
 status and remove their action buttons. Use native AppKit controls, system type,

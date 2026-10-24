@@ -1,11 +1,7 @@
-//! Signed introductions and revocations, which let a group grow from one
-//! pairing.
+//! Legacy signed wire statements and the local revocation journal.
 //!
-//! A system trusts whoever a member it trusts introduces, for no longer and
-//! no more loosely than it trusts that member. Every member re-sends what
-//! it knows whenever a link starts, so a system that was away catches up.
-//! A compromised member can therefore admit a new system or remove one;
-//! `docs/security-model.md` says so.
+//! Protocol 8 uses `group_trust` statements for membership and retention.
+//! Keep these wire types stable for old fixtures and persisted removals.
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -95,19 +91,6 @@ fn verify(context: &[u8], body: &impl Serialize, signature: &[u8], key: &crate::
     key.verify(&signed_bytes(context, body)?, signature)
 }
 
-/// The policy for a system introduced under `introduced`, by an introducer
-/// this system trusts under `introducer`: whichever ends sooner.
-pub fn stricter(introducer: Policy, introduced: Policy) -> Policy {
-    use Policy::*;
-    match (introducer, introduced) {
-        (Once, _) | (_, Once) => Once,
-        (Forever, other) | (other, Forever) => other,
-        (Idle(a), Idle(b)) => Idle(a.min(b)),
-        (Days(a), Days(b)) => Days(a.min(b)),
-        (Idle(hours), Days(days)) | (Days(days), Idle(hours)) => Idle(hours.min(days.saturating_mul(24))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,20 +172,6 @@ mod tests {
             signature: introduction.signature,
         };
         assert!(forged.verify(&signer.public(), 1000).is_err());
-    }
-
-    #[test]
-    fn introduced_trust_ends_no_later_than_the_introducers() {
-        use Policy::*;
-        assert_eq!(stricter(Once, Forever), Once);
-        assert_eq!(stricter(Forever, Once), Once);
-        assert_eq!(stricter(Forever, Forever), Forever);
-        assert_eq!(stricter(Forever, Idle(5)), Idle(5));
-        assert_eq!(stricter(Idle(5), Forever), Idle(5));
-        assert_eq!(stricter(Idle(96), Idle(5)), Idle(5));
-        assert_eq!(stricter(Days(30), Days(7)), Days(7));
-        assert_eq!(stricter(Days(1), Idle(96)), Idle(24));
-        assert_eq!(stricter(Idle(12), Days(30)), Idle(12));
     }
 
     #[test]

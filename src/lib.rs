@@ -9,6 +9,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("DAISY_C
 
 #[cfg(target_os = "macos")]
 pub mod app;
+pub mod arrangement_motion;
 pub mod clipboard;
 pub mod control;
 pub mod controller;
@@ -41,3 +42,5 @@ mod state_file;
 pub mod swipe;
 pub mod trust;
 pub mod update;
+
+pub mod group_trust;

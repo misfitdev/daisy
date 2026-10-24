@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::group_trust::{Active, Record, Stamp, State};
 use crate::identity::PublicKey;
 use crate::trust::{self, ONCE_GRACE, Policy, Timestamp};
 
@@ -38,9 +39,8 @@ pub struct Peer {
     pub side_chosen: Timestamp,
     /// The key it signs introductions and revocations with, once known.
     pub signing: Option<crate::device::PublicKey>,
-    /// The member that introduced it, for a peer this system never paired
-    /// with itself. Trust in it ends with trust in that member.
-    pub introduced_by: Option<PublicKey>,
+    /// Admission generation, unchanged by later retention choices.
+    pub admitted_at: Timestamp,
 }
 
 impl Peer {
@@ -62,7 +62,7 @@ impl Peer {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Forgotten {
     pub removed: usize,
-    /// Every peer no longer trusted, including those they introduced.
+    /// The explicitly selected peers no longer trusted.
     pub keys: Vec<PublicKey>,
     /// Selectors that matched no peer.
     pub unmatched: Vec<String>,
@@ -142,8 +142,8 @@ impl PeerStore {
     }
 
     /// Trusts the newcomer in `introduction`, made by a member this system
-    /// trusts, for no longer than it trusts that member. Returns whether it
-    /// is newly trusted.
+    /// trusts. Admission creates independent group membership. Returns whether
+    /// it is newly trusted.
     pub fn introduce(&self, introduction: &crate::introduce::Introduction, now: Timestamp) -> Result<bool> {
         let revoked = self
             .revocations()
@@ -157,12 +157,11 @@ impl PeerStore {
             if peers.iter().any(|peer| peer.key == introduction.newcomer) {
                 return false;
             }
-            let Some(introducer) = peers.iter().find(|peer| peer.key == introduction.introducer) else {
+            if !peers.iter().any(|peer| peer.key == introduction.introducer) {
                 return false;
-            };
-            let policy = crate::introduce::stricter(introducer.policy, introduction.policy);
-            // trust runs from when the introducer began it, so arriving late
-            // never stretches it past the introducer's own
+            }
+            let policy = introduction.policy;
+            // Catch-up preserves the original admission and policy start.
             peers.push(Peer {
                 name,
                 key: introduction.newcomer,
@@ -172,7 +171,7 @@ impl PeerStore {
                 side: crate::input::Side::Right,
                 side_chosen: 0,
                 signing: Some(introduction.newcomer_signing),
-                introduced_by: Some(introduction.introducer),
+                admitted_at: introduction.trusted_since.min(now),
             });
             true
         })
@@ -230,8 +229,8 @@ impl PeerStore {
     }
 
     /// Applies a verified revocation: keeps it, and stops trusting the
-    /// system it names and every system that one introduced. Returns those
-    /// systems, or `None` if this revocation was already known.
+    /// named member only. Returns the removed members, or `None` if this
+    /// revocation was already known.
     pub fn revoke(
         &self,
         revocation: crate::introduce::Signed<crate::introduce::Revocation>,
@@ -252,8 +251,9 @@ impl PeerStore {
         self.write_revocations(&known)?;
         let before: Vec<PublicKey> = self.read()?.iter().map(|peer| peer.key).collect();
         // trust given after the revocation, by pairing again, stands
-        let after = self.change_locked(now, |peers| {
-            peers.retain(|peer| peer.key != revoked || peer.paired_at > at)
+        let after = self.change_locked_checked(now, |peers| {
+            peers.retain(|peer| peer.key != revoked || peer.admitted_at > at);
+            Ok(vec![(revoked, at)])
         })?;
         Ok(Some(
             before
@@ -343,7 +343,9 @@ impl PeerStore {
     pub fn pin(&self, key: PublicKey, name: &str, policy: Policy, now: Timestamp) -> Result<()> {
         // a name must not be able to smuggle anything else into the file
         let name = name.lines().next().unwrap_or("").trim().to_owned();
-        self.update(now, |peers| {
+        let _lock = self.lock()?;
+        let admitted_at = self.next_admission(key, now)?;
+        self.change_locked(now, |peers| {
             let signing = peers.iter().find(|peer| peer.key == key).and_then(|peer| peer.signing);
             peers.retain(|peer| peer.key != key);
             peers.push(Peer {
@@ -355,9 +357,10 @@ impl PeerStore {
                 side: crate::input::Side::Right,
                 side_chosen: 0,
                 signing,
-                introduced_by: None,
+                admitted_at,
             });
         })
+        .map(|_| ())
     }
 
     /// Record a session with `key` at `now`. Never adds a peer: returns
@@ -371,7 +374,9 @@ impl PeerStore {
         now: Timestamp,
     ) -> Result<()> {
         let name = name.lines().next().unwrap_or("").trim().to_owned();
-        self.update(now, |peers| {
+        let _lock = self.lock()?;
+        let admitted_at = self.next_admission(key, now)?;
+        self.change_locked(now, |peers| {
             peers.retain(|peer| peer.key != key);
             peers.push(Peer {
                 name,
@@ -382,9 +387,10 @@ impl PeerStore {
                 side: crate::input::Side::Right,
                 side_chosen: 0,
                 signing: Some(device),
-                introduced_by: None,
+                admitted_at,
             });
         })
+        .map(|_| ())
     }
 
     pub fn renew(&self, key: &PublicKey, now: Timestamp) -> Result<bool> {
@@ -458,6 +464,7 @@ impl PeerStore {
         let mut result = None;
         self.change_locked_checked(now, |peers| {
             let before: Vec<PublicKey> = peers.iter().map(|peer| peer.key).collect();
+            let generations: Vec<_> = peers.iter().map(|peer| (peer.key, peer.admitted_at)).collect();
             let count = peers.len();
             let unmatched = selectors
                 .iter()
@@ -474,21 +481,38 @@ impl PeerStore {
             before_commit(&keys)?;
             result = Some(Forgotten {
                 removed,
-                keys,
+                keys: keys.clone(),
                 unmatched,
             });
-            Ok(())
+            Ok(keys
+                .into_iter()
+                .map(|key| {
+                    (
+                        key,
+                        now.max(
+                            generations
+                                .iter()
+                                .find(|(member, _)| *member == key)
+                                .map_or(0, |(_, at)| *at),
+                        ),
+                    )
+                })
+                .collect())
         })?;
         Ok(result.expect("the change ran"))
     }
 
     /// Stop trusting every peer. Returns how many there were.
     pub fn forget_all(&self, now: Timestamp) -> Result<usize> {
-        self.update(now, |peers| {
-            let removed = peers.len();
-            peers.clear();
-            removed
-        })
+        let _lock = self.lock()?;
+        let mut peers = self.read()?;
+        Self::prune(&mut peers, now);
+        let removed = peers.len();
+        // Leaving also discards cached membership, so joining a different
+        // group cannot carry the old group's members along.
+        self.write_with(&[], PeerFile::default())?;
+        self.write_revocations(&[])?;
+        Ok(removed)
     }
 
     /// Mark a session with `key` as running, until the returned guard drops.
@@ -544,35 +568,29 @@ impl PeerStore {
     fn change_locked(&self, now: Timestamp, change: impl FnOnce(&mut Vec<Peer>)) -> Result<Vec<Peer>> {
         self.change_locked_checked(now, |peers| {
             change(peers);
-            Ok(())
+            Ok(Vec::new())
         })
     }
 
     fn prune(peers: &mut Vec<Peer>, now: Timestamp) {
         peers.retain(|peer| !peer.is_expired(false, now));
-        // trust in an introduced system ends with trust in its introducer
-        loop {
-            let count = peers.len();
-            let present: Vec<PublicKey> = peers.iter().map(|peer| peer.key).collect();
-            peers.retain(|peer| peer.introduced_by.is_none_or(|by| present.contains(&by)));
-            if peers.len() == count {
-                break;
-            }
-        }
     }
 
     fn change_locked_checked(
         &self,
         now: Timestamp,
-        change: impl FnOnce(&mut Vec<Peer>) -> Result<()>,
+        change: impl FnOnce(&mut Vec<Peer>) -> Result<Vec<(PublicKey, Timestamp)>>,
     ) -> Result<Vec<Peer>> {
         let before = self.read()?;
         let mut peers = before.clone();
         Self::prune(&mut peers, now);
-        change(&mut peers)?;
+        let removals = change(&mut peers)?;
         Self::prune(&mut peers, now);
-        if peers != before {
-            self.write(&peers)?;
+        if peers != before
+            || !removals.is_empty()
+            || self.read_file()?.group.is_empty() && peers.iter().any(|peer| peer.signing.is_some())
+        {
+            self.write_group_change(&before, &peers, &removals, now)?;
         }
         Ok(peers)
     }
@@ -590,13 +608,17 @@ impl PeerStore {
         Ok(file)
     }
 
-    fn read(&self) -> Result<Vec<Peer>> {
+    fn read_file(&self) -> Result<PeerFile> {
         let text = match fs::read_to_string(&self.path) {
             Ok(text) => text,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(PeerFile::default()),
             Err(error) => return Err(error).with_context(|| format!("reading {}", self.path.display())),
         };
-        let file: PeerFile = toml::from_str(&text).with_context(|| format!("reading {}", self.path.display()))?;
+        toml::from_str(&text).with_context(|| format!("reading {}", self.path.display()))
+    }
+
+    fn read(&self) -> Result<Vec<Peer>> {
+        let file = self.read_file()?;
         file.peers
             .into_iter()
             .map(|entry| {
@@ -615,14 +637,219 @@ impl PeerStore {
                         .as_deref()
                         .and_then(from_hex)
                         .and_then(|bytes| crate::device::PublicKey::from_bytes(&bytes).ok()),
-                    introduced_by: entry.introduced_by.as_deref().and_then(PublicKey::from_hex),
+                    admitted_at: entry.admitted_at.unwrap_or(entry.paired_at),
                 })
             })
             .collect()
     }
 
-    fn write(&self, peers: &[Peer]) -> Result<()> {
+    fn records(file: &PeerFile) -> Result<Vec<Record>> {
+        file.group
+            .iter()
+            .map(|hex| {
+                let bytes = from_hex(hex).context("invalid group trust encoding")?;
+                postcard::from_bytes(&bytes).context("invalid group trust record")
+            })
+            .collect()
+    }
+
+    fn save_records(file: &mut PeerFile, records: &[Record]) -> Result<()> {
+        file.group = records
+            .iter()
+            .map(|record| Ok(to_hex(&postcard::to_stdvec(record)?)))
+            .collect::<Result<_>>()?;
+        Ok(())
+    }
+
+    fn next_admission(&self, key: PublicKey, now: Timestamp) -> Result<Timestamp> {
+        let records = Self::records(&self.read_file()?)?;
+        Ok(records
+            .iter()
+            .filter_map(|record| match record.state {
+                State::Removed { at } if record.member == key => Some(at.saturating_add(1)),
+                _ => None,
+            })
+            .chain(
+                self.revocations()
+                    .into_iter()
+                    .filter(|signed| signed.body.revoked == key)
+                    .map(|signed| signed.body.at.saturating_add(1)),
+            )
+            .max()
+            .unwrap_or(0)
+            .max(now))
+    }
+
+    fn write_group_change(
+        &self,
+        before: &[Peer],
+        peers: &[Peer],
+        removals: &[(PublicKey, Timestamp)],
+        now: Timestamp,
+    ) -> Result<()> {
+        let mut file = self.read_file()?;
+        let mut records = Self::records(&file)?;
+        let writer = match file.writer {
+            Some(writer) => writer,
+            None => {
+                let mut writer = [0; 16];
+                getrandom::fill(&mut writer)?;
+                file.writer = Some(writer);
+                writer
+            }
+        };
+        for peer in peers {
+            let Some(signing) = peer.signing else {
+                continue;
+            };
+            let old = before.iter().find(|old| old.key == peer.key);
+            let explicit = old.is_some_and(|old| old.policy != peer.policy || old.paired_at != peer.paired_at);
+            let prior = records.iter().find(|record| record.member == peer.key);
+            let stamp = if explicit {
+                Stamp {
+                    version: now.saturating_mul(1000).max(
+                        records
+                            .iter()
+                            .map(|record| record.stamp.version)
+                            .max()
+                            .unwrap_or(0)
+                            .saturating_add(1),
+                    ),
+                    writer,
+                }
+            } else {
+                prior.map_or(Stamp::default(), |record| record.stamp)
+            };
+            let record = Record {
+                member: peer.key,
+                stamp,
+                state: State::Active(Active {
+                    removed_through: prior.and_then(Record::cutoff),
+                    signing,
+                    name: peer.name.clone(),
+                    policy: peer.policy,
+                    admitted_at: peer.admitted_at,
+                    since: peer.paired_at,
+                    last_seen: peer.last_seen,
+                }),
+            };
+            // These are local authoritative mutations; ordinary renewals preserve
+            // the shared policy version, and a fresh pairing advances admission.
+            if let Some(index) = records.iter().position(|record| record.member == peer.key) {
+                records[index] = record;
+            } else {
+                records.push(record);
+            }
+        }
+        let legacy: Vec<_> = self
+            .revocations()
+            .into_iter()
+            .map(|signed| (signed.body.revoked, signed.body.at))
+            .collect();
+        for (member, at) in removals.iter().chain(&legacy) {
+            let record = Record {
+                member: *member,
+                stamp: Stamp::default(),
+                state: State::Removed { at: *at },
+            };
+            if let Some(index) = records.iter().position(|record| record.member == *member) {
+                records[index] = records[index].merge(&record);
+            } else {
+                records.push(record);
+            }
+        }
+        Self::save_records(&mut file, &records)?;
+        self.write_with(peers, file)
+    }
+
+    /// Shared state includes tombstones and this system's cached policy, so a
+    /// returning member catches up even after the original writer has left.
+    pub fn group_records(&self) -> Result<Vec<Record>> {
+        let _lock = self.lock()?;
+        let peers = self.read()?;
+        if self.read_file()?.group.is_empty() && (!peers.is_empty() || !self.revocations().is_empty()) {
+            self.write_group_change(&peers, &peers, &[], trust::now())?;
+        }
+        Self::records(&self.read_file()?)
+    }
+
+    /// Apply only after verifying the current sender's device signature.
+    pub fn apply_group(
+        &self,
+        incoming: &Record,
+        me: PublicKey,
+        own_signing: crate::device::PublicKey,
+        now: Timestamp,
+    ) -> Result<bool> {
+        let _lock = self.lock()?;
+        let mut file = self.read_file()?;
+        let mut records = Self::records(&file)?;
+        if incoming.member == me
+            && let State::Active(active) = &incoming.state
+            && active.signing != own_signing
+        {
+            bail!("group membership changes this system's device identity");
+        }
+        let prior = records.iter().position(|record| record.member == incoming.member);
+        let merged = prior.map_or_else(|| incoming.clone(), |index| records[index].merge(incoming));
+        if prior.is_some_and(|index| records[index] == merged) {
+            return Ok(false);
+        }
+        let mut peers = self.read()?;
+        if let State::Active(active) = &merged.state {
+            if peers.iter().find(|peer| peer.key == merged.member).is_some_and(|peer| {
+                peer.signing.is_some_and(|key| key != active.signing)
+                    && active.removed_through.is_none_or(|at| peer.admitted_at > at)
+            }) {
+                bail!("group membership changes a pinned device identity");
+            }
+            if merged.member != me && !active.policy.is_expired(active.since, active.last_seen, false, now) {
+                if let Some(peer) = peers.iter_mut().find(|peer| peer.key == merged.member) {
+                    peer.policy = active.policy;
+                    peer.paired_at = active.since;
+                    peer.last_seen = peer.last_seen.max(active.last_seen);
+                    peer.admitted_at = active.admitted_at;
+                    peer.signing = Some(active.signing);
+                } else {
+                    peers.push(Peer {
+                        key: merged.member,
+                        name: active.name.clone(),
+                        policy: active.policy,
+                        paired_at: active.since,
+                        last_seen: active.last_seen,
+                        admitted_at: active.admitted_at,
+                        signing: Some(active.signing),
+                        side: crate::input::Side::Right,
+                        side_chosen: 0,
+                    });
+                }
+            } else if merged.member != me {
+                peers.retain(|peer| peer.key != merged.member);
+            }
+        } else if merged.member == me {
+            peers.clear();
+        } else {
+            peers.retain(|peer| peer.key != merged.member);
+        }
+        let leaving = merged.member == me && matches!(merged.state, State::Removed { .. });
+        if let Some(index) = prior {
+            records[index] = merged;
+        } else {
+            records.push(merged);
+        }
+        if leaving {
+            records.retain(|record| matches!(record.state, State::Removed { .. }));
+        }
+        Self::prune(&mut peers, now);
+        Self::save_records(&mut file, &records)?;
+        self.write_with(&peers, file)?;
+        Ok(true)
+    }
+
+    fn write_with(&self, peers: &[Peer], previous: PeerFile) -> Result<()> {
         let file = PeerFile {
+            group: previous.group,
+            writer: previous.writer,
             peers: peers
                 .iter()
                 .map(|peer| Entry {
@@ -634,7 +861,7 @@ impl PeerStore {
                     side: peer.side,
                     side_chosen: peer.side_chosen,
                     signing: peer.signing.map(|signing| to_hex(&signing.to_bytes())),
-                    introduced_by: peer.introduced_by.map(|key| key.to_hex()),
+                    admitted_at: Some(peer.admitted_at),
                 })
                 .collect(),
         };
@@ -679,8 +906,12 @@ impl Drop for Visit<'_> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct PeerFile {
+    #[serde(default)]
+    group: Vec<String>,
+    #[serde(default)]
+    writer: Option<[u8; 16]>,
     #[serde(default, rename = "peer")]
     peers: Vec<Entry>,
 }
@@ -697,7 +928,7 @@ struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signing: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    introduced_by: Option<String>,
+    admitted_at: Option<Timestamp>,
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -759,20 +990,58 @@ mod tests {
     }
 
     #[test]
-    fn an_introduced_system_is_trusted_no_longer_than_its_introducer() {
+    fn legacy_introducer_fields_migrate_without_dependencies() {
+        let home = tempfile::tempdir().unwrap();
+        let store = PeerStore::open(home.path()).unwrap();
+        for n in [1, 2] {
+            store
+                .pin_device(key(n), crate::device::test_public(n), "Peer", Policy::Forever, NOW)
+                .unwrap();
+        }
+        // Emulate the old schema, including its introducer relationship.
+        let mut file = store.read_file().unwrap();
+        file.group.clear();
+        file.writer = None;
+        for entry in &mut file.peers {
+            entry.admitted_at = None;
+        }
+        let text = toml::to_string(&file).unwrap();
+        let text = text.replace(
+            "side_chosen = 0",
+            &format!("side_chosen = 0\nintroduced_by = \"{}\"", key(1).to_hex()),
+        );
+        std::fs::write(&store.path, text).unwrap();
+        let reopened = PeerStore::open(home.path()).unwrap();
+        reopened.forget(&[key(1).to_hex()], NOW + 1).unwrap();
+        let peers = reopened.list(NOW + 1).unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].key, key(2));
+        assert_eq!(peers[0].admitted_at, NOW);
+        assert!(!std::fs::read_to_string(&store.path).unwrap().contains("introduced_by"));
+        assert!(
+            reopened
+                .group_records()
+                .unwrap()
+                .iter()
+                .any(|record| record.member == key(1) && matches!(record.state, State::Removed { .. }))
+        );
+    }
+
+    #[test]
+    fn admitted_members_outlive_the_member_that_added_them() {
         let (store, _dir) = store();
         store.pin(key(1), "laptop", Policy::Idle(5), NOW).unwrap();
         assert!(store.introduce(&introduction(1, 2, NOW), NOW).unwrap());
         let studio = store.trusted(&key(2), NOW).unwrap().unwrap();
-        assert_eq!((studio.policy, studio.introduced_by), (Policy::Idle(5), Some(key(1))));
+        assert_eq!(studio.policy, Policy::Forever);
         assert_eq!(studio.signing, Some(crate::device::test_public(2)));
         // introduced again: nothing changes
         assert!(!store.introduce(&introduction(1, 2, NOW), NOW).unwrap());
-        // trust in the introducer ends, and with it trust in what it introduced
+        // Losing the admitting member does not remove other group members.
         store.pin(key(3), "kept", Policy::Forever, NOW).unwrap();
         let later = NOW + 5 * 3600;
         let peers: Vec<_> = store.list(later).unwrap().iter().map(|peer| peer.key).collect();
-        assert_eq!(peers, [key(3)]);
+        assert_eq!(peers, [key(2), key(3)]);
     }
 
     #[test]
@@ -783,15 +1052,18 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_a_system_also_forgets_what_it_introduced() {
+    fn forgetting_a_member_keeps_the_other_group_members() {
         let (store, _dir) = store();
         store.pin(key(1), "laptop", Policy::Forever, NOW).unwrap();
         store.introduce(&introduction(1, 2, NOW), NOW).unwrap();
         store.introduce(&introduction(2, 3, NOW), NOW).unwrap();
         let forgotten = store.forget(&["laptop".to_owned()], NOW).unwrap();
         assert_eq!(forgotten.removed, 1);
-        assert_eq!(forgotten.keys, [key(1), key(2), key(3)]);
-        assert!(store.list(NOW).unwrap().is_empty());
+        assert_eq!(forgotten.keys, [key(1)]);
+        assert_eq!(
+            store.list(NOW).unwrap().iter().map(|peer| peer.key).collect::<Vec<_>>(),
+            [key(2), key(3)]
+        );
     }
 
     #[test]
@@ -811,7 +1083,8 @@ mod tests {
         store.introduce(&introduction(1, 2, NOW), NOW).unwrap();
         store.introduce(&introduction(2, 3, NOW), NOW).unwrap();
         let removed = store.revoke(revocation(1, 2, NOW + 10), NOW + 10).unwrap();
-        assert_eq!(removed, Some(vec![key(2), key(3)]));
+        assert_eq!(removed, Some(vec![key(2)]));
+        assert!(store.trusted(&key(3), NOW + 10).unwrap().is_some());
         assert_eq!(
             store.revoke(revocation(1, 2, NOW + 10), NOW + 10).unwrap(),
             None,

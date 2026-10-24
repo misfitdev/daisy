@@ -19,12 +19,13 @@ Each member shares its displays and one agreed arrangement: an offset per member
 | Controller | `controller` | Owns the background Tokio runtime, saved setup and typed command/event channels |
 | Connection service | `service` | Shared listen/connect, pairing, trust and input-sharing orchestration used by both UI and CLI |
 | Launcher | `launcher` | Relaunches a bundled CLI invocation as `Daisy.app` so macOS applies the app's permissions; stops it when its terminal goes away |
-| Identity | `identity`, `device`, `peers`, `trust`, `introduce` | This system's long-term keys, trusted peers, how long each stays trusted, and signed introductions and revocations |
+| Identity | `identity`, `device`, `peers`, `trust`, `introduce`, `group_trust` | This system's long-term keys, trusted peers, how long each stays trusted, and sender-signed shared membership records |
 | Session | `session` | Noise handshake, encrypted framing and split send/receive halves |
 | Trust | `pairing` | Pinned keys and pairing through a one-time code |
 | Wire | `protocol` | Messages; see [protocol.md](protocol.md) |
 | Control | `control` | Group-wide ownership and simultaneous-use settling |
 | Layout | `layout` | Display geometry, the agreed arrangement, snapping, and where the pointer goes next |
+| Arrangement motion | `arrangement_motion` | Presentation-only springs, arrival and control emphasis, and rigid chain geometry; never changes routing or shared placement |
 | Recall | `recall` | The arrangement last confirmed for each set of members and displays, and when to start from it |
 | Sharing | `share` | One input core for the group, with a link per member: claims, routing, arrangement, bounded queues, heartbeat and cleanup |
 | Developer diagnostics | `diagnostics`, `macos::diagnostics` | Dynamic trace requests, bounded event capture and encrypted streaming, local collector socket, foreground observations |
@@ -77,6 +78,14 @@ launches.
 - **Event-tap thread**: owns the CoreFoundation run loop. Its callback makes decisions under nonblocking locks and hands messages to the runtime through a bounded channel. It never waits, performs I/O, starts a process or lets a panic escape into CoreGraphics.
 - **Swipe-poster thread** on macOS 27: replays swipe steps at least 16 ms apart and coalesces progress that arrives faster, preserving order without stalling the session.
 
+The arrangement has a separate visual pose driven by a bounded spring model.
+Its main-thread timer runs in common run-loop modes only while the window is
+visible and motion is active. Hidden, minimized or occluded windows stop the
+timer; settled views sleep. Pointer dragging holds its coordinate mapping until
+the drop; keyboard placement and Reduce Motion finish the visual pose immediately.
+The shared layout remains authoritative throughout. Chain links use the same
+adjacency geometry as pointer reachability and require live session state.
+
 The network queues and event-tap queue are bounded. If callback state is contended or the local input queue fills, the callback passes input through locally, reclaims local routing when possible and raises a lock-free overflow signal. The runtime then ends the session. Local control and explicit disconnect win over lagging input.
 
 The connection session owns the lifetime of every background input core. Core
@@ -94,7 +103,7 @@ side remains held.
 1. The controller starts automatic listening and browsing, or an optional direct connection from saved `SessionSettings`.
 2. Noise `XX` establishes an encrypted channel and exposes the remote static key. Both sides exchange and verify `DeviceProof`, signed over its handshake hash and sender role with their Secure Enclave device keys, before settling trust.
 3. The trust layer accepts an already-pinned key or, only while both peers explicitly allow pairing, runs SPAKE2 using the six-digit code as input.
-4. Both sides exchange `Layout`, then catch each other up on introductions and revocations, and the link joins the input core. The first link starts the core: one event tap, one injector and one owner of control for every link; the last link to end stops it.
+4. Both sides exchange `Layout`, then catch each other up on shared membership, retention choices and removal tombstones, and the link joins the input core. The first link starts the core: one event tap, one injector and one owner of control for every link; the last link to end stops it.
 5. The event tap on the system in use observes local input. While control is local, events pass through untouched.
 6. Pushing the pointer off one of this system's displays toward another member's display, within 40 points, hides and pins the local pointer, then sends `Enter` to that member with the exact entry point. Control never crosses while a mouse button is held, and never onto a locked member.
 7. Input is swallowed locally and forwarded. A key pressed before crossing keeps its release on the system it was pressed on, so it cannot become stuck remotely.
@@ -116,8 +125,8 @@ The command-line `connect` command runs `service::connect` as a loop. Once a ses
 
 - `identity`: this system's long-term private key pair.
 - `device-identity`: a reference to the non-exportable Secure Enclave P-256 key in the Data Protection Keychain.
-- `trust-v5/peers.toml`: one entry per trusted peer, including key, name, trust policy, pairing time, last-seen time, its signing key and who introduced it.
-- `trust-v5/revocations.toml`: signed revocations this system knows, to pass on.
+- `trust-v5/peers.toml`: one entry per trusted peer, including key, name, trust policy, pairing time, last-seen time, its signing key and independent admission time. The same atomic file stores shared retention choices, removal history and tombstones.
+- `trust-v5/revocations.toml`: the legacy signed removal journal; known removals are carried in shared membership records.
 - `trust-v5/arrangement.toml`: the newest group arrangement it saw.
 - `trust-v5/layouts.toml`: the arrangement last confirmed for each set of
   members and displays, at most 32, the least recently used dropped first.

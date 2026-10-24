@@ -62,14 +62,14 @@ Each system runs one pairing exchange at a time and accepts at most five unknown
 
 ## How long trust lasts
 
-Trust is not forever by default. Each system keeps its own policy for every peer it trusts:
+Trust is not forever by default. Each member has a retention policy shared across the group:
 
 - **Idle**, the default: trust ends after a chosen number of hours or days without an authenticated session, 96 hours unless changed. A running session renews it.
 - **A deadline**: N days, set only from the command line. Connecting does not extend it, and a session still running at the deadline ends.
 - **Once**: trust ends with the session. Only after an accidental drop—silence or network error, not deliberate close—may the same key reconnect without a code, for at most 60 seconds.
 - **Forever**: trust lasts until explicitly forgotten. It must be chosen and is always displayed as such.
 
-Each system chooses the policy when pairing completes. Changing a policy restarts it from that moment, as if the peer had just paired. Each system enforces its own policy on its own clock. A session starts only while both peers trust each other, so neither can extend the other's trust by claiming that it still trusts.
+Pairing establishes a policy. Changing **Remember…** on any member shares the new choice and its start time throughout the group. Authenticated connections renew the shared last-seen time; renewals cannot overwrite a newer policy choice. Each system enforces that choice on its own clock. A session starts only while both peers trust each other.
 
 Expired trust is removed from the peer file. The menu-bar app can forget a peer and aborts its active session task immediately; the peer-file watcher remains the backstop for changes made by another process and reacts within one second. The optional CLI provides `daisy forget` and `daisy rotate-key` for bulk revocation and identity rotation.
 
@@ -77,12 +77,13 @@ Expired trust is removed from the peer file. The menu-bar app can forget a peer 
 
 A group is every system a member trusts, up to eight, each holding an encrypted session with every other. A new system joins by pairing with any one member; that member introduces it to the rest.
 
-- **Device keys.** The same non-exportable Secure Enclave P-256 key signs session proofs, introductions and revocations. Pairing pins its public key beside the Noise identity. A pinned device key cannot change without forgetting the peer and pairing again.
-- **Introductions.** An introduction names the introducer, the newcomer's Noise and signing keys, its name, the introducer's trust policy for it, and when the introducer began trusting it. It is signed by the introducer. A system accepts an introduction only from the member it names as introducer, with that member's pinned signing key, and not dated more than five minutes ahead of its own clock. It trusts the newcomer under whichever policy ends sooner: its own for the introducer, or the introducer's for the newcomer. Trust in an introduced system ends when trust in its introducer ends.
-- **Revocations.** Forgetting one system signs a revocation naming it. Every member that trusts the signer removes that system and every system it introduced, keeps the revocation, and passes it on. An introduction dated before a known revocation of its newcomer is refused, so a member that has not yet heard cannot bring a revoked system back; pairing it again directly does. A system ignores a revocation of itself. Revocations are signed and saved before local peer removal; signing or persistence failure preserves the peer record for retry. `daisy forget --all` only leaves the group; it revokes nothing.
-- **Catching up.** Whenever a session starts, each side sends the other an introduction of every system it trusts and every revocation it knows, so a member that was away catches up.
+- **Device keys.** The non-exportable Secure Enclave P-256 key signs session proofs and shared trust statements. Pairing pins its public key beside the Noise identity. A pinned device key cannot change through a policy update; changing identity requires removal and fresh pairing.
+- **Admission.** A current member attests a record containing the member’s Noise and device keys, name, policy, admission time, policy start and last-seen time. The encrypted session sender must match the statement’s signer and its pinned device key. Statements more than five minutes ahead of the receiver’s clock are refused. Admission is independent of the admitting system’s lifetime and retention policy.
+- **Retention.** Explicit choices use a monotonically increasing version and a random per-store writer identifier to resolve simultaneous edits consistently. Last-seen times merge by maximum independently of policy versions. Each member can change any member’s policy; joining defaults do not override an established explicit choice.
+- **Removal.** Forgetting a member records a persistent tombstone. Every other member remains trusted. A policy edit retains the original admission time and cannot override a removal. Fresh direct pairing advances the admission beyond the removal and retains its cutoff so pre-removal records remain invalid after catch-up. A system receiving its own removal leaves the group. Revocation signing and persistence failures preserve the local peer for retry. `daisy forget --all` only leaves the group; it revokes nothing.
+- **Catch-up.** At link startup, and as records change, members send signed copies of active records and tombstones. Relays attest records with their own current device key, so catch-up does not depend on the original admitting, editing or removing system remaining trusted. Records and peer pins are persisted together under the peer-store lock using atomic replacement.
 
-Introductions widen trust beyond the pairing a person performed: pairing A with B, and A with C, makes B and C trust each other. A member that is compromised, or with malware able to request its device signatures, can introduce a system of the attacker's choosing to every member, and can revoke members. Forgetting that member on any one system removes it, and everything it introduced, from the whole group.
+Pairing A with B, and A with C, makes B and C trust each other. A compromised member can admit or remove systems and change retention choices throughout the group. Removing that member does not remove other members it admitted.
 
 ## Discovery
 
@@ -120,7 +121,7 @@ Each system’s P-256 device private key stays in its Secure Enclave. The Data P
 
 The `device-identity` file holds a Keychain lookup reference, not private key material. The separate X25519 Noise key remains in `identity`. Both files are user-only (`0600`, under a `0700` directory). Copying the Noise key and the Keychain reference to another system does not supply the pinned device key. `daisy rotate-key` replaces both identities, retires the previous device key, and requires fresh pairing. A failed retirement restores the prior reference and reports an error. Unlock this system before creating or rotating a device key.
 
-Device-bound peer trust is stored in `trust-v5/`. Peer records from before device-bound identity are not accepted or converted; those groups must pair again. Pinned public keys, introducers and trust policies live in `trust-v5/peers.toml`; signed revocations live in `trust-v5/revocations.toml`. Each update locks, rereads and rewrites the store, preventing a running process from restoring a peer another process forgot.
+Device-bound peer trust is stored in `trust-v5/`. Peer records from before device-bound identity are not accepted or converted; those groups must pair again. Pinned public keys, admission generations, shared policies and removal tombstones live in `trust-v5/peers.toml`. Earlier signed revocations in `trust-v5/revocations.toml` are imported as tombstones. Legacy introducer fields are ignored. Each update locks, rereads and rewrites the store, preventing a running process from restoring a peer another process forgot.
 
 ## Release integrity
 

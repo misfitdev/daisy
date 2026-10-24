@@ -30,6 +30,12 @@ Open Daisy. The arrangement at the top shows every display in the group.
 
 **With a keyboard:** select the arrangement, press **[** or **]** to choose a peer, then use the **arrow keys** to place it against that side.
 
+After a pointer drop, screens settle into place and the view smoothly fits the
+group. Keyboard placement is immediate. **Reduce Motion** in System Settings
+also makes changes immediate. These visual transitions do not delay input sharing.
+The system in control is marked **In use**. Daisy links join nearby screens with
+live connections; remembered offline peers have gray flowers and no links.
+
 Changes apply across the group and are saved. If two systems change the arrangement, the later change wins. Adding, removing or rearranging a display updates the layout and moves any system that would overlap or be left out of reach.
 
 When a new member joins, displays change, or a member cannot be reached,
@@ -54,7 +60,7 @@ Using a system's own keyboard or trackpad takes control there immediately. Momen
 
 **Control-Option-Command-Escape** returns control to the system you are at and centers its pointer on the main display. Disconnecting or stopping sharing also releases held remote input.
 
-Under **Peers**, each row shows **Connected** with round-trip latency, **Not connected**, or **Locked**. Setup, reconnection and error messages appear below the display arrangement when needed. The system in control has a coral daisy in the arrangement. The menu-bar flower has a yellow center when connected and a gray center otherwise.
+Under **Peers**, each row shows **Connected** with round-trip latency, **Not connected**, or **Locked**. Setup, reconnection and error messages appear below the display arrangement when needed. The system in control has a coral outline and an **In use** label in the arrangement. The menu-bar flower has a yellow center when connected and a gray center otherwise.
 
 ## Keyboard
 
@@ -102,7 +108,7 @@ Pairing one member admits a system to the whole group. See [group trust and intr
 
 Under **Peers**, click a peer's **Remember…** button to change how long this system trusts it. The gray line under its name shows its connection and when that trust ends. Hover over its name to see the key fingerprint.
 
-[Manage trust](trust.md) explains expiration, group access and forgetting. The trash can beside a peer forgets it, after you confirm, and removes its introduced systems from the whole group. Use **Stop Sharing** for a temporary stop that retains peers.
+[Manage trust](trust.md) explains expiration, group access and forgetting. The trash can beside a peer forgets it, after you confirm, and removes that peer from the whole group. Other members remain trusted. Use **Stop Sharing** for a temporary stop that retains peers.
 
 ## Troubleshooting
 
@@ -250,7 +256,7 @@ daisy trust <name-or-fingerprint> idle:12h
 ### Forget peers or leave the group
 
 ```bash
-# Remove named peers and their introduced systems from the whole group.
+# Remove named peers from the whole group; other members remain trusted.
 daisy forget <name-or-fingerprint>...
 # Leave from this system without removing other group members.
 daisy forget --all

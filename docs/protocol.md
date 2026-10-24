@@ -12,7 +12,7 @@ A TCP connection, to port 24850 by default. Every frame is a big-endian `u16` le
 
 Every connection starts with a `Noise_XX_25519_ChaChaPoly_BLAKE2s` handshake, and both sides send long-term keys. The prologue is `daisy` and never changes. Each side includes its protocol generation in the first handshake message, followed by authenticated capabilities encoded as UTF-8 within the existing 64-byte limit. The capability list explicitly names supported generations, and peers select the greatest generation both support. A legacy peer can continue using the generation it sent while ignoring the capability suffix. Trace, file-transfer, clipboard-ID and arrangement-confirmation capabilities are negotiated independently. The capability tail is authenticated because it is bound into the device proof.
 
-Both sides finish the authenticated handshake before comparing protocol support, so a peer can explain a mismatch. Different releases connect when they negotiate a shared protocol generation. Releases support the immediately preceding generation during rolling updates; older or unknown future generations are rejected unless explicitly supported. The handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
+Both sides finish the authenticated handshake before comparing protocol support, so a peer can explain a mismatch. Different releases connect when they negotiate a shared protocol generation. Protocol 8 requires a whole-group update because membership and retention choices are now shared. Protocols 6 and 7 are not supported by this release. The handshake proves each side holds the private key for the public key it presented. It does not prove that key belongs to the peer you meant to reach; trust is settled next.
 
 After the handshake the session splits into a sending half and a receiving half, so input can go out while messages arrive. Each direction keeps its own nonce, counting up from zero, so a replayed or reordered frame fails to authenticate.
 
@@ -41,17 +41,21 @@ Messages are encoded with [postcard](https://github.com/jamesmunns/postcard), wh
 | 14 | `Arrangement { version, author, offsets }` | any | Where every member's displays sit in the group; the greatest `(version, author)` wins everywhere |
 | 15 | `Locked { locked }` | both | Whether the sender's screen is locked; sent at start and on change |
 | 16 | `SigningKey { key }` | reserved | Earlier signing-key message; not sent or accepted by the current protocol |
-| 17 | `Introduce { introduction }` | any | A system the sender trusts, signed by the sender; see the security model |
-| 18 | `Revoke { revocation }` | any | A system a member no longer trusts, signed by that member, passed on |
+| 17 | `Introduce { introduction }` | reserved | Legacy trust statement, refused by protocol 8 |
+| 18 | `Revoke { revocation }` | reserved | Legacy revocation, refused by protocol 8 |
 | 19 | `DeviceProof { key, signature }` | both, before Hello | Secure Enclave P-256 proof over the Noise handshake hash and connection role |
 | 20 | `Activity { generation }` | system in control | New physical input; refreshes display activity on every unlocked member, at most once per second |
 | 21 | `TraceControl { enabled }` | collector | Optional `trace-v1` request; enables trace events on this authenticated link until disabled or disconnected |
 | 22 | `TraceRecord { record }` | requested peer | Optional bounded diagnostic record, at most 4 KiB as JSON; accepted only on a negotiated trace link |
 | 23 | `TraceAck { sequence }` | collector | Optional acknowledgment of one trace record; only the outstanding sequence releases send credit |
 
+| 31 | `GroupTrust { announcement }` | any current member | Sender-signed shared membership, retention choice, renewal or removal tombstone |
+
+`GroupTrust` signatures cover `daisy group trust v1` followed by the postcard-encoded announcement. Records carry a member key, `(version, writer)` stamp and either active membership or a removal time. Active records carry the pinned device key, name, policy, admission time, policy start, last-seen time and latest superseded removal time. A policy edit never advances admission; removal defeats stale admission even if its policy version is newer. Relays re-sign the same record with their own device identity. See [Groups](security-model.md#groups).
+
 `generation` is the sender's latest claim. Every member orders claims by `(generation, claimant key)` and keeps the greatest, so all agree on one owner whatever order claims arrive in. A system plays input only from the owner at the current generation, so input queued before a handoff never lands after it.
 
-`Activity` is accepted only from the current owner at the current generation, while the receiving system is unlocked and not handling local input. It carries no input event and is not forwarded. Ordinary heartbeats do not count as user activity. When physical input stops, activity updates stop and each system’s normal display sleep and lock settings apply. Protocol generations increase monotonically when the wire contract changes. Releases keep the current generation compatible with the immediately preceding generation for rolling updates. Each release declares the generations it supports; numeric adjacency alone does not imply compatibility. Device identity and the trust store are unchanged by protocol negotiation.
+`Activity` is accepted only from the current owner at the current generation, while the receiving system is unlocked and not handling local input. It carries no input event and is not forwarded. Ordinary heartbeats do not count as user activity. When physical input stops, activity updates stop and each system’s normal display sleep and lock settings apply. Protocol generations increase monotonically when the wire contract changes. Compatibility is declared explicitly; protocol 8 has no bridge to the earlier trust-tree behavior. Each release declares the generations it supports; numeric adjacency alone does not imply compatibility. Device identity and the trust store are unchanged by protocol negotiation.
 
 Points are in a system's own coordinates: macOS global coordinates, origin at the top left of its main display, y growing downward. `Arrangement` places each system's displays by an offset into one shared space; displays of different systems never overlap there.
 
@@ -203,7 +207,7 @@ A required message or behavior change requires a protocol change. Unknown
 messages remain errors; silently ignoring control or security messages is
 unsafe.
 
-The current protocol generation explicitly supports its immediately preceding generation. The authenticated handshake advertises supported generations, and each link selects the greatest mutual generation before sharing begins. Numeric adjacency alone never authorizes compatibility. Unsupported older or unknown future generations are rejected. Routine automatic updates select a signed feed channel containing the current
+The current protocol generation is 8 and supports only generation 8. Upgrade every system in a group manually before sharing again. The authenticated handshake advertises supported generations, and each link selects the greatest mutual generation before sharing begins. Numeric adjacency alone never authorizes compatibility. Unsupported older or unknown future generations are rejected. Routine automatic updates select a signed feed channel containing the current
 major version and every protocol supported by this build. A release is listed
 in that channel only when it retains all of those protocols. The every-update
 policy and manual update panel can offer releases that require other members

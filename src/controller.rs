@@ -314,6 +314,16 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
     let _ = events.send(Event::Status(Status::Connected {
         peers: peers.iter().map(|p| (p.name.clone(), p.key)).collect(),
     }));
+    // These reports are presentation data only; the preview never opens links.
+    for peer in &peers {
+        let _ = events.send(Event::Link {
+            key: peer.key,
+            link: crate::control::Link {
+                in_control: true,
+                ..Default::default()
+            },
+        });
+    }
     thread::Builder::new()
         .name("daisy-arrangement-preview".to_owned())
         .spawn(move || {
@@ -414,6 +424,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             None
         }
     };
+    let mut shown_peers = peers.clone();
     if events
         .send(Event::Ready {
             settings,
@@ -428,7 +439,22 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     }
     let mut session: Option<tokio::task::JoinHandle<()>> = None;
     let mut addresses: Option<tokio_mpsc::UnboundedSender<(String, Option<PublicKey>)>> = None;
-    while let Some(command) = commands.recv().await {
+    let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => match command { Some(command) => command, None => break },
+            _ = refresh.tick() => {
+                match list_peers(&home) {
+                    Ok(peers) if peers != shown_peers => {
+                        shown_peers = peers;
+                        let _ = events.send(Event::Peers(shown_peers.clone()));
+                    }
+                    Err(error) => tracing::warn!(?error, "shared peer state could not be refreshed"),
+                    _ => {}
+                }
+                continue;
+            }
+        };
         let command = match command {
             Command::ConnectByAddress(settings) => {
                 let active = session.as_ref().is_some_and(|running| !running.is_finished());

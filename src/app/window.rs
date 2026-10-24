@@ -111,8 +111,9 @@ pub struct MainViews {
 /// One paired peer, as its row shows it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PeerRow {
+    pub number: usize,
     pub name: String,
-    /// Who introduced it, how its link is doing and when trust in it ends.
+    /// How its link is doing and when shared trust in it ends.
     pub detail: String,
     /// Shown on hover and to VoiceOver, so it is not mistaken for a code.
     pub fingerprint: String,
@@ -336,7 +337,7 @@ impl MainViews {
             if index > 0 {
                 separator(&self.peers, y, mtm);
             }
-            let name = label(&peer.name, 13.0, false, mtm);
+            let name = label(&format!("{} · {}", peer.number, peer.name), 13.0, false, mtm);
             name.setToolTip(Some(&NSString::from_str(&format!(
                 "Key fingerprint {}",
                 peer.fingerprint

@@ -1296,16 +1296,13 @@ impl AppDelegate {
         let rows: Vec<window::PeerRow> = peers
             .iter()
             .map(|peer| {
-                let introducer = peer
-                    .introduced_by
-                    .and_then(|key| peers.iter().find(|other| other.key == key))
-                    .map(|other| other.name.as_str());
                 let live = links.get(&peer.key).is_some();
                 window::PeerRow {
+                    number: 2 + peers.iter().filter(|other| other.key < peer.key).count(),
                     name: peer.name.clone(),
                     detail: format!(
                         "{} · {}",
-                        peer_detail(introducer, links.get(&peer.key)),
+                        peer_detail(links.get(&peer.key)),
                         expiry_caption(peer.policy.expiry(peer.paired_at, peer.last_seen, live, now))
                     ),
                     fingerprint: peer.key.fingerprint(),
@@ -1540,13 +1537,10 @@ fn run_controller(controller: Handle, name: String, preview: bool, home: PathBuf
     Ok(())
 }
 
-/// The line under a peer's name: its fingerprint, who introduced it, and
+/// The line under a peer's name:
 /// how its link is doing while it runs.
-fn peer_detail(introducer: Option<&str>, link: Option<&Link>) -> String {
+fn peer_detail(link: Option<&Link>) -> String {
     let mut parts = Vec::new();
-    if let Some(introducer) = introducer {
-        parts.push(format!("via {introducer}"));
-    }
     match link {
         Some(link) if link.peer_locked => parts.push("Locked".to_owned()),
         Some(Link {
@@ -1554,6 +1548,9 @@ fn peer_detail(introducer: Option<&str>, link: Option<&Link>) -> String {
         }) => parts.push(format!("Connected, {ms} ms")),
         Some(_) => parts.push("Connected".to_owned()),
         None => parts.push("Not connected".to_owned()),
+    }
+    if link.is_some_and(|link| link.peer_in_control && !link.peer_locked) {
+        parts.push("In use".to_owned());
     }
     parts.join(" · ")
 }
@@ -1786,13 +1783,10 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_row_says_who_introduced_it_and_how_its_link_is() {
-        assert_eq!(peer_detail(None, None), "Not connected");
-        assert_eq!(
-            peer_detail(Some("Laptop"), Some(&measured(Some(12), false))),
-            "via Laptop · Connected, 12 ms"
-        );
-        assert_eq!(peer_detail(None, Some(&measured(None, true))), "Locked");
+    fn a_peer_row_reports_connection_state_without_introducer_wording() {
+        assert_eq!(peer_detail(None), "Not connected");
+        assert_eq!(peer_detail(Some(&measured(Some(12), false))), "Connected, 12 ms");
+        assert_eq!(peer_detail(Some(&measured(None, true))), "Locked");
     }
 
     #[test]

@@ -25,14 +25,13 @@ const PROLOGUE: &[u8] = b"daisy";
 /// Stable session protocol, independent of the Daisy release number. Keep it
 /// for compatible releases; changing wire meaning or required behavior needs
 /// a new protocol and a manual group update. See docs/protocol.md.
-pub const PROTOCOL: u16 = 7;
-/// Lowest wire protocol this release can still speak. The next protocol
-/// generation keeps one prior protocol available for rolling updates. Keep
-/// this explicit: numeric adjacency alone is not a compatibility contract.
-pub const MIN_PROTOCOL: u16 = 6;
+pub const PROTOCOL: u16 = 8;
+/// Lowest wire protocol this release can speak. Shared membership changes
+/// require every group member to update; there is no bridge to protocol 7.
+pub const MIN_PROTOCOL: u16 = 8;
 /// Explicit compatibility bridges, in negotiation preference order. A future
 /// protocol must be added here only after its bridge is implemented and tested.
-const PROTOCOL_COMPATIBILITY: &[(u16, &[u16])] = &[(7, &[7, 6])];
+const PROTOCOL_COMPATIBILITY: &[(u16, &[u16])] = &[(8, &[8]), (7, &[7, 6])];
 
 /// Longest app version carried in a handshake payload.
 const MAX_APP_VERSION: usize = 64;
@@ -96,7 +95,14 @@ impl Version {
 const TRACE_CAPABILITY: &str = "\0caps=trace-v1";
 
 fn negotiated_payload(version: &Version, trace: bool) -> Vec<u8> {
-    negotiated_payload_for(version, trace, MIN_PROTOCOL.min(version.protocol))
+    negotiated_payload_for(
+        version,
+        trace,
+        *supported_protocols(version)
+            .iter()
+            .min()
+            .expect("at least one protocol"),
+    )
 }
 
 fn negotiated_payload_for(version: &Version, trace: bool, protocol: u16) -> Vec<u8> {
@@ -377,7 +383,11 @@ where
         let selected = peer.as_ref().and_then(|peer| select_protocol(local, peer));
         // <- e, ee, s, es, with this system's version
         let len = handshake.write_message(
-            &negotiated_payload_for(local, trace, selected.unwrap_or(MIN_PROTOCOL.min(local.protocol))),
+            &negotiated_payload_for(
+                local,
+                trace,
+                selected.unwrap_or(*supported_protocols(local).iter().min().expect("at least one protocol")),
+            ),
             &mut buffer,
         )?;
         write_frame(&mut stream, &buffer[..len]).await?;
@@ -672,10 +682,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_trust_requires_a_whole_group_protocol_update() {
+        for previous in [6, 7] {
+            for reverse in [false, true] {
+                let a = Identity::generate().unwrap();
+                let b = Identity::generate().unwrap();
+                let (left, right) = duplex(2 * MAX_FRAME);
+                let old = version(previous, "0.10.3");
+                let current = Version::this_system();
+                let (first, second) = if reverse { (&old, &current) } else { (&current, &old) };
+                let (a, b) = tokio::join!(
+                    Channel::initiate_negotiated(left, &a, first, false),
+                    Channel::respond_negotiated(right, &b, second, false)
+                );
+                assert!(matches!(a, Err(SessionError::VersionMismatch(_))));
+                assert!(matches!(b, Err(SessionError::VersionMismatch(_))));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn protocol_seven_negotiates_with_frozen_protocol_six_in_both_directions() {
-        let current = Version::this_system();
+        let current = version(7, "0.7.0");
         let previous = Version {
-            protocol: MIN_PROTOCOL,
+            protocol: 6,
             app: "0.6.0".into(),
         };
         for (initiator_version, responder_version) in [
@@ -691,10 +721,10 @@ mod tests {
                 Channel::respond_negotiated(right, &responder, &responder_version, false),
             );
             let (a, b) = (a.unwrap(), b.unwrap());
-            let expected = if initiator_version.protocol == PROTOCOL && responder_version.protocol == PROTOCOL {
-                PROTOCOL
+            let expected = if initiator_version.protocol == 7 && responder_version.protocol == 7 {
+                7
             } else {
-                MIN_PROTOCOL
+                6
             };
             assert_eq!(a.protocol(), expected);
             assert_eq!(b.protocol(), expected);
@@ -703,11 +733,11 @@ mod tests {
 
     #[test]
     fn frozen_protocol_six_reader_accepts_the_legacy_handshake_prefix() {
-        let payload = negotiated_payload(&Version::this_system(), false);
+        let payload = negotiated_payload(&version(7, "0.7.0"), false);
         let old_reader = Version::decode(&payload).expect("protocol-6 version decoder");
 
-        assert_eq!(old_reader.protocol, MIN_PROTOCOL);
-        assert!(old_reader.app.starts_with(env!("CARGO_PKG_VERSION")));
+        assert_eq!(old_reader.protocol, 6);
+        assert!(old_reader.app.starts_with("0.7.0"));
         assert!(old_reader.app.contains("\0caps=protocols-7-6"));
         assert!(old_reader.app.len() <= MAX_APP_VERSION);
     }
@@ -717,7 +747,7 @@ mod tests {
         for app_len in [32, MAX_APP_VERSION] {
             let payload = negotiated_payload(
                 &Version {
-                    protocol: PROTOCOL,
+                    protocol: 7,
                     app: "x".repeat(app_len),
                 },
                 true,
@@ -743,9 +773,9 @@ mod tests {
             (left.unwrap(), right.unwrap())
         }
 
-        let updated = Version::this_system();
+        let updated = version(7, "0.7.0");
         let previous = Version {
-            protocol: MIN_PROTOCOL,
+            protocol: 6,
             app: "0.6.0".into(),
         };
         let a = Identity::generate().unwrap();
@@ -756,9 +786,9 @@ mod tests {
         let (ac, _) = connect(&a, &c, &updated, &previous).await;
         let (bc, _) = connect(&b, &c, &updated, &previous).await;
 
-        assert_eq!(ab.protocol(), PROTOCOL);
-        assert_eq!(ac.protocol(), MIN_PROTOCOL);
-        assert_eq!(bc.protocol(), MIN_PROTOCOL);
+        assert_eq!(ab.protocol(), 7);
+        assert_eq!(ac.protocol(), 6);
+        assert_eq!(bc.protocol(), 6);
     }
 
     #[tokio::test]
@@ -886,8 +916,8 @@ mod tests {
 
     #[test]
     fn the_stable_handshake_payload_is_independent_of_release_numbers() {
-        assert_eq!(PROTOCOL, 7, "the rolling-update bridge advances the protocol");
-        assert_eq!(MIN_PROTOCOL, PROTOCOL - 1);
+        assert_eq!(PROTOCOL, 8, "shared membership requires a whole-group update");
+        assert_eq!(MIN_PROTOCOL, PROTOCOL);
         assert_eq!(version(6, "0.6.0").encode(), b"\x00\x060.6.0");
         assert_eq!(Version::decode(b"\x00\x066.0.0"), Some(version(6, "6.0.0")));
     }
@@ -1102,8 +1132,8 @@ mod tests {
 
     #[test]
     fn a_future_protocol_does_not_gain_support_from_numeric_adjacency() {
-        assert_eq!(supported_protocols(&version(PROTOCOL, "0.7.0")), vec![7, 6]);
-        assert_eq!(supported_protocols(&version(8, "0.8.0")), vec![8]);
+        assert_eq!(supported_protocols(&version(PROTOCOL, "0.10.4")), vec![8]);
+        assert_eq!(supported_protocols(&version(9, "0.11.0")), vec![9]);
 
         let mut payload = version(6, "0.7.0").encode();
         payload.extend_from_slice(b"\0caps=protocols-7-8");
@@ -1138,7 +1168,7 @@ mod tests {
         assert!(advertises(&payload, FILES_CAPABILITY));
         assert_eq!(
             decode_handshake_payload(&payload).map(|peer| (peer.version.protocol, peer.trace, peer.supported)),
-            Some((MIN_PROTOCOL, true, vec![PROTOCOL, MIN_PROTOCOL]))
+            Some((MIN_PROTOCOL, true, vec![PROTOCOL]))
         );
         assert_eq!(
             payload,
@@ -1148,7 +1178,7 @@ mod tests {
                     app: version.app.clone()
                 }
                 .encode(),
-                format!("\0caps=trace-v1,protocols-{PROTOCOL}-{MIN_PROTOCOL},files-v1,clipid-v1,arr-v1").into_bytes(),
+                b"\0caps=trace-v1,files-v1,clipid-v1,arr-v1".to_vec(),
             ]
             .concat()
         );

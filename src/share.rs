@@ -703,7 +703,7 @@ where
                                 release.injector.arrived();
                             }
                         }
-                        message @ (Message::Introduce { .. } | Message::Revoke { .. }) => {
+                        message @ (Message::Introduce { .. } | Message::Revoke { .. } | Message::GroupTrust { .. }) => {
                             let _ = group.trust.send((peer, message));
                         }
                     Message::Arrangement { version, author, offsets } => {
@@ -1029,6 +1029,7 @@ fn message_kind(message: &Message) -> &'static str {
         Message::SigningKey { .. } => "SigningKey",
         Message::Introduce { .. } => "Introduce",
         Message::Revoke { .. } => "Revoke",
+        Message::GroupTrust { .. } => "GroupTrust",
         Message::DeviceProof { .. } => "DeviceProof",
         Message::Activity { .. } => "Activity",
         Message::TraceControl { .. } => "TraceControl",
