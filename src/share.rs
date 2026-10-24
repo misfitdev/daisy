@@ -1080,8 +1080,14 @@ fn recall(
     ) else {
         return false;
     };
-    placement.restore(&recalled.offsets, now_ms());
-    placement.repair(now_ms());
+    if recalled.whole {
+        placement.restore(&recalled.offsets, now_ms());
+        placement.repair(now_ms());
+    } else {
+        for &(key, offset) in &recalled.offsets {
+            placement.restore_member(key, offset, now_ms());
+        }
+    }
     let layout = placement.group();
     if recalled.whole && layout.unreachable(me).is_empty() {
         *confirmed = Some(Confirmation::new(&layout, placement.version()));
@@ -2460,6 +2466,89 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn partial_recall_preserves_confirmed_members_in_either_key_order() {
+        for order in [[1, 2, 3], [3, 2, 1]] {
+            let [stays, me, arrived] = order.map(|byte| PublicKey::from_bytes(&[byte; 32]).unwrap());
+            let display = Rect {
+                width: 100.0,
+                height: 100.0,
+                ..SCREEN
+            };
+            let mut placement = crate::layout::Placement::new(me, vec![display]);
+            placement.show(stays, vec![display]);
+            placement.restore(&[(stays, (100.0, 0.0))], 1);
+            let mut confirmed = Some(Confirmation::new(&placement.group(), placement.version()));
+            placement.show(arrived, vec![display]);
+            let mut memory = crate::recall::Memory::default();
+            memory.remember(
+                placement.setup(),
+                &[(stays, (0.0, 0.0)), (me, (100.0, 0.0)), (arrived, (200.0, 0.0))]
+                    .into_iter()
+                    .collect(),
+            );
+            assert!(recall(
+                &mut placement,
+                &mut memory,
+                &mut confirmed,
+                &mut None,
+                arrived,
+                me
+            ));
+            let offsets = placement.placed();
+            assert_eq!(offsets[&stays], (100.0, 0.0));
+            assert_eq!(offsets[&me], (0.0, 0.0));
+            let layout = placement.group();
+            assert!(!layout.overlaps(arrived, offsets[&arrived]));
+            assert!(layout.unreachable(me).is_empty());
+        }
+    }
+
+    #[test]
+    fn partial_recall_of_local_displays_preserves_confirmed_peers() {
+        let [a, me, c, d] = [1, 2, 3, 4].map(|byte| PublicKey::from_bytes(&[byte; 32]).unwrap());
+        let display = Rect {
+            width: 100.0,
+            height: 100.0,
+            ..SCREEN
+        };
+        let mut placement = crate::layout::Placement::new(me, vec![display]);
+        for peer in [a, c, d] {
+            placement.show(peer, vec![display]);
+        }
+        let peers = [(a, (100.0, 0.0)), (c, (0.0, 0.0)), (d, (200.0, 0.0))];
+        placement.restore(&peers, 1);
+        placement.restore(&[(me, (100.0, -100.0))], 2);
+        let mut confirmed = Some(Confirmation::new(&placement.group(), placement.version()));
+        placement.show(
+            me,
+            vec![Rect {
+                width: 110.0,
+                ..display
+            }],
+        );
+        let mut memory = crate::recall::Memory::default();
+        memory.remember(
+            placement.setup(),
+            &[
+                (a, (0.0, 0.0)),
+                (me, (100.0, 0.0)),
+                (c, (210.0, 0.0)),
+                (d, (310.0, 0.0)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert!(recall(&mut placement, &mut memory, &mut confirmed, &mut None, me, me));
+        let offsets = placement.placed();
+        for (peer, offset) in peers {
+            assert_eq!(offsets[&peer], offset);
+        }
+        let layout = placement.group();
+        assert!(!layout.overlaps(me, offsets[&me]));
+        assert!(layout.unreachable(me).is_empty());
     }
 
     #[tokio::test]

@@ -189,8 +189,9 @@ impl<K: Copy + PartialEq> Group<K> {
     /// `wanted` if `key` there overlaps no other system and leaves every
     /// member `from` reaches now still reachable; otherwise the nearest
     /// offset that does, flush against a display `from` reaches. Members
-    /// already out of reach do not hold `key` back. `wanted` when nothing
-    /// fits.
+    /// already out of reach do not hold `key` back. Keeps the current
+    /// offset if it fits and no flush placement does; `wanted` when neither
+    /// is possible.
     pub fn reconnect(&self, from: K, key: K, wanted: Offset) -> Offset {
         let Some(member) = self.member(key) else {
             return wanted;
@@ -241,6 +242,7 @@ impl<K: Copy + PartialEq> Group<K> {
         candidates
             .into_iter()
             .find(|&candidate| fits(candidate))
+            .or_else(|| fits(member.offset).then_some(member.offset))
             .unwrap_or(wanted)
     }
 
@@ -433,6 +435,25 @@ impl<K: Copy + Ord> Placement<K> {
             self.bump(now);
         }
         moved
+    }
+
+    /// Restores one member clear of the others and within reach, keeping
+    /// every other member's offset unchanged. The local member may move
+    /// here when its display setup returns.
+    pub fn restore_member(&mut self, key: K, wanted: Offset, now: u64) -> bool {
+        let Some(displays) = self.displays.get(&key) else {
+            return false;
+        };
+        let mut group = self.group();
+        if group.member(key).is_none() {
+            group.members.push(Member {
+                key,
+                displays: displays.clone(),
+                offset: wanted,
+            });
+        }
+        let offset = group.reconnect(self.me, key, group.settle(key, wanted));
+        self.restore(&[(key, offset)], now)
     }
 
     /// Present members with displays but no agreed offset.
@@ -743,6 +764,26 @@ fn clamp(display: &Rect, point: Point) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_a_bridge_preserves_members_reached_across_small_gaps() {
+        let display = rect(0.0, 0.0, 100.0, 100.0);
+        let mut group = Group {
+            members: [0, 1, 2]
+                .into_iter()
+                .map(|key| Member {
+                    key,
+                    displays: vec![display],
+                    offset: (140.0 * f64::from(key), 0.0),
+                })
+                .collect(),
+        };
+        assert!(group.unreachable(0).is_empty());
+        let offset = group.place(0, 1, (0.0, 100.0));
+        group.members[1].offset = offset;
+        assert!(!group.overlaps(1, offset));
+        assert!(group.unreachable(0).is_empty(), "{group:?}");
+    }
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
         Rect { x, y, width, height }

@@ -249,6 +249,26 @@ fn peer_row_dialogs_are_sheets(
         .set(super::panel::Panel::new(mtm, target))
         .ok()
         .expect("the test sets the pairing panel once");
+    let main = &target.ivars().main.get().unwrap().window;
+    for (status, always) in [
+        (crate::controller::Status::Idle, false),
+        (crate::controller::Status::Connected { peers: Vec::new() }, true),
+    ] {
+        *target.ivars().status.borrow_mut() = status;
+        target.ivars().settings.borrow_mut().always_discoverable = always;
+        // SAFETY: Daisy implements this action with an optional sender.
+        assert!(unsafe {
+            NSApplication::sharedApplication(mtm).sendAction_to_from(sel!(addPeerByAddress:), Some(target), None)
+        });
+        let sheet = main
+            .attachedSheet()
+            .expect("direct address entry must remain available without discovery");
+        click(&sheet, "Cancel");
+        wait_for("Cancel to close direct address entry", || {
+            main.attachedSheet().is_none()
+        });
+    }
+    target.ivars().settings.borrow_mut().always_discoverable = false;
     *target.ivars().status.borrow_mut() = crate::controller::Status::Connected { peers: Vec::new() };
     // SAFETY: Daisy implements addPeerByAddress: with an optional sender.
     assert!(unsafe {

@@ -18,7 +18,7 @@ Choose **Open Daisy** from the menu-bar flower to open its window. Command-W or 
 
 ## Connect by address
 
-If automatic discovery does not find a peer, click **+** beside **Peers**, enter its local name or IP address, then click **Connect**. The peer must be sharing. Daisy saves the address and starts connecting immediately, keeping existing connections and automatic discovery active.
+If automatic discovery does not find a peer, click **+** beside **Peers**, then choose **By IP…** in the Add System panel. Enter the peer's local name or IP address and click **Connect**. When sharing is stopped or Always discoverable is enabled, **+** opens address entry directly. The peer must be sharing. Daisy saves the address and starts connecting immediately, keeping existing connections and automatic discovery active.
 
 Both systems must be reachable over TCP port 24850, the default. For a new peer, enter its pairing code when prompted. For a paired peer, Daisy checks the saved identity and trust before connecting.
 
@@ -26,7 +26,7 @@ Both systems must be reachable over TCP port 24850, the default. For a new peer,
 
 Open Daisy. The arrangement at the top shows every display in the group.
 
-**With a pointer:** drag the peer's displays to match your desk. Its displays move together. An edge that comes into line with another display holds there for a moment; keep dragging to move it out of line. Displays from different systems cannot overlap, and every system stays within the pointer's reach: a drop that would leave one out of reach lands against the nearest edge it can reach.
+**With a pointer:** drag the peer's displays to match your desk. Its displays move together. An edge that comes into line with another display holds there for a moment; keep dragging to move it out of line. Displays from different systems cannot overlap, and every system stays within the pointer's reach: a drop that would leave one out of reach stays in a position that keeps the group connected.
 
 **With a keyboard:** select the arrangement, press **[** or **]** to choose a peer, then use the **arrow keys** to place it against that side.
 

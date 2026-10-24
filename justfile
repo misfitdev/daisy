@@ -21,6 +21,7 @@ test: sparkle
     python3 tools/test_sparkle_appcast.py
     python3 tools/test_sparkle_native_checks.py
     python3 tools/test_sparkle_fetch.py
+    python3 tools/test_trace_summary.py
 
 # Lint and check formatting
 lint: sparkle
@@ -160,9 +161,8 @@ trace-stop:
     rm -f "{{trace_pid}}"
 
 # Summarize a trace: what was recorded, and every pointer decision in order
-trace-summary file="$HOME/daisy-trace.ndjson":
-    duckdb -c "select record.target as target, record.fields.message as message, count(*) as n from read_ndjson('{{file}}', ignore_errors=true) group by all order by n desc"
-    duckdb -c "select record.unix_ms as unix_ms, substr(system, 1, 8) as system, record.fields.message as message, record.fields.reason as reason, record.fields.location as location, record.fields.pinned as pinned, record.fields.target as target, record.fields.at as at, record.fields.gap_ms as gap_ms, record.fields.queued as queued, record.fields.ms as ms from read_ndjson('{{file}}', ignore_errors=true) where record.fields.message in ('local capture decision', 'sharing transition', 'injected motion resumed', 'cursor strayed from injected moves', 'local input backlog', 'peer message backlog', 'slow peer message handling', 'slow round trip to the peer', 'edge leave decision', 'remote transition decision', 'modifier replayed', 'idle timer reset carries the function flag') order by record.unix_ms, record.sequence"
+trace-summary file=(env('HOME') / 'daisy-trace.ndjson'):
+    python3 tools/trace_summary.py {{quote(file)}}
 
 installed := "/Applications/Daisy.app"
 trace_pid := "$HOME/Library/Application Support/daisy/trace-collector.pid"

@@ -266,7 +266,17 @@ define_class!(
 
         #[unsafe(method(addPeerByAddress:))]
         fn add_peer_by_address(&self, _sender: Option<&AnyObject>) {
-            self.add_a_system();
+            if self.ivars().adding.get() {
+                if let Some(panel) = self.ivars().pairing.get()
+                    && let Some(state) = panel.state()
+                {
+                    panel.show(state, true);
+                }
+            } else if !self.add_a_system()
+                && let Some(views) = self.ivars().main.get()
+            {
+                self.ask_peer_address(&views.window);
+            }
         }
 
         #[unsafe(method(addSystem:))]
@@ -292,7 +302,9 @@ define_class!(
                     }
                     panel.show(panel::State::Checking { peer }, false);
                 }
-                Some(panel::State::NoneJoined) => self.add_a_system(),
+                Some(panel::State::NoneJoined) => {
+                    self.add_a_system();
+                }
                 Some(panel::State::Connected { peer }) => {
                     panel.close();
                     self.open_window();
@@ -1072,20 +1084,21 @@ impl AppDelegate {
     }
 
     /// Opens this group to a new system for a short while, from the menu.
-    fn add_a_system(&self) {
+    fn add_a_system(&self) -> bool {
         let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
         if !crate::setup::can_add_system(
             is_active(&self.ivars().status.borrow()),
             always,
             self.ivars().adding.get(),
         ) {
-            return;
+            return false;
         }
         let _ = self.ivars().controller.send(Command::AddSystem);
         if let Some(panel) = self.ivars().pairing.get() {
             let until = std::time::Instant::now() + controller::ADD_SYSTEM_WINDOW;
             panel.show(panel::State::Waiting { until }, true);
         }
+        true
     }
 
     /// Keeps the pairing panel current: its countdown, and closing
