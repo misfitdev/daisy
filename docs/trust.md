@@ -15,7 +15,7 @@ Open Daisy and find the peer under **Peers**. Click its **Remember…** button, 
 | Choice | Trust ends when |
 |---|---|
 | Until unused for (4 days by default) | That many hours or days pass without a connection. Staying connected renews it. |
-| End of session | The session ends. An accidental drop allows 60 seconds to reconnect; a deliberate stop does not. |
+| End of session | The peer’s last group connection ends. Closing one connection keeps trust while another group connection continues. An accidental drop allows 60 seconds to reconnect. |
 | Forever | You forget the peer. |
 
 Membership and retention choices are shared across the group. Changing **Remember…** on any member updates that peer’s policy throughout the connected group; systems that were away catch up when they reconnect. An active connection anywhere in the group renews idle trust. Each system enforces the shared choice using its own clock. When trust expires, pair again with a new code. Other members keep their trust when the system that added them leaves.
@@ -29,6 +29,8 @@ expiry after time without a connection instead.
 Under **Peers**, click the trash can beside the peer and confirm **Forget Peer**.
 
 This ends its connection immediately and removes that peer from the whole group. Other members remain trusted. The removed peer must pair again to rejoin. To stop sharing temporarily while retaining peers, use **Stop Sharing** instead.
+
+Daisy retains removal history for up to 1,024 identities. When that history is full, existing members still work but new identities cannot join. Leaving the group and pairing again starts fresh; old removal history is discarded only when you leave.
 
 The command `daisy forget <name-or-fingerprint>...` has the same group-wide effect. `daisy forget --all` instead makes this system leave the group; it removes no other members. See [command-line tasks](usage.md#optional-command-line).
 

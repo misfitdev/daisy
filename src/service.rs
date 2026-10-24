@@ -1061,7 +1061,7 @@ where
         done,
     })?;
     observer.connected(peer, key, side);
-    let watch = peers.watch(key, peer);
+    let watch = peers.watch_session(key, peer, Some(visit.session));
     tokio::pin!(watch);
     let mut trust_ended = None;
     let result = loop {
@@ -2105,6 +2105,7 @@ mod tests {
                 member: newcomer,
                 stamp: Stamp::default(),
                 state: State::Active(Active {
+                    sessions: Vec::new(),
                     removed_through: None,
                     signing: crate::device::Signer::generate().unwrap().public(),
                     name: "Studio".into(),

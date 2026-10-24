@@ -81,6 +81,9 @@ pub struct PeerStore {
 
 /// The most revocations kept; the oldest go first.
 const MAX_REVOCATIONS: usize = 256;
+/// Keep removal history until the system leaves the group. New identities
+/// fail closed at this limit rather than evicting replay protection.
+const MAX_GROUP_RECORDS: usize = 1024;
 
 #[derive(Default, Serialize, Deserialize)]
 struct RevocationFile {
@@ -517,20 +520,76 @@ impl PeerStore {
 
     /// Mark a session with `key` as running, until the returned guard drops.
     pub fn visit(&self, key: PublicKey) -> Result<Visit<'_>> {
-        if !self.renew(&key, trust::now())? {
+        let mut session = [0; 16];
+        getrandom::fill(&mut session)?;
+        if !self.session_change(key, session, false, trust::now())? {
             bail!("{key} is no longer trusted");
         }
         Ok(Visit {
             store: self,
             key,
+            session,
             dropped: false,
         })
+    }
+
+    fn session_change(&self, key: PublicKey, id: [u8; 16], closed: bool, now: Timestamp) -> Result<bool> {
+        let _lock = self.lock()?;
+        let mut peers = self.read()?;
+        let Some(index) = peers.iter().position(|peer| peer.key == key) else {
+            return Ok(false);
+        };
+        if !closed && peers[index].is_expired(false, now) {
+            return Ok(false);
+        }
+        let mut file = self.read_file()?;
+        let mut records = Self::records(&file)?;
+        if let Some(record) = records.iter_mut().find(|record| record.member == key) {
+            let State::Active(active) = &mut record.state else {
+                return Ok(false);
+            };
+            if !closed && active.expired(now) {
+                return Ok(false);
+            }
+            active.trim_sessions(now);
+            match active.sessions.iter_mut().find(|session| session.id == id) {
+                Some(session) => {
+                    session.seen = session.seen.max(now);
+                    session.closed |= closed;
+                }
+                None => active
+                    .sessions
+                    .push(crate::group_trust::Session { id, seen: now, closed }),
+            }
+            if active.sessions.len() > crate::group_trust::MAX_SESSIONS {
+                bail!("too many current group session leases");
+            }
+            active.last_seen = active.last_seen.max(now);
+            peers[index].last_seen = active.last_seen;
+            if active.expired(now) {
+                peers.remove(index);
+            }
+            Self::save_records(&mut file, &records)?;
+            self.write_with(&peers, file)?;
+        } else {
+            let before = peers.clone();
+            peers[index].last_seen = now;
+            if peers[index].policy == Policy::Once && closed {
+                peers.remove(index);
+            }
+            self.write_group_change(&before, &peers, &[], now)?;
+        }
+        Ok(true)
     }
 
     /// Resolves, with the reason, once this system stops trusting `key` while a
     /// session with it runs: it was forgotten, or its deadline passed.
     /// Renews its last seen time meanwhile.
     pub async fn watch(&self, key: PublicKey, name: &str) -> anyhow::Error {
+        self.watch_session(key, name, None).await
+    }
+
+    pub(crate) async fn watch_session(&self, key: PublicKey, name: &str, session: Option<[u8; 16]>) -> anyhow::Error {
         let mut check = tokio::time::interval(CHECK_EVERY);
         let mut renewed = tokio::time::Instant::now();
         loop {
@@ -546,8 +605,14 @@ impl PeerStore {
                     return anyhow!("trust in {name} ended: it was trusted {}", peer.policy.describe());
                 }
                 Some(_) if renewed.elapsed() >= RENEW_EVERY => {
-                    if let Err(error) = self.renew(&key, now) {
-                        return error.context("renewing trust in the peer");
+                    let renewed_session = match session {
+                        Some(session) => self.session_change(key, session, false, now),
+                        None => self.renew(&key, now),
+                    };
+                    match renewed_session {
+                        Ok(true) => {}
+                        Ok(false) => return anyhow!("{name} is no longer trusted"),
+                        Err(error) => return error.context("renewing trust in the peer"),
                     }
                     renewed = tokio::time::Instant::now();
                 }
@@ -583,7 +648,16 @@ impl PeerStore {
     ) -> Result<Vec<Peer>> {
         let before = self.read()?;
         let mut peers = before.clone();
+        let records = Self::records(&self.read_file()?)?;
         Self::prune(&mut peers, now);
+        peers.retain(|peer| {
+            peer.policy != Policy::Once
+                || !records.iter().any(|record| {
+                    record.member == peer.key
+                        && matches!(&record.state, State::Active(active)
+                            if active.since == peer.paired_at && active.expired(now))
+                })
+        });
         let removals = change(&mut peers)?;
         Self::prune(&mut peers, now);
         if peers != before
@@ -648,12 +722,17 @@ impl PeerStore {
             .iter()
             .map(|hex| {
                 let bytes = from_hex(hex).context("invalid group trust encoding")?;
-                postcard::from_bytes(&bytes).context("invalid group trust record")
+                crate::group_trust::decode_record(&bytes).context("invalid group trust record")
             })
             .collect()
     }
 
     fn save_records(file: &mut PeerFile, records: &[Record]) -> Result<()> {
+        if records.len() > MAX_GROUP_RECORDS {
+            bail!(
+                "shared trust history is full ({MAX_GROUP_RECORDS} identities); leave the group and pair again to start fresh"
+            );
+        }
         file.group = records
             .iter()
             .map(|record| Ok(to_hex(&postcard::to_stdvec(record)?)))
@@ -724,6 +803,14 @@ impl PeerStore {
                 member: peer.key,
                 stamp,
                 state: State::Active(Active {
+                    sessions: prior
+                        .and_then(|record| match &record.state {
+                            State::Active(active) if active.admitted_at == peer.admitted_at => {
+                                Some(active.sessions.clone())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default(),
                     removed_through: prior.and_then(Record::cutoff),
                     signing,
                     name: peer.name.clone(),
@@ -791,7 +878,16 @@ impl PeerStore {
             bail!("group membership changes this system's device identity");
         }
         let prior = records.iter().position(|record| record.member == incoming.member);
-        let merged = prior.map_or_else(|| incoming.clone(), |index| records[index].merge(incoming));
+        if prior.is_none() && records.len() >= MAX_GROUP_RECORDS {
+            bail!("shared trust history is full ({MAX_GROUP_RECORDS} identities); new member records are refused");
+        }
+        let mut merged = prior.map_or_else(|| incoming.clone(), |index| records[index].merge(incoming));
+        if let State::Active(active) = &mut merged.state {
+            active.trim_sessions(now);
+            if active.sessions.len() > crate::group_trust::MAX_SESSIONS {
+                bail!("too many current group session leases");
+            }
+        }
         if prior.is_some_and(|index| records[index] == merged) {
             return Ok(false);
         }
@@ -803,7 +899,7 @@ impl PeerStore {
             }) {
                 bail!("group membership changes a pinned device identity");
             }
-            if merged.member != me && !active.policy.is_expired(active.since, active.last_seen, false, now) {
+            if merged.member != me && !active.expired(now) {
                 if let Some(peer) = peers.iter_mut().find(|peer| peer.key == merged.member) {
                     peer.policy = active.policy;
                     peer.paired_at = active.since;
@@ -873,11 +969,12 @@ impl PeerStore {
 }
 
 /// A running session with a peer. Dropping it records how the session
-/// ended: a "once" peer is forgotten, unless the connection dropped
-/// unexpectedly, which leaves `ONCE_GRACE` to reconnect.
+/// ended: its lease closes deliberately or keeps `ONCE_GRACE` after a drop.
+/// Other group connections can keep session-only trust alive.
 pub struct Visit<'a> {
     store: &'a PeerStore,
     key: PublicKey,
+    pub(crate) session: [u8; 16],
     dropped: bool,
 }
 
@@ -891,15 +988,7 @@ impl Visit<'_> {
 impl Drop for Visit<'_> {
     fn drop(&mut self) {
         let (key, dropped, now) = (self.key, self.dropped, trust::now());
-        let result = self.store.update(now, |peers| {
-            if let Some(index) = peers.iter().position(|peer| peer.key == key) {
-                if peers[index].policy == Policy::Once && !dropped {
-                    peers.remove(index);
-                } else {
-                    peers[index].last_seen = now;
-                }
-            }
-        });
+        let result = self.store.session_change(key, self.session, !dropped, now);
         if let Err(error) = result {
             tracing::warn!("recording the end of the session with {key}: {error:#}");
         }
@@ -987,6 +1076,56 @@ mod tests {
             },
             signature: vec![0; 64],
         }
+    }
+
+    #[test]
+    fn shared_record_capacity_preserves_removals_and_allows_existing_member_updates() {
+        let (store, _dir) = store();
+        let member = |n: usize| {
+            let mut bytes = [0; 32];
+            bytes[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            PublicKey::from_bytes(&bytes).unwrap()
+        };
+        let records: Vec<_> = (0..MAX_GROUP_RECORDS)
+            .map(|n| Record {
+                member: member(n),
+                stamp: Stamp::default(),
+                state: State::Removed { at: NOW },
+            })
+            .collect();
+        let mut file = PeerFile::default();
+        PeerStore::save_records(&mut file, &records).unwrap();
+        store.write_with(&[], file).unwrap();
+        let before = std::fs::read(&store.path).unwrap();
+        let signer = crate::device::Signer::generate().unwrap();
+        let unknown = Record {
+            member: member(MAX_GROUP_RECORDS),
+            stamp: Stamp::default(),
+            state: State::Removed { at: NOW },
+        };
+        assert!(
+            store.apply_group(&unknown, key(255), signer.public(), NOW).is_err(),
+            "unknown removals cannot grow the store beyond its capacity"
+        );
+        assert_eq!(std::fs::read(&store.path).unwrap(), before);
+        assert!(
+            store
+                .pin_device(unknown.member, signer.public(), "New peer", Policy::Forever, NOW + 1)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&store.path).unwrap(), before);
+        // Do not block updates or re-pairing of identities whose removal history
+        // already has a reserved slot, and never evict another tombstone.
+        store
+            .pin_device(member(0), signer.public(), "Known peer", Policy::Forever, NOW + 1)
+            .unwrap();
+        let kept = store.group_records().unwrap();
+        assert_eq!(kept.len(), MAX_GROUP_RECORDS);
+        assert!(matches!(kept[1].state, State::Removed { at: NOW }));
+        assert_eq!(
+            store.trusted(&member(0), NOW + 1).unwrap().unwrap().signing,
+            Some(signer.public())
+        );
     }
 
     #[test]

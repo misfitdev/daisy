@@ -13,6 +13,17 @@ pub struct Stamp {
     pub writer: [u8; 16],
 }
 
+pub const MAX_SESSIONS: usize = 64;
+
+/// One authenticated connection's activity lease. Closing one lease never
+/// closes another connection, and a closed nonce cannot reopen through replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Session {
+    pub id: [u8; 16],
+    pub seen: Timestamp,
+    pub closed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Active {
     /// Latest removal superseded by this fresh admission. Retained so stale
@@ -24,6 +35,42 @@ pub struct Active {
     pub admitted_at: Timestamp,
     pub since: Timestamp,
     pub last_seen: Timestamp,
+    pub sessions: Vec<Session>,
+}
+
+impl Active {
+    pub fn expired(&self, now: Timestamp) -> bool {
+        if self.policy == Policy::Once && !self.sessions.is_empty() {
+            if self
+                .sessions
+                .iter()
+                .any(|session| !session.closed && now < session.seen.saturating_add(crate::trust::ONCE_GRACE.as_secs()))
+            {
+                return false;
+            }
+            if self.sessions.iter().any(|session| session.seen >= self.since) {
+                return true;
+            }
+        }
+        self.policy.is_expired(self.since, self.last_seen, false, now)
+    }
+
+    pub fn trim_sessions(&mut self, now: Timestamp) {
+        let last = self
+            .sessions
+            .iter()
+            .max_by_key(|session| (session.seen, session.id))
+            .cloned();
+        self.sessions
+            .retain(|session| now < session.seen.saturating_add(crate::trust::ONCE_GRACE.as_secs()));
+        // Preserve one terminal marker after the last lease expires. Otherwise
+        // stale aggregate activity could restore the initial reconnect grace.
+        if self.sessions.is_empty()
+            && let Some(last) = last
+        {
+            self.sessions.push(last);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +126,17 @@ impl Record {
                 if let State::Active(active) = &mut result.state {
                     active.last_seen = old.last_seen.max(next.last_seen);
                     active.admitted_at = old.admitted_at.min(next.admitted_at);
+                    let mut sessions = std::collections::BTreeMap::<[u8; 16], Session>::new();
+                    for session in old.sessions.iter().chain(&next.sessions) {
+                        sessions
+                            .entry(session.id)
+                            .and_modify(|known| {
+                                known.seen = known.seen.max(session.seen);
+                                known.closed |= session.closed;
+                            })
+                            .or_insert_with(|| session.clone());
+                    }
+                    active.sessions = sessions.into_values().collect();
                 }
                 result
             }
@@ -128,6 +186,13 @@ impl crate::introduce::Signed<Announcement> {
                 {
                     bail!("group membership is dated in the future");
                 }
+                if active.sessions.len() > MAX_SESSIONS || active.sessions.iter().any(|session| session.seen > limit) {
+                    bail!("invalid group session leases");
+                }
+                let ids: std::collections::BTreeSet<_> = active.sessions.iter().map(|session| session.id).collect();
+                if ids.len() != active.sessions.len() {
+                    bail!("duplicate group session lease");
+                }
                 if active.name.len() > 1024 || active.name.contains(['\n', '\r']) {
                     bail!("invalid group member name");
                 }
@@ -143,6 +208,55 @@ fn bytes(body: &Announcement) -> Result<Vec<u8>> {
     let mut bytes = b"daisy group trust v1".to_vec();
     bytes.extend(postcard::to_stdvec(body)?);
     Ok(bytes)
+}
+
+/// Earlier development builds stored active records before per-connection
+/// leases. Preserve their pins and removal history while adding an empty lease set.
+pub fn decode_record(bytes: &[u8]) -> Result<Record> {
+    #[derive(Deserialize)]
+    struct PreviousActive {
+        removed_through: Option<Timestamp>,
+        signing: crate::device::PublicKey,
+        name: String,
+        policy: Policy,
+        admitted_at: Timestamp,
+        since: Timestamp,
+        last_seen: Timestamp,
+    }
+    #[derive(Deserialize)]
+    enum PreviousState {
+        Active(PreviousActive),
+        Removed { at: Timestamp },
+    }
+    #[derive(Deserialize)]
+    struct PreviousRecord {
+        member: PublicKey,
+        stamp: Stamp,
+        state: PreviousState,
+    }
+    match postcard::from_bytes(bytes) {
+        Ok(record) => Ok(record),
+        Err(_) => {
+            let previous: PreviousRecord = postcard::from_bytes(bytes)?;
+            Ok(Record {
+                member: previous.member,
+                stamp: previous.stamp,
+                state: match previous.state {
+                    PreviousState::Removed { at } => State::Removed { at },
+                    PreviousState::Active(active) => State::Active(Active {
+                        removed_through: active.removed_through,
+                        signing: active.signing,
+                        name: active.name,
+                        policy: active.policy,
+                        admitted_at: active.admitted_at,
+                        since: active.since,
+                        last_seen: active.last_seen,
+                        sessions: Vec::new(),
+                    }),
+                },
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -165,12 +279,121 @@ mod tests {
                 admitted_at: NOW,
                 since: NOW,
                 last_seen: NOW,
+                sessions: Vec::new(),
             }),
         }
     }
     fn replicate(from: &PeerStore, to: &PeerStore, me: u8, own: &Signer, now: u64) {
         for record in from.group_records().unwrap() {
             to.apply_group(&record, key(me), own.public(), now).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_accidental_group_session_drop_keeps_only_the_reconnect_grace() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        let stores: Vec<_> = homes.iter().map(|home| PeerStore::open(home.path()).unwrap()).collect();
+        let signer = Signer::generate().unwrap();
+        let own = Signer::generate().unwrap();
+        let now = crate::trust::now();
+        for store in &stores {
+            store
+                .pin_device(key(9), signer.public(), "Peer", Policy::Once, now)
+                .unwrap();
+        }
+        let mut visit = stores[0].visit(key(9)).unwrap();
+        visit.dropped();
+        drop(visit);
+        let record = stores[0].group_records().unwrap().remove(0);
+        let State::Active(active) = &record.state else { panic!() };
+        let seen = active.sessions[0].seen;
+        replicate(&stores[0], &stores[1], 2, &own, seen);
+        assert!(stores[1].trusted(&key(9), seen + 59).unwrap().is_some());
+        assert!(stores[1].trusted(&key(9), seen + 60).unwrap().is_none());
+        stores[1].apply_group(&record, key(2), own.public(), seen + 60).unwrap();
+        assert!(stores[1].trusted(&key(9), seen + 60).unwrap().is_none());
+    }
+
+    #[test]
+    fn once_trust_continues_until_the_last_known_group_connection_closes() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        let stores: Vec<_> = homes.iter().map(|home| PeerStore::open(home.path()).unwrap()).collect();
+        let signer = Signer::generate().unwrap();
+        let own = Signer::generate().unwrap();
+        let now = crate::trust::now();
+        for store in &stores {
+            store
+                .pin_device(key(9), signer.public(), "Peer", Policy::Once, now)
+                .unwrap();
+        }
+        let first = stores[0].visit(key(9)).unwrap();
+        replicate(&stores[0], &stores[1], 2, &own, now);
+        let second = stores[1].visit(key(9)).unwrap();
+        replicate(&stores[1], &stores[0], 1, &own, now);
+        drop(first);
+        assert!(
+            stores[0].trusted(&key(9), now).unwrap().is_some(),
+            "another group connection keeps trust alive"
+        );
+        replicate(&stores[0], &stores[1], 2, &own, now);
+        let stale = stores[1].group_records().unwrap().remove(0);
+        assert!(
+            matches!(stale.state, State::Active(_)),
+            "closing one link is not membership revocation"
+        );
+        drop(second);
+        assert!(stores[1].trusted(&key(9), now).unwrap().is_none());
+        replicate(&stores[1], &stores[0], 1, &own, now);
+        assert!(stores[0].trusted(&key(9), now).unwrap().is_none());
+        stores[0].apply_group(&stale, key(1), own.public(), now).unwrap();
+        assert!(stores[0].trusted(&key(9), now).unwrap().is_none());
+    }
+
+    #[test]
+    fn previous_persisted_active_records_gain_an_empty_session_set() {
+        let record = active(9, Signer::generate().unwrap().public(), Policy::Forever);
+        let mut previous = postcard::to_stdvec(&record).unwrap();
+        assert_eq!(
+            previous.pop(),
+            Some(0),
+            "the empty session vector is the appended field"
+        );
+        assert!(postcard::from_bytes::<Record>(&previous).is_err());
+        assert_eq!(decode_record(&previous).unwrap(), record);
+    }
+
+    #[test]
+    fn a_closed_once_session_cannot_be_reopened_by_stale_activity() {
+        let homes: Vec<_> = (0..2).map(|_| tempfile::tempdir().unwrap()).collect();
+        let stores: Vec<_> = homes.iter().map(|home| PeerStore::open(home.path()).unwrap()).collect();
+        let signer = Signer::generate().unwrap();
+        let own = Signer::generate().unwrap();
+        let now = crate::trust::now();
+        for store in &stores {
+            store
+                .pin_device(key(9), signer.public(), "Peer", Policy::Once, now)
+                .unwrap();
+        }
+        let first = stores[0].visit(key(9)).unwrap();
+        replicate(&stores[0], &stores[1], 2, &own, now);
+        // A delayed activity update carries the old connection state.
+        stores[1].renew(&key(9), now + 1).unwrap();
+        let stale = stores[1].group_records().unwrap().remove(0);
+        drop(first);
+        assert!(stores[0].trusted(&key(9), now).unwrap().is_none());
+        stores[0].apply_group(&stale, key(1), own.public(), now + 1).unwrap();
+        assert!(
+            stores[0].trusted(&key(9), now + 1).unwrap().is_none(),
+            "a closed session cannot be restored by a delayed activity report"
+        );
+        for elapsed in [60, 61, 120] {
+            stores[0]
+                .apply_group(&stale, key(1), own.public(), now + elapsed)
+                .unwrap();
+            assert!(
+                stores[0].trusted(&key(9), now + elapsed).unwrap().is_none(),
+                "compaction must not restore bootstrap grace"
+            );
         }
     }
 
