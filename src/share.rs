@@ -687,10 +687,9 @@ where
                         Message::Displays { displays } => {
                             let displays = crate::layout::plausible(displays)
                                 .context("the peer sent displays that cannot be real")?;
-                            let already_placed = placement.placed().contains_key(&peer);
                             if placement.show(peer, displays) {
                                 restored.current_setup = false;
-                                arrived.push((peer, already_placed));
+                                arrived.push((peer, placement.placed().contains_key(&peer)));
                                 rearranged = true;
                             }
                         }
@@ -2499,6 +2498,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_returning_peer_with_an_overlapping_saved_offset_is_repaired_and_broadcast() {
+        let (control, _members, membership, mut far, _ended, keys) = group_of(1, None).await;
+        let me = me_of(&control);
+        let peer = keys[0];
+        let mut local = group(&control);
+        local.saved = Some((10, me, vec![(me, (0.0, 0.0)), (peer, (500.0, 0.0))]));
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        let shown = view_when(&mut view, |v| v.layout.members.len() == 2).await;
+        for member in &shown.layout.members {
+            assert!(
+                !shown.layout.overlaps(member.key, member.offset),
+                "a returning peer must not retain its overlapping saved offset"
+            );
+        }
+        assert!(shown.unreachable.is_empty());
+        let offset = shown
+            .layout
+            .members
+            .iter()
+            .find(|member| member.key == peer)
+            .unwrap()
+            .offset;
+        assert_ne!(offset, (500.0, 0.0));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Message::Arrangement {
+                    version,
+                    author,
+                    offsets,
+                } = far[0].recv().await.unwrap()
+                    && offsets.contains(&(peer, offset))
+                {
+                    assert!(version > 10);
+                    assert_eq!(author, me);
+                    assert!(offsets.contains(&(me, (0.0, 0.0))));
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the returning peer receives the repaired arrangement");
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn changed_peer_displays_without_a_recalled_layout_are_repaired_and_broadcast() {
         let (control, _members, membership, mut far, _ended, keys) = group_of(2, None).await;
         let me = me_of(&control);
@@ -2889,7 +2938,8 @@ mod tests {
         let (control, _members, membership, mut far, _ended, keys) = group_of(1, None).await;
         let me = me_of(&control);
         let peer = keys[0];
-        let saved = (10, me, vec![(me, (0.0, 0.0)), (peer, (5000.0, 0.0))]);
+        // A reachable but unchecked layout still needs explicit confirmation.
+        let saved = (10, me, vec![(me, (0.0, 0.0)), (peer, (1000.0, 0.0))]);
         let mut local = group(&control);
         local.saved = Some(saved.clone());
         let (choose, choices) = watch::channel(None);
@@ -2914,7 +2964,7 @@ mod tests {
         let local_task = start_arrangement_session(local, membership);
         let remote_task = start_arrangement_session(remote, remote_membership);
         let checking = view_when(&mut local_view, |v| v.check.is_some()).await;
-        assert_eq!(checking.unreachable, [peer]);
+        assert!(checking.unreachable.is_empty());
         view_when(&mut remote_view, |v| v.check.is_some()).await;
         choose.send_replace(Some(Choice::Confirm(checking.check.unwrap())));
         view_when(&mut local_view, |v| v.layout.members.len() == 2 && v.check.is_none()).await;
@@ -2925,17 +2975,33 @@ mod tests {
             .unwrap();
         assert!(checked.covers(&Confirmation::new(&local_view.borrow().layout, (10, me))));
         // a drop out of reach lands against the nearest edge and needs no check
-        choose.send_replace(Some(Choice::Move((peer, (6000.0, 0.0)))));
-        let fixed = view_when(&mut local_view, |v| v.unreachable.is_empty() && v.check.is_none()).await;
-        view_when(&mut remote_view, |v| v.unreachable.is_empty() && v.check.is_none()).await;
+        choose.send_replace(Some(Choice::Move((peer, (0.0, 6000.0)))));
+        let fixed = view_when(&mut local_view, |v| {
+            v.unreachable.is_empty()
+                && v.check.is_none()
+                && v.layout
+                    .members
+                    .iter()
+                    .any(|member| member.key == peer && member.offset == (0.0, 500.0))
+        })
+        .await;
+        view_when(&mut remote_view, |v| {
+            v.unreachable.is_empty()
+                && v.check.is_none()
+                && v.layout
+                    .members
+                    .iter()
+                    .any(|member| member.key == peer && member.offset == (0.0, 500.0))
+        })
+        .await;
         assert_eq!(fixed.layout.members.len(), 2);
         let moved = fixed.layout.members.iter().find(|member| member.key == peer).unwrap();
-        assert_eq!(moved.offset, (1000.0, 0.0));
+        assert_eq!(moved.offset, (0.0, 500.0));
         local_task.abort();
         remote_task.abort();
         let saved = kept.recv().await.unwrap();
         let mut placement = crate::layout::Placement::new(me, vec![SCREEN]);
-        placement.adopt(saved.version, saved.author, &[(me, (0.0, 0.0)), (peer, (1000.0, 0.0))]);
+        placement.adopt(saved.version, saved.author, &[(me, (0.0, 0.0)), (peer, (0.0, 500.0))]);
         placement.show(peer, vec![SCREEN]);
         assert!(
             !crate::setup::check_arrangement(&placement.group(), me, placement.version(), Some(&saved)),

@@ -126,7 +126,7 @@ impl Form {
             .as_ref()
             .is_some_and(|button| button.state() == NSControlStateValueOn)
         {
-            return Some(current);
+            return Choice::of(current).confirmed(current);
         }
         let choice = if self.session.state() == NSControlStateValueOn {
             Choice::Session
