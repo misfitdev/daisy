@@ -42,6 +42,13 @@ pub type Placing = (PublicKey, crate::layout::Offset);
 
 pub type Confirmation = crate::setup::Confirmation<PublicKey>;
 
+#[derive(Default)]
+struct Restoration {
+    // Remember which confirmation was automatic even after the setup changes.
+    confirmation: Option<Confirmation>,
+    current_setup: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Choice {
     Move(Placing),
@@ -281,7 +288,7 @@ where
     let mut layouts = group.layouts;
     // members whose displays arrived or changed, to recall a layout for
     let mut arrived: Vec<PublicKey> = Vec::new();
-    let mut restored: Option<(u64, PublicKey)> = None;
+    let mut restored = Restoration::default();
     let mut review_changed = true;
     let mut target = Target::new(placement.group(), me);
     let release = ReleaseOnDrop {
@@ -353,7 +360,11 @@ where
                 unreachable: layout.unreachable(me),
                 layout,
                 check,
-                restored: restored == Some(placement.version()),
+                restored: restored.current_setup
+                    && restored
+                        .confirmation
+                        .as_ref()
+                        .is_some_and(|confirmation| (confirmation.version, confirmation.author) == placement.version()),
             };
             group.arranged.send_if_modified(|current| {
                 if *current == view {
@@ -403,6 +414,7 @@ where
                 }
             }
             if placement.remove(key) {
+                restored.current_setup = false;
                 review_changed = true;
                 arrange(&placement, release.target, pointer);
             }
@@ -675,6 +687,7 @@ where
                             let displays = crate::layout::plausible(displays)
                                 .context("the peer sent displays that cannot be real")?;
                             if placement.show(peer, displays) {
+                                restored.current_setup = false;
                                 arrived.push(peer);
                                 rearranged = true;
                             }
@@ -852,6 +865,7 @@ where
                     }
                 }
                 Some(Choice::Confirm(confirmation)) if confirmation == Confirmation::new(&placement.group(), placement.version()) => {
+                    restored = Restoration::default();
                     confirmed = Some(confirmation);
                     review_changed = true;
                 }
@@ -865,6 +879,7 @@ where
             Ok(()) = displays.changed() => {
                 let mine = displays.borrow_and_update().clone();
                 if placement.show(me, mine.clone()) {
+                    restored.current_setup = false;
                 review_changed = true;
                     broadcast(&links, Message::Displays { displays: mine }, &mut ended);
                     if recall(&mut placement, &mut layouts, &mut confirmed, &mut restored, me, me) {
@@ -1065,13 +1080,19 @@ fn recall(
     placement: &mut crate::layout::Placement<PublicKey>,
     layouts: &mut crate::recall::Memory<PublicKey>,
     confirmed: &mut Option<Confirmation>,
-    restored: &mut Option<(u64, PublicKey)>,
+    restored: &mut Restoration,
     arrived: PublicKey,
     me: PublicKey,
 ) -> bool {
     let setup = placement.setup();
     // a restored arrangement was not made by a person, so it never holds the next one back
-    let arranged = confirmed.as_ref().filter(|_| *restored != Some(placement.version()));
+    let automatic = restored
+        .confirmation
+        .as_ref()
+        .filter(|confirmation| (confirmation.version, confirmation.author) == placement.version());
+    let arranged = confirmed
+        .as_ref()
+        .filter(|confirmation| automatic != Some(*confirmation));
     let Some(recalled) = layouts.recall(
         &setup,
         &placement.placed(),
@@ -1090,8 +1111,12 @@ fn recall(
     }
     let layout = placement.group();
     if recalled.whole && layout.unreachable(me).is_empty() {
-        *confirmed = Some(Confirmation::new(&layout, placement.version()));
-        *restored = Some(placement.version());
+        let confirmation = Confirmation::new(&layout, placement.version());
+        *confirmed = Some(confirmation.clone());
+        *restored = Restoration {
+            confirmation: Some(confirmation),
+            current_setup: true,
+        };
     }
     true
 }
@@ -2493,7 +2518,7 @@ mod tests {
                 &mut placement,
                 &mut memory,
                 &mut confirmed,
-                &mut None,
+                &mut Restoration::default(),
                 arrived,
                 me
             ));
@@ -2541,7 +2566,14 @@ mod tests {
             .into_iter()
             .collect(),
         );
-        assert!(recall(&mut placement, &mut memory, &mut confirmed, &mut None, me, me));
+        assert!(recall(
+            &mut placement,
+            &mut memory,
+            &mut confirmed,
+            &mut Restoration::default(),
+            me,
+            me
+        ));
         let offsets = placement.placed();
         for (peer, offset) in peers {
             assert_eq!(offsets[&peer], offset);
@@ -2630,6 +2662,81 @@ mod tests {
         let offset = left.layout.members.iter().find(|m| m.key == stays).unwrap().offset;
         assert_eq!(offset, (1000.0, 0.0));
         assert!(!left.restored);
+    }
+
+    #[derive(Clone, Copy)]
+    enum SetupChange {
+        Departure,
+        PeerDisplay,
+        LocalDisplay,
+    }
+
+    async fn restored_setup_after(change: SetupChange) -> ArrangementView {
+        let (control, _members, membership, mut far, _ended, keys) = group_of(2, None).await;
+        let me = me_of(&control);
+        let mut local = group(&control);
+        let (display_sender, displays) = watch::channel(vec![SCREEN]);
+        local.displays = displays;
+        local.layouts.remember(
+            crate::recall::setup([(me, &[SCREEN][..]), (keys[0], &[SCREEN][..]), (keys[1], &[SCREEN][..])]),
+            &[(me, (0.0, 0.0)), (keys[0], (1000.0, 0.0)), (keys[1], (2000.0, 0.0))]
+                .into_iter()
+                .collect(),
+        );
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        for peer in &mut far {
+            peer.send(&Message::Displays { displays: vec![SCREEN] }).await.unwrap();
+        }
+        view_when(&mut view, |v| v.restored && v.layout.members.len() == 3).await;
+        let changed = Rect { width: 999.0, ..SCREEN };
+        match change {
+            SetupChange::Departure => {
+                drop(far.remove(1));
+            }
+            SetupChange::PeerDisplay => {
+                far[1]
+                    .send(&Message::Displays {
+                        displays: vec![changed],
+                    })
+                    .await
+                    .unwrap();
+            }
+            SetupChange::LocalDisplay => {
+                display_sender.send_replace(vec![changed]);
+            }
+        }
+        let current = view_when(&mut view, |v| match change {
+            SetupChange::Departure => v.layout.members.len() == 2,
+            SetupChange::PeerDisplay => v
+                .layout
+                .members
+                .iter()
+                .any(|m| m.key == keys[1] && m.displays == vec![changed]),
+            SetupChange::LocalDisplay => v
+                .layout
+                .members
+                .iter()
+                .any(|m| m.key == me && m.displays == vec![changed]),
+        })
+        .await;
+        task.abort();
+        current
+    }
+
+    #[tokio::test]
+    async fn restored_status_clears_when_a_peer_leaves() {
+        assert!(!restored_setup_after(SetupChange::Departure).await.restored);
+    }
+
+    #[tokio::test]
+    async fn restored_status_clears_when_peer_displays_change() {
+        assert!(!restored_setup_after(SetupChange::PeerDisplay).await.restored);
+    }
+
+    #[tokio::test]
+    async fn restored_status_clears_when_local_displays_change() {
+        assert!(!restored_setup_after(SetupChange::LocalDisplay).await.restored);
     }
 
     #[tokio::test]
