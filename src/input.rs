@@ -1342,6 +1342,102 @@ mod tests {
     }
 
     #[test]
+    fn seeded_input_churn_never_leaves_replay_state_held_after_handoff() {
+        struct Rng(u64);
+
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0
+            }
+        }
+
+        const SEEDS: [u64; 8] = [1, 7, 19, 42, 0x5eed, 0xdead_beef, u32::MAX as u64, u64::MAX];
+
+        for seed in SEEDS {
+            let mut random = Rng(seed);
+            let mut source = entered_driver();
+            let mut receiver = entered_target();
+
+            for step in 0..2_000 {
+                if step > 0 && step % 137 == 0 {
+                    receiver.reclaim();
+                    assert!(receiver.keys.is_empty(), "seed={seed:#x} step={step}: keys held");
+                    assert!(receiver.buttons.is_empty(), "seed={seed:#x} step={step}: buttons held");
+                    assert!(
+                        receiver.modifiers.is_empty(),
+                        "seed={seed:#x} step={step}: modifiers held"
+                    );
+
+                    source.reclaim();
+                    let Route::Enter { at, .. } = source.motion((0.0, 250.0), (-3.0, 0.0)) else {
+                        panic!("seed={seed:#x} step={step}: expected peer re-entry");
+                    };
+                    receiver.enter(at);
+                }
+
+                let event = match random.next() % 5 {
+                    0 => match source.key(
+                        (random.next() % 51) as u16,
+                        random.next() & 1 != 0,
+                        random.next() & 3 == 0,
+                        0,
+                    ) {
+                        Route::Forward(event) => Some(event),
+                        Route::Drop | Route::Local => None,
+                        route => panic!("seed={seed:#x} step={step}: unexpected key route {route:?}"),
+                    },
+                    1 => {
+                        let flags = if random.next() & 1 != 0 { COMMAND_FLAG } else { 0 };
+                        match source.modifiers(COMMAND_KEY, flags) {
+                            Route::Forward(event) => Some(event),
+                            Route::Drop | Route::Local => None,
+                            route => panic!("seed={seed:#x} step={step}: unexpected modifier route {route:?}"),
+                        }
+                    }
+                    2 => match source.button(0, random.next() & 1 != 0, 1) {
+                        Route::Forward(event) => Some(event),
+                        Route::Drop | Route::Local => None,
+                        route => panic!("seed={seed:#x} step={step}: unexpected button route {route:?}"),
+                    },
+                    3 => match source.motion(
+                        (500.0, 250.0),
+                        ((random.next() % 7) as f64 - 3.0, (random.next() % 7) as f64 - 3.0),
+                    ) {
+                        Route::Forward(event) => Some(event),
+                        Route::Drop | Route::Local => None,
+                        route => panic!("seed={seed:#x} step={step}: unexpected motion route {route:?}"),
+                    },
+                    _ => {
+                        match source.scroll((random.next() % 9) as f64 - 4.0, (random.next() % 9) as f64 - 4.0, None) {
+                            Route::Forward(event) => Some(event),
+                            Route::Drop | Route::Local => None,
+                            route => panic!("seed={seed:#x} step={step}: unexpected scroll route {route:?}"),
+                        }
+                    }
+                };
+
+                if let Some(event) = event {
+                    receiver.input(event);
+                }
+            }
+
+            receiver.release_all();
+            assert!(receiver.keys.is_empty(), "seed={seed:#x}: keys held at disconnect");
+            assert!(
+                receiver.buttons.is_empty(),
+                "seed={seed:#x}: buttons held at disconnect"
+            );
+            assert!(
+                receiver.modifiers.is_empty(),
+                "seed={seed:#x}: modifiers held at disconnect"
+            );
+        }
+    }
+
+    #[test]
     fn swipes_go_over_only_while_remote() {
         let mut driver = driver(Side::Left);
         assert_eq!(driver.swipe(swipe(SwipePhase::Began, 0.0)), Route::Local);

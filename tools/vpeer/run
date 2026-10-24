@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec cargo test --lib share::tests::virtual_peer_pairs_once_and_drives_the_recording_mesh_receiver -- --exact --nocapture "$@"

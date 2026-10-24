@@ -1549,7 +1549,12 @@ where
 }
 
 #[cfg(test)]
+#[path = "../tools/vpeer/mod.rs"]
+mod vpeer_test;
+
+#[cfg(test)]
 mod tests {
+    use super::vpeer_test as vpeer;
     use super::*;
     use crate::clipboard::Content;
     use crate::control::SharedControl;
@@ -1597,6 +1602,178 @@ mod tests {
 
     fn no_clipboard() -> Sharing<Board> {
         Sharing::new(Board::default(), watch::channel(true).1)
+    }
+
+    #[tokio::test]
+    async fn virtual_peer_pairs_once_and_drives_the_recording_mesh_receiver() {
+        let (mut peer, mut host) = vpeer::paired_channels().await;
+        let (host_sent, peer_sent) = tokio::join!(
+            host.send(&Message::Layout {
+                side: Side::Left,
+                chosen: 0,
+            }),
+            peer.send(&Message::Layout {
+                side: Side::Right,
+                chosen: 0,
+            }),
+        );
+        host_sent.unwrap();
+        peer_sent.unwrap();
+        let (host_layout, peer_layout) = tokio::join!(host.recv(), peer.recv());
+        assert!(matches!(host_layout.unwrap(), Message::Layout { .. }));
+        assert!(matches!(peer_layout.unwrap(), Message::Layout { .. }));
+        let control = control(&host, true);
+        let host_key = me_of(&control);
+        let mut injector = SharedRecorded::default();
+        let recorded = injector.clone();
+        let (_capture, input) = mpsc::channel(8);
+        let mut pointer = Returned::default();
+        let mut board = no_clipboard();
+
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let stop_run = async move {
+            let _ = stopped.await;
+            anyhow::anyhow!("virtual peer validation finished")
+        };
+        let session = together(
+            host,
+            SharedLayout {
+                screen: SCREEN,
+                side: Side::Left,
+                control: control.clone(),
+                arranging: Arranging::fixed((Side::Left, 0), false),
+            },
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            stop_run,
+        );
+        tokio::pin!(session);
+
+        let script = async {
+            peer.send(&Message::ControlClaim { generation: 1 }).await.unwrap();
+            peer.send(&Message::Enter {
+                generation: 1,
+                to: host_key,
+                at: (20.0, 30.0),
+            })
+            .await
+            .unwrap();
+            let mut seed = 0x5eed_cafe_u64;
+            for _ in 0..256 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let dx = ((seed >> 32) as i32 % 19) as f64;
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let dy = ((seed >> 32) as i32 % 19) as f64;
+                peer.send(&Message::Input {
+                    generation: 1,
+                    event: InputEvent::Motion { dx, dy },
+                })
+                .await
+                .unwrap();
+            }
+            peer.send(&Message::Input {
+                generation: 1,
+                event: InputEvent::Key {
+                    code: 0x30,
+                    down: true,
+                    repeat: false,
+                    flags: 0,
+                },
+            })
+            .await
+            .unwrap();
+            peer.send(&Message::Input {
+                generation: 1,
+                event: InputEvent::Button {
+                    button: 0,
+                    down: true,
+                    clicks: 1,
+                },
+            })
+            .await
+            .unwrap();
+            peer.send(&Message::Ping { nonce: 0x5eed }).await.unwrap();
+            loop {
+                if matches!(peer.recv().await.unwrap(), Message::Pong { nonce: 0x5eed }) {
+                    break;
+                }
+            }
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if recorded
+                        .0
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|action| matches!(action, Action::Move { .. }))
+                        .count()
+                        >= 256
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the virtual peer input did not reach the recording injector");
+        };
+
+        tokio::select! {
+            result = &mut session => panic!("mesh session ended before scripted input: {result:?}"),
+            () = script => {},
+        }
+        let _ = stop.send(());
+        let result = tokio::time::timeout(Duration::from_secs(2), session)
+            .await
+            .expect("mesh session did not stop")
+            .unwrap_err();
+        assert!(result.to_string().contains("virtual peer validation finished"));
+        assert!(
+            recorded
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|action| matches!(action, Action::Move { .. }))
+                .count()
+                >= 256
+        );
+        let actions = recorded.0.lock().unwrap();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Key {
+                code: 0x30,
+                down: true,
+                ..
+            }
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Key {
+                code: 0x30,
+                down: false,
+                ..
+            }
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Button {
+                button: 0,
+                down: true,
+                ..
+            }
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Button {
+                button: 0,
+                down: false,
+                ..
+            }
+        )));
     }
 
     /// What every session sends besides what a test looks for.
@@ -3241,6 +3418,118 @@ mod tests {
             assert!(connection_lost(&error), "{error}");
         }
         assert!(button_released(injector.0.last()), "{:?}", injector.0);
+    }
+
+    #[tokio::test]
+    async fn seeded_peer_input_survives_tiny_buffer_jitter_and_releases_on_disconnect() {
+        let (local, mut peer) = channels_with_capacity(1).await;
+        let control = control(&local, false);
+        let (_capture, input) = mpsc::channel(16);
+        let mut injector = Recorded::default();
+        let mut board = no_clipboard();
+        const SEED: u64 = 0x51a7_e001;
+
+        let script = async {
+            struct Rng(u64);
+            impl Rng {
+                fn next(&mut self) -> u64 {
+                    self.0 ^= self.0 << 13;
+                    self.0 ^= self.0 >> 7;
+                    self.0 ^= self.0 << 17;
+                    self.0
+                }
+            }
+
+            let mut random = Rng(SEED);
+            peer_enters(&mut peer).await;
+            for _ in 0..512 {
+                let event = match random.next() % 4 {
+                    0 => InputEvent::Key {
+                        code: (random.next() % 51) as u16,
+                        down: random.next() & 1 != 0,
+                        repeat: random.next() & 3 == 0,
+                        flags: 0,
+                    },
+                    1 => InputEvent::Button {
+                        button: (random.next() % 3) as u8,
+                        down: random.next() & 1 != 0,
+                        clicks: 1,
+                    },
+                    2 => InputEvent::Motion {
+                        dx: (random.next() % 5) as f64 - 2.0,
+                        dy: (random.next() % 5) as f64 - 2.0,
+                    },
+                    _ => InputEvent::Modifiers {
+                        code: 55,
+                        flags: if random.next() & 1 != 0 { 0x0010_0000 } else { 0 },
+                    },
+                };
+                peer_sends(&mut peer, event).await;
+                if random.next() & 7 == 0 {
+                    tokio::time::sleep(Duration::from_millis(random.next() % 2)).await;
+                } else {
+                    tokio::task::yield_now().await;
+                }
+            }
+            round_trip(&mut peer, 0x51a7).await;
+            drop(peer);
+        };
+
+        let mut pointer = Returned::default();
+        let session = together(
+            local,
+            layout(&control),
+            input,
+            &mut pointer,
+            &mut injector,
+            &mut board,
+            pending(),
+        );
+        let (_, _result) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(script, session) })
+            .await
+            .expect("seeded input simulation timed out");
+
+        let mut keys = std::collections::BTreeSet::new();
+        let mut buttons = std::collections::BTreeSet::new();
+        let mut modifiers = std::collections::BTreeSet::new();
+        for action in &injector.0 {
+            match action {
+                Action::Key { code, down, .. } => {
+                    if *down {
+                        keys.insert(*code);
+                    } else {
+                        keys.remove(code);
+                    }
+                }
+                Action::Button { button, down, .. } => {
+                    if *down {
+                        buttons.insert(*button);
+                    } else {
+                        buttons.remove(button);
+                    }
+                }
+                Action::Modifiers { code, flags } => {
+                    if flags & 0x0010_0000 != 0 {
+                        modifiers.insert(*code);
+                    } else {
+                        modifiers.remove(code);
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            keys.is_empty(),
+            "seed={SEED:#x}: peer disconnect left keys held: {keys:?}"
+        );
+        assert!(
+            buttons.is_empty(),
+            "seed={SEED:#x}: peer disconnect left buttons held: {buttons:?}"
+        );
+        assert!(
+            modifiers.is_empty(),
+            "seed={SEED:#x}: peer disconnect left modifiers held: {modifiers:?}"
+        );
     }
 
     #[tokio::test]
