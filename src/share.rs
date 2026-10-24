@@ -286,8 +286,9 @@ where
     let mut kept_confirmation = confirmed.clone();
     let mut pending_confirmations = VecDeque::new();
     let mut layouts = group.layouts;
-    // members whose displays arrived or changed, to recall a layout for
-    let mut arrived: Vec<PublicKey> = Vec::new();
+    // Members whose displays arrived or changed, and whether they already
+    // had a place with known displays before this announcement.
+    let mut arrived: Vec<(PublicKey, bool)> = Vec::new();
     let mut restored = Restoration::default();
     let mut review_changed = true;
     let mut target = Target::new(placement.group(), me);
@@ -686,9 +687,10 @@ where
                         Message::Displays { displays } => {
                             let displays = crate::layout::plausible(displays)
                                 .context("the peer sent displays that cannot be real")?;
+                            let already_placed = placement.placed().contains_key(&peer);
                             if placement.show(peer, displays) {
                                 restored.current_setup = false;
-                                arrived.push(peer);
+                                arrived.push((peer, already_placed));
                                 rearranged = true;
                             }
                         }
@@ -840,9 +842,11 @@ where
                 if rearranged {
                     review_changed = true;
                     rearranged = false;
-                    for key in std::mem::take(&mut arrived) {
+                    for (key, already_placed) in std::mem::take(&mut arrived) {
                         if recall(&mut placement, &mut layouts, &mut confirmed, &mut restored, key, me) {
                             let _ = group.save_layouts.send(layouts.clone());
+                            broadcast(&links, arrangement(&placement), &mut ended);
+                        } else if already_placed && placement.repair(now_ms()) {
                             broadcast(&links, arrangement(&placement), &mut ended);
                         }
                     }
@@ -2491,6 +2495,79 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn changed_peer_displays_without_a_recalled_layout_are_repaired_and_broadcast() {
+        let (control, _members, membership, mut far, _ended, keys) = group_of(2, None).await;
+        let me = me_of(&control);
+        let (changed, stays) = (keys[0], keys[1]);
+        let mut local = group(&control);
+        local.saved = Some((
+            10,
+            me,
+            vec![(me, (0.0, 0.0)), (changed, (-1000.0, 0.0)), (stays, (1000.0, 0.0))],
+        ));
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        for peer in &mut far {
+            peer.send(&Message::Displays { displays: vec![SCREEN] }).await.unwrap();
+        }
+        let before = view_when(&mut view, |v| v.layout.members.len() == 3).await;
+        assert!(before.unreachable.is_empty());
+        let smaller = Rect { width: 500.0, ..SCREEN };
+        far[0]
+            .send(&Message::Displays {
+                displays: vec![smaller],
+            })
+            .await
+            .unwrap();
+        let after = view_when(&mut view, |v| {
+            v.layout
+                .members
+                .iter()
+                .find(|member| member.key == changed)
+                .is_some_and(|member| member.displays == [smaller])
+        })
+        .await;
+        assert!(
+            after.unreachable.is_empty(),
+            "a resized, already-placed peer must stay reachable"
+        );
+        let offsets: std::collections::BTreeMap<_, _> = after
+            .layout
+            .members
+            .iter()
+            .map(|member| (member.key, member.offset))
+            .collect();
+        assert_eq!(offsets[&changed], (-500.0, 0.0));
+        assert_eq!(offsets[&stays], (1000.0, 0.0));
+        assert_eq!(offsets[&me], (0.0, 0.0));
+        for member in &after.layout.members {
+            assert!(!after.layout.overlaps(member.key, member.offset));
+        }
+        for peer in &mut far {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Message::Arrangement {
+                        version,
+                        author,
+                        offsets,
+                    } = peer.recv().await.unwrap()
+                        && offsets.contains(&(changed, (-500.0, 0.0)))
+                    {
+                        assert!(version > 10);
+                        assert_eq!(author, me);
+                        assert!(offsets.contains(&(stays, (1000.0, 0.0))));
+                        assert!(offsets.contains(&(me, (0.0, 0.0))));
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("every peer receives the repaired arrangement");
+        }
+        task.abort();
     }
 
     #[test]
