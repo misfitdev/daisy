@@ -92,6 +92,24 @@ pub struct Progress {
     pub cancelled: AtomicBool,
 }
 
+#[derive(Default)]
+struct OfferRetryGuard {
+    failed_clipboard: Option<i64>,
+}
+
+impl OfferRetryGuard {
+    fn should_attempt(&mut self, clipboard_changed: bool, crossing: bool, current: i64) -> bool {
+        if clipboard_changed {
+            self.failed_clipboard = None;
+        }
+        crossing && self.failed_clipboard != Some(current)
+    }
+
+    fn failed(&mut self, current: i64) {
+        self.failed_clipboard = Some(current);
+    }
+}
+
 pub struct Hub {
     identity: Identity,
     signer: crate::device::Signer,
@@ -106,6 +124,8 @@ pub struct Hub {
     receiver: Mutex<Option<mpsc::Receiver<Message>>>,
     pub runtime: tokio::runtime::Handle,
     crossing: AtomicBool,
+    #[cfg(all(target_os = "macos", not(test)))]
+    offer_retry: Mutex<OfferRetryGuard>,
 }
 
 async fn accept_connection<T, F, Fut>(mut accept: F) -> T
@@ -158,6 +178,8 @@ impl Hub {
             receiver: Mutex::new(Some(receiver)),
             runtime: tokio::runtime::Handle::current(),
             crossing: AtomicBool::new(false),
+            #[cfg(all(target_os = "macos", not(test)))]
+            offer_retry: Mutex::default(),
         });
         let running = hub.clone();
         let task = tokio::spawn(async move {
@@ -243,13 +265,18 @@ impl Hub {
                 return Some(current);
             }
             let crossing = self.crossing.swap(false, Ordering::AcqRel);
-            if *count != Some(current) || crossing {
+            let clipboard_changed = *count != Some(current);
+            let should_attempt = lock(&self.offer_retry).should_attempt(clipboard_changed, crossing, current);
+            if clipboard_changed || crossing {
                 *count = Some(current);
-                lock(&self.local).take();
-                if crossing && *self.enabled.borrow() {
+                if clipboard_changed {
+                    lock(&self.local).take();
+                }
+                if crossing && *self.enabled.borrow() && should_attempt {
                     match crate::macos::file_pasteboard::copied_paths().and_then(|paths| self.offer(paths)) {
                         Ok(()) => {}
                         Err(error) => {
+                            lock(&self.offer_retry).failed(current);
                             tracing::warn!(error = ?error, "copied files could not be offered");
                             crate::macos::file_pasteboard::offer_failed(format!("{error:#}"));
                         }
@@ -1270,6 +1297,17 @@ fn publish(from: &Path, to: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::trust::Policy;
+
+    #[test]
+    fn failed_offer_waits_for_clipboard_change_before_retrying() {
+        let mut retry = OfferRetryGuard::default();
+        assert!(retry.should_attempt(true, true, 17));
+        retry.failed(17);
+        assert!(!retry.should_attempt(false, true, 17));
+        assert!(!retry.should_attempt(false, true, 17));
+        assert!(!retry.should_attempt(false, false, 18));
+        assert!(retry.should_attempt(true, true, 18));
+    }
 
     struct Pair {
         _homes: [tempfile::TempDir; 2],
