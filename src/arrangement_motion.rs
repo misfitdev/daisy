@@ -315,7 +315,7 @@ mod tests {
             let links = chain((0.0, 0.0), end, 14.0, None);
             assert!(links.len() >= 2 && links.len().is_multiple_of(2));
             assert!(links[0].center.0.hypot(links[0].center.1) > 14.0);
-            for pair in links.chunks_exact(2) {
+            for pair in links.as_chunks::<2>().0 {
                 assert!(((pair[1].angle - pair[0].angle) - std::f64::consts::PI).abs() < 1e-9);
             }
         }

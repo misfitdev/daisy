@@ -39,7 +39,8 @@ run *args:
     cargo run --quiet -- {{args}}
 
 # Everything CI would check
-check: lint test
+check:
+    mise exec -- {{just_executable()}} lint test
 
 # Update dependencies and list what is still behind, majors included
 update:

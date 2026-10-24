@@ -2762,11 +2762,13 @@ mod tests {
         local.saved = Some((
             10,
             me,
-            vec![(me, (0.0, 0.0)), (stays, (1000.0, 0.0)), (leaves, (2000.0, 0.0))],
+            vec![(me, (0.0, 0.0)), (stays, (2000.0, 0.0)), (leaves, (1000.0, 0.0))],
         ));
         let mut view = local.arranged.subscribe();
         let task = start_arrangement_session(local, membership);
-        // the one that leaves arrives first, so the pair alone only appears when it goes
+        // The first arrival is already beside this system, so each startup
+        // prefix is reachable without repair. The remembered pair alone only
+        // appears when that member leaves.
         far[1]
             .send(&Message::Displays { displays: vec![SCREEN] })
             .await
@@ -2781,13 +2783,13 @@ mod tests {
             all.layout
                 .members
                 .iter()
-                .any(|m| m.key == stays && m.offset == (1000.0, 0.0))
+                .any(|m| m.key == stays && m.offset == (2000.0, 0.0))
         );
         drop(far.remove(1));
         let left = view_when(&mut view, |v| v.layout.members.len() == 2).await;
         task.abort();
         let offset = left.layout.members.iter().find(|m| m.key == stays).unwrap().offset;
-        assert_eq!(offset, (1000.0, 0.0));
+        assert_eq!(offset, (2000.0, 0.0));
         assert!(!left.restored);
     }
 
