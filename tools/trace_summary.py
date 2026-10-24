@@ -18,11 +18,11 @@ TIMELINE = (
     "peer message backlog",
     "delayed peer input",
     "slow peer message handling",
-    "slow round trip peer",
+    "slow round trip to the peer",
     "edge leave decision",
     "remote transition decision",
     "modifier replayed",
-    "idle timer reset carries function flag",
+    "idle timer reset carries the function flag",
 )
 
 
@@ -30,14 +30,14 @@ def summarize(path):
     skipped = 0
     # An on-disk temporary database keeps long captures out of memory and
     # orders records from different systems without changing the capture.
-    with closing(sqlite3.connect("")) as database, path.open() as source:
+    with closing(sqlite3.connect("")) as database, path.open("rb") as source:
         database.execute(
             "CREATE TABLE events (time INTEGER, sequence INTEGER, "
             "target TEXT, message TEXT, payload TEXT)"
         )
         for line in source:
             try:
-                collected = json.loads(line)
+                collected = json.loads(line.decode("utf-8"))
                 record = collected["record"]
                 fields = record["fields"]
                 time, sequence = record["unix_ms"], record["sequence"]
@@ -49,7 +49,7 @@ def summarize(path):
                 target, message = record["target"], fields.get("message", "")
                 if not isinstance(target, str) or not isinstance(message, str):
                     raise ValueError("invalid event name")
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, UnicodeDecodeError):
                 skipped += 1
                 continue
             database.execute(

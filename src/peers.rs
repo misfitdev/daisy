@@ -302,6 +302,7 @@ impl PeerStore {
         fs::read_to_string(&self.layouts)
             .ok()
             .and_then(|text| toml::from_str(&text).ok())
+            .map(crate::recall::Memory::validated)
             .unwrap_or_default()
     }
 
@@ -935,6 +936,33 @@ mod tests {
         store.save_layouts(&layouts).unwrap();
         assert_eq!(PeerStore::open(dir.path()).unwrap().layouts(), layouts);
         fs::write(dir.path().join("trust-v5/layouts.toml"), "not toml [").unwrap();
+        assert_eq!(store.layouts(), crate::recall::Memory::default());
+    }
+
+    #[test]
+    fn parsed_layouts_with_missing_offsets_are_discarded() {
+        let (store, dir) = store();
+        let display = crate::input::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let mut memory = crate::recall::Memory::default();
+        memory.remember(
+            crate::recall::setup([(key(1), &[display][..]), (key(2), &[display][..])]),
+            &[(key(1), (0.0, 0.0)), (key(2), (100.0, 0.0))].into_iter().collect(),
+        );
+        let mut value = toml::Value::try_from(&memory).unwrap();
+        value["remembered"].as_array_mut().unwrap()[0]["offsets"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        fs::write(
+            dir.path().join("trust-v5/layouts.toml"),
+            toml::to_string(&value).unwrap(),
+        )
+        .unwrap();
         assert_eq!(store.layouts(), crate::recall::Memory::default());
     }
 

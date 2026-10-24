@@ -437,6 +437,7 @@ pub enum Action {
     },
     Modifiers {
         code: u16,
+        down: bool,
         flags: u64,
     },
     Swipe {
@@ -589,7 +590,16 @@ impl Target {
                 let down = held_after(code, flags, self.modifiers.contains(&code));
                 held_now(&mut self.modifiers, code, down, flags);
                 self.flags = flags;
-                vec![Action::Modifiers { code, flags }]
+                vec![Action::Modifiers {
+                    code,
+                    // Caps Lock toggles and is not tracked as a held key.
+                    down: if code == 57 {
+                        modifier_is_down(code, flags)
+                    } else {
+                        down
+                    },
+                    flags,
+                }]
             }
         }
     }
@@ -624,7 +634,11 @@ impl Target {
             });
         }
         for code in std::mem::take(&mut self.modifiers) {
-            actions.push(Action::Modifiers { code, flags: 0 });
+            actions.push(Action::Modifiers {
+                code,
+                down: false,
+                flags: 0,
+            });
         }
         self.flags = 0;
         // a scroll left hanging keeps apps scrolling or coasting
@@ -702,9 +716,9 @@ impl Action {
                 flags,
                 modifier: false,
             }),
-            Self::Modifiers { code, flags } => Some(KeyboardEvent {
+            Self::Modifiers { code, down, flags } => Some(KeyboardEvent {
                 code,
-                down: modifier_is_down(code, flags),
+                down,
                 repeat: false,
                 flags,
                 modifier: true,
@@ -962,6 +976,25 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_modifier_release_keeps_its_decided_direction_for_injection() {
+        let mut receiver = entered_target();
+        let press = receiver.input(InputEvent::Modifiers {
+            code: COMMAND_KEY,
+            flags: COMMAND_FLAG,
+        });
+        assert!(press[0].keyboard().unwrap().down);
+        let release = receiver.input(InputEvent::Modifiers {
+            code: COMMAND_KEY,
+            flags: COMMAND_FLAG,
+        });
+        assert!(
+            !release[0].keyboard().unwrap().down,
+            "the release decision must reach the injector"
+        );
+        assert!(receiver.release_all().is_empty());
+    }
+
+    #[test]
     fn every_keyboard_code_preserves_every_modifier_combination_and_repeat() {
         let masks = [0x0002_0000, 0x0004_0000, 0x0008_0000, 0x0010_0000, 0x0080_0000];
         for subset in 0..32 {
@@ -1020,7 +1053,11 @@ mod tests {
             assert!(!release[0].keyboard().unwrap().down, "left {left} was released");
             assert_eq!(
                 receiver.release_all(),
-                vec![Action::Modifiers { code: right, flags: 0 }]
+                vec![Action::Modifiers {
+                    code: right,
+                    down: false,
+                    flags: 0
+                }]
             );
         }
     }
@@ -1029,11 +1066,14 @@ mod tests {
     fn caps_lock_is_a_toggle_and_is_not_released_on_handoff() {
         let mut receiver = target(Side::Right);
         receiver.enter((100.0, 100.0));
-        receiver.input(InputEvent::Modifiers {
+        let pressed = receiver.input(InputEvent::Modifiers {
             code: 57,
             flags: 0x0001_0000,
         });
+        assert!(pressed[0].keyboard().unwrap().down);
         assert!(receiver.release_all().is_empty());
+        let released = receiver.input(InputEvent::Modifiers { code: 57, flags: 0 });
+        assert!(!released[0].keyboard().unwrap().down);
     }
 
     #[test]
@@ -1354,28 +1394,84 @@ mod tests {
             }
         }
 
+        #[derive(Default)]
+        struct Replayed {
+            keys: BTreeSet<u16>,
+            buttons: BTreeSet<u8>,
+            modifiers: BTreeSet<u16>,
+            presses: usize,
+        }
+
+        impl Replayed {
+            fn observe(&mut self, actions: Vec<Action>) {
+                for action in actions {
+                    match action {
+                        Action::Key { code, down, .. } => {
+                            if down {
+                                self.keys.insert(code);
+                                self.presses += 1;
+                            } else {
+                                self.keys.remove(&code);
+                            }
+                        }
+                        Action::Button { button, down, .. } => {
+                            if down {
+                                self.buttons.insert(button);
+                                self.presses += 1;
+                            } else {
+                                self.buttons.remove(&button);
+                            }
+                        }
+                        Action::Modifiers { code, down, .. } => {
+                            if down {
+                                self.modifiers.insert(code);
+                                self.presses += 1;
+                            } else {
+                                self.modifiers.remove(&code);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            fn assert_released(&self, seed: u64, step: usize) {
+                assert!(
+                    self.keys.is_empty(),
+                    "seed={seed:#x} step={step}: injected keys held: {:?}",
+                    self.keys
+                );
+                assert!(
+                    self.buttons.is_empty(),
+                    "seed={seed:#x} step={step}: injected buttons held: {:?}",
+                    self.buttons
+                );
+                assert!(
+                    self.modifiers.is_empty(),
+                    "seed={seed:#x} step={step}: injected modifiers held: {:?}",
+                    self.modifiers
+                );
+            }
+        }
+
         const SEEDS: [u64; 8] = [1, 7, 19, 42, 0x5eed, 0xdead_beef, u32::MAX as u64, u64::MAX];
 
         for seed in SEEDS {
             let mut random = Rng(seed);
             let mut source = entered_driver();
             let mut receiver = entered_target();
+            let mut replayed = Replayed::default();
 
             for step in 0..2_000 {
                 if step > 0 && step % 137 == 0 {
-                    receiver.reclaim();
-                    assert!(receiver.keys.is_empty(), "seed={seed:#x} step={step}: keys held");
-                    assert!(receiver.buttons.is_empty(), "seed={seed:#x} step={step}: buttons held");
-                    assert!(
-                        receiver.modifiers.is_empty(),
-                        "seed={seed:#x} step={step}: modifiers held"
-                    );
+                    replayed.observe(receiver.reclaim());
+                    replayed.assert_released(seed, step);
 
                     source.reclaim();
                     let Route::Enter { at, .. } = source.motion((0.0, 250.0), (-3.0, 0.0)) else {
                         panic!("seed={seed:#x} step={step}: expected peer re-entry");
                     };
-                    receiver.enter(at);
+                    replayed.observe(receiver.enter(at));
                 }
 
                 let event = match random.next() % 5 {
@@ -1420,20 +1516,13 @@ mod tests {
                 };
 
                 if let Some(event) = event {
-                    receiver.input(event);
+                    replayed.observe(receiver.input(event));
                 }
             }
 
-            receiver.release_all();
-            assert!(receiver.keys.is_empty(), "seed={seed:#x}: keys held at disconnect");
-            assert!(
-                receiver.buttons.is_empty(),
-                "seed={seed:#x}: buttons held at disconnect"
-            );
-            assert!(
-                receiver.modifiers.is_empty(),
-                "seed={seed:#x}: modifiers held at disconnect"
-            );
+            replayed.observe(receiver.release_all());
+            replayed.assert_released(seed, 2_000);
+            assert!(replayed.presses > 0, "seed={seed:#x}: no presses reached the injector");
         }
     }
 
@@ -1791,6 +1880,7 @@ mod tests {
                 },
                 Action::Modifiers {
                     code: COMMAND_KEY,
+                    down: false,
                     flags: 0
                 },
                 Action::Leave {

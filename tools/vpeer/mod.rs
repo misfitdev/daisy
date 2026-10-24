@@ -88,34 +88,43 @@ pub async fn paired_channels() -> (Channel<DuplexStream>, Channel<DuplexStream>)
         shown: Some(code_tx),
         received: code_rx,
     };
-    let (connect_trust, accept_trust) = tokio::join!(
-        establish_trust(
-            &mut connect,
-            &virtual_peer.peers,
-            &virtual_peer.name,
-            true,
-            Policy::Once,
-            &mut connect_prompt,
-        ),
-        establish_trust(
-            &mut accept,
-            &receiver.peers,
-            &receiver.name,
-            true,
-            Policy::Once,
-            &mut accept_prompt,
-        ),
-    );
+    let (connect_trust, accept_trust) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(
+            establish_trust(
+                &mut connect,
+                &virtual_peer.peers,
+                &virtual_peer.name,
+                true,
+                Policy::Once,
+                &mut connect_prompt,
+            ),
+            establish_trust(
+                &mut accept,
+                &receiver.peers,
+                &receiver.name,
+                true,
+                Policy::Once,
+                &mut accept_prompt,
+            ),
+        )
+    })
+    .await
+    .expect("virtual peer pairing timed out");
     assert_eq!(connect_trust.unwrap().1, Trust::NewlyPaired);
     assert_eq!(accept_trust.unwrap().1, Trust::NewlyPaired);
-    assert_eq!(
-        virtual_peer
-            .peers
-            .trusted(&receiver.identity.public_key(), trust::now())
-            .unwrap()
-            .unwrap()
-            .policy,
-        Policy::Once
-    );
+    for (source, target) in [(&virtual_peer, &receiver), (&receiver, &virtual_peer)] {
+        assert_eq!(
+            source
+                .peers
+                .trusted(&target.identity.public_key(), trust::now())
+                .unwrap()
+                .unwrap()
+                .policy,
+            Policy::Once,
+            "{} must trust {} for this session",
+            source.name,
+            target.name,
+        );
+    }
     (connect, accept)
 }

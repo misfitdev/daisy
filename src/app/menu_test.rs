@@ -281,6 +281,22 @@ fn peer_row_dialogs_are_sheets(
     );
     let pairing = target.ivars().pairing.get().unwrap();
     assert!(matches!(pairing.state(), Some(super::panel::State::Waiting { .. })));
+    let escape = objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        objc2_app_kit::NSEventType::KeyDown,
+        objc2_foundation::NSPoint::new(0.0, 0.0),
+        objc2_app_kit::NSEventModifierFlags::empty(),
+        0.0,
+        pairing.panel.windowNumber(),
+        None,
+        &NSString::from_str("\u{1b}"),
+        &NSString::from_str("\u{1b}"),
+        false,
+        53,
+    ).unwrap();
+    assert!(pairing.panel.contentView().unwrap().performKeyEquivalent(&escape));
+    assert!(!pairing.panel.isVisible(), "Escape must dismiss discovery");
+    assert!(main.attachedSheet().is_none(), "Escape must not open address entry");
+    target.add_a_system();
     click(&pairing.panel, "By IP…");
     assert!(
         !pairing.panel.isVisible(),

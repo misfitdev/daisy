@@ -156,8 +156,8 @@ impl Panel {
                     "Click Start Sharing on it. Its code will appear there. {}",
                     countdown(until.saturating_duration_since(Instant::now()).as_secs())
                 ),
-                None,
                 Some("By IP…"),
+                Some("Cancel"),
             ),
             State::NoneJoined => (
                 "No new system joined".to_owned(),

@@ -290,6 +290,14 @@ define_class!(
                 return;
             };
             match panel.state() {
+                Some(panel::State::Waiting { .. }) => {
+                    let _ = self.ivars().controller.send(Command::CancelAdding);
+                    panel.close();
+                    self.open_window();
+                    if let Some(views) = self.ivars().main.get() {
+                        self.ask_peer_address(&views.window);
+                    }
+                }
                 Some(panel::State::EnterCode { peer, .. }) => {
                     let text = panel.field.stringValue().to_string();
                     if crate::pairing::PairingCode::parse(text.trim()).is_none() {
@@ -322,7 +330,6 @@ define_class!(
             let Some(panel) = self.ivars().pairing.get() else {
                 return;
             };
-            let by_ip = matches!(panel.state(), Some(panel::State::Waiting { .. }));
             match panel.state() {
                 Some(panel::State::Waiting { .. }) => {
                     let _ = self.ivars().controller.send(Command::CancelAdding);
@@ -337,12 +344,6 @@ define_class!(
                 _ => {}
             }
             panel.close();
-            if by_ip {
-                self.open_window();
-                if let Some(views) = self.ivars().main.get() {
-                    self.ask_peer_address(&views.window);
-                }
-            }
         }
 
         #[unsafe(method(toggleAlwaysDiscoverable:))]

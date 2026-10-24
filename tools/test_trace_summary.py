@@ -35,10 +35,13 @@ class TraceSummaryTests(unittest.TestCase):
             ["python3", "tools/trace_summary.py", str(Path.home() / "daisy-trace.ndjson")],
         )
 
-    def run_summary(self, records, tail=""):
+    def run_summary(self, records, tail="", raw_tail=b""):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "capture with spaces.ndjson"
-            path.write_text("".join(json.dumps(row) + "\n" for row in records) + tail)
+            path.write_bytes(
+                ("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records) + tail).encode("utf-8")
+                + raw_tail
+            )
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), str(path)], capture_output=True, text=True
             )
@@ -69,6 +72,17 @@ class TraceSummaryTests(unittest.TestCase):
 
     def test_empty_capture(self):
         self.assertEqual(self.run_summary([]), ([], [], ""))
+
+    def test_incomplete_utf8_record_does_not_hide_earlier_events(self):
+        record = event("delayed peer input", reason="résumé", queue_wait_ms="20")
+        _, timeline, errors = self.run_summary([record], raw_tail=b'{"system":"\xe2\x82')
+        self.assertEqual(timeline, [record])
+        self.assertEqual(errors, "Skipped 1 invalid trace records.\n")
+
+    def test_existing_slow_round_trip_and_idle_signals_remain_in_the_timeline(self):
+        records = [event("slow round trip to the peer"), event("idle timer reset carries the function flag")]
+        _, timeline, _ = self.run_summary(records)
+        self.assertEqual(timeline, records)
 
     def test_partial_or_invalid_records_are_reported_without_echoing_content(self):
         record = event("delayed peer input", queue_wait_ms="20")

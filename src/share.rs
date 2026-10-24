@@ -3574,9 +3574,33 @@ mod tests {
             &mut board,
             pending(),
         );
-        let (_, _result) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(script, session) })
+        let (_, result) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(script, session) })
             .await
             .expect("seeded input simulation timed out");
+        if let Err(error) = result {
+            assert!(connection_lost(&error), "{error}");
+        }
+        assert!(
+            injector
+                .0
+                .iter()
+                .any(|action| matches!(action, Action::Key { down: true, .. })),
+            "scripted keys must reach the injector"
+        );
+        assert!(
+            injector
+                .0
+                .iter()
+                .any(|action| matches!(action, Action::Button { down: true, .. })),
+            "scripted buttons must reach the injector"
+        );
+        assert!(
+            injector
+                .0
+                .iter()
+                .any(|action| matches!(action, Action::Modifiers { flags, .. } if *flags != 0)),
+            "scripted modifiers must reach the injector"
+        );
 
         let mut keys = std::collections::BTreeSet::new();
         let mut buttons = std::collections::BTreeSet::new();
@@ -3597,8 +3621,8 @@ mod tests {
                         buttons.remove(button);
                     }
                 }
-                Action::Modifiers { code, flags } => {
-                    if flags & 0x0010_0000 != 0 {
+                Action::Modifiers { code, down, .. } => {
+                    if *down {
                         modifiers.insert(*code);
                     } else {
                         modifiers.remove(code);

@@ -73,6 +73,30 @@ pub struct Recalled<K> {
 }
 
 impl<K: Copy + Ord> Memory<K> {
+    /// Drops malformed persisted entries and keeps the most recently used
+    /// setups within the same bound used when remembering new ones.
+    pub fn validated(mut self) -> Self {
+        self.remembered.retain(|entry| {
+            let keys: Vec<K> = entry.setup.iter().map(|(key, _)| *key).collect();
+            let placed: BTreeMap<K, Offset> = entry.offsets.iter().copied().collect();
+            keys.len() >= 2
+                && keys.len() <= crate::service::MAX_GROUP
+                && keys.windows(2).all(|pair| pair[0] < pair[1])
+                && entry.setup.iter().all(|(_, displays)| {
+                    displays.len() <= crate::layout::MAX_DISPLAYS
+                        && crate::layout::plausible(displays.clone()).is_some()
+                })
+                && entry.setup == setup(entry.setup.iter().map(|(key, displays)| (*key, displays.as_slice())))
+                && placed.len() == keys.len()
+                && entry.offsets.len() == keys.len()
+                && keys.iter().all(|key| placed.contains_key(key))
+                && placed.values().all(|(x, y)| x.is_finite() && y.is_finite())
+        });
+        let excess = self.remembered.len().saturating_sub(MAX_SETUPS);
+        self.remembered.drain(..excess);
+        self
+    }
+
     /// Keeps `offsets` as the arrangement for `setup`, as the most recently
     /// used. Returns whether that changed what is remembered.
     pub fn remember(&mut self, setup: Setup<K>, offsets: &BTreeMap<K, Offset>) -> bool {
@@ -201,6 +225,65 @@ mod tests {
 
     fn offsets(placed: &[(u8, Offset)]) -> BTreeMap<u8, Offset> {
         placed.iter().copied().collect()
+    }
+
+    #[test]
+    fn loaded_memory_discards_incomplete_nonfinite_and_implausible_entries() {
+        let valid = Remembered {
+            setup: setup_of(&[(A, laptop()), (B, laptop())]),
+            offsets: vec![(A, (0.0, 0.0)), (B, (1512.0, 0.0))],
+        };
+        let mut invalid = Vec::new();
+        let mut missing = valid.clone();
+        missing.offsets.pop();
+        invalid.push(missing);
+        let mut duplicate = valid.clone();
+        duplicate.offsets[1].0 = A;
+        invalid.push(duplicate);
+        let mut extra = valid.clone();
+        extra.offsets.push((C, (0.0, 0.0)));
+        invalid.push(extra);
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut bad = valid.clone();
+            bad.offsets[0].1.0 = value;
+            invalid.push(bad);
+        }
+        let mut duplicate_member = valid.clone();
+        duplicate_member.setup[1].0 = A;
+        invalid.push(duplicate_member);
+        for displays in [
+            vec![],
+            vec![laptop()[0]; crate::layout::MAX_DISPLAYS + 1],
+            vec![rect(0.0, 0.0, 0.0, 1.0)],
+        ] {
+            let mut bad = valid.clone();
+            bad.setup[0].1 = displays;
+            invalid.push(bad);
+        }
+        for bad in invalid {
+            let loaded = Memory {
+                remembered: vec![bad, valid.clone()],
+            }
+            .validated();
+            assert_eq!(loaded.remembered, vec![valid.clone()]);
+        }
+    }
+
+    #[test]
+    fn loaded_memory_keeps_only_the_most_recent_valid_setups() {
+        let entries = (0..MAX_SETUPS + 3)
+            .map(|index| Remembered {
+                setup: setup_of(&[(A, vec![rect(0.0, 0.0, 1000.0 + index as f64, 800.0)]), (B, laptop())]),
+                offsets: vec![(A, (0.0, 0.0)), (B, (2000.0, 0.0))],
+            })
+            .collect();
+        let loaded = Memory { remembered: entries }.validated();
+        assert_eq!(loaded.remembered.len(), MAX_SETUPS);
+        assert_eq!(loaded.remembered[0].setup[0].1[0].width, 1003.0);
+        assert_eq!(
+            loaded.remembered.last().unwrap().setup[0].1[0].width,
+            1000.0 + (MAX_SETUPS + 2) as f64
+        );
     }
 
     #[test]
