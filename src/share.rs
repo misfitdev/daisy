@@ -235,7 +235,11 @@ impl Link {
     }
 }
 
-type Received = (PublicKey, Result<Message, SessionError>);
+struct Received {
+    peer: PublicKey,
+    message: Result<Message, SessionError>,
+    queued_at: Instant,
+}
 
 /// Runs this system's side of a group: links join and leave through
 /// `waiting` and then `membership`, while one capture, one owner of control
@@ -578,9 +582,10 @@ where
                 }
             }
             event = received.recv() => {
-                let Some((peer, message)) = event else { continue };
+                let Some(Received { peer, message, queued_at }) = event else { continue };
                 let queued_before = received.len();
                 pace.incoming(queued_before, control.now());
+                let queue_wait = queued_at.elapsed();
                 let handling = Instant::now();
                 let Some(link) = links.get_mut(&peer) else { continue };
                 let quiet = link.last_heard.elapsed();
@@ -591,6 +596,18 @@ where
                     Err(error) => { ended.push((peer, Err(error.into()))); continue; }
                 };
                 let kind = message_kind(&message);
+                if let Message::Input { generation, event } = &message
+                    && queue_wait >= Duration::from_millis(10)
+                {
+                    tracing::debug!(
+                        peer = %peer,
+                        generation,
+                        kind = input_event_kind(event),
+                        queued_before,
+                        queue_wait_ms = queue_wait.as_millis() as u64,
+                        "delayed peer input"
+                    );
+                }
                 log_transition("incoming", me, Some(peer), &message, &control);
                 let outcome: Result<()> = (|| {
                     match message {
@@ -957,6 +974,18 @@ impl Pace {
                 "slow peer message handling"
             );
         }
+    }
+}
+
+fn input_event_kind(event: &crate::input::InputEvent) -> &'static str {
+    match event {
+        crate::input::InputEvent::Motion { .. } => "Motion",
+        crate::input::InputEvent::Button { .. } => "Button",
+        crate::input::InputEvent::Scroll { .. } => "Scroll",
+        crate::input::InputEvent::Key { .. } => "Key",
+        crate::input::InputEvent::Modifiers { .. } => "Modifiers",
+        crate::input::InputEvent::Swipe { .. } => "Swipe",
+        crate::input::InputEvent::PhasedScroll { .. } => "PhasedScroll",
     }
 }
 
@@ -1500,8 +1529,18 @@ where
     let task = tokio::spawn(async move {
         loop {
             let message = receiver.recv().await;
+            let queued_at = Instant::now();
             let failed = message.is_err();
-            if sender.send((key, message)).await.is_err() || failed {
+            if sender
+                .send(Received {
+                    peer: key,
+                    message,
+                    queued_at,
+                })
+                .await
+                .is_err()
+                || failed
+            {
                 break;
             }
         }
