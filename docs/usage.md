@@ -18,7 +18,7 @@ Choose **Open Daisy** from the menu-bar flower to open its window. Command-W or 
 
 ## Connect by address
 
-If automatic discovery does not find a peer, click **+** beside **Peers**, then choose **By IP…** in the Add System panel. Enter the peer's local name or IP address and click **Connect**. When sharing is stopped or Always discoverable is enabled, **+** opens address entry directly. The peer must be sharing. Daisy saves the address and starts connecting immediately, keeping existing connections and automatic discovery active.
+If automatic discovery does not find a peer, click **+** beside **Peers**, then choose **By Address…** in the Add System panel. Enter the peer's local name or IP address and click **Connect**. When sharing is stopped or Always discoverable is enabled, **+** opens address entry directly. The peer must be sharing. Daisy saves the address and starts connecting immediately, keeping existing connections and automatic discovery active.
 
 Both systems must be reachable over TCP port 24850, the default. For a new peer, enter its pairing code when prompted. For a paired peer, Daisy checks the saved identity and trust before connecting.
 
@@ -39,6 +39,8 @@ a drag that connects the whole group dismisses the question. Choose
 **Looks Right** to keep the arrangement as shown. Confirmation is shared
 with peers that support it and saved across restarts. Reconnecting with
 unchanged displays does not ask again after confirmation.
+The warning naming unreachable peers stays above the arrangement until they are
+within reach, even after **Looks Right** confirms their placement.
 
 Daisy remembers the arrangement you confirmed for each combination of systems and displays. When that combination comes back, such as a monitor moving from one system to another or the same peers meeting again, the group starts from that arrangement without asking, and the arrangement says it was restored. A restored arrangement never undoes what you have arranged since: if the systems already here sit differently than they did then, they stay put and only the newcomer returns, beside the system it was nearest. A member leaving never rearranges the rest.
 

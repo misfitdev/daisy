@@ -7,11 +7,13 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSBackingStoreType, NSBezelStyle, NSBezierPath, NSBox, NSBoxType, NSButton, NSCellImagePosition,
-    NSColor, NSFont, NSImage, NSImageView, NSLineBreakMode, NSPopUpButton, NSResponder, NSTextField, NSView, NSWindow,
+    NSAccessibility, NSAccessibilityAnnouncementKey, NSAccessibilityAnnouncementRequestedNotification,
+    NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey, NSAccessibilityPriorityLevel,
+    NSBackingStoreType, NSBezelStyle, NSBezierPath, NSBox, NSBoxType, NSButton, NSCellImagePosition, NSColor, NSFont,
+    NSImage, NSImageView, NSLineBreakMode, NSPopUpButton, NSResponder, NSTextField, NSView, NSWindow,
     NSWindowStyleMask,
 };
-use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{MainThreadMarker, NSDictionary, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
 use super::coral_color;
 use super::map::ArrangeView;
@@ -89,6 +91,7 @@ pub struct MainViews {
     rule: Retained<NSBox>,
     pub question: Retained<NSTextField>,
     pub unreachable: Retained<NSTextField>,
+    has_unreachable: Cell<bool>,
     pub looks_right: Retained<NSButton>,
     pub window: Retained<NSWindow>,
     root: Retained<Panel>,
@@ -117,15 +120,16 @@ pub struct PeerRow {
     pub trust: String,
 }
 
-/// The line above the arrangement: who is out of reach while it is being
-/// checked, or that it was restored. `None` when there is nothing to say.
+/// Reachability stays visible after placement is confirmed. Restoration
+/// and placement hints appear only when there is no reachability warning.
 pub fn caption(checking: bool, restored: bool, names: &[String]) -> Option<String> {
-    if checking {
-        Some(if names.is_empty() {
-            "Drag the screens to match your desk.".to_owned()
-        } else {
-            format!("Cannot reach: {}. Drag the screens closer together.", names.join(", "))
-        })
+    if !names.is_empty() {
+        Some(format!(
+            "Cannot reach: {}. Drag the screens closer together.",
+            names.join(", ")
+        ))
+    } else if checking {
+        Some("Drag the screens to match your desk.".to_owned())
     } else if restored {
         Some("Restored the layout from last time these screens were together.".to_owned())
     } else {
@@ -214,6 +218,7 @@ impl MainViews {
             rule,
             question,
             unreachable,
+            has_unreachable: Cell::new(false),
             looks_right,
             window,
             root,
@@ -239,6 +244,8 @@ impl MainViews {
     pub fn show_check(&self, checking: bool, restored: bool, names: &[String]) {
         let shown = caption(checking, restored, names);
         let caption = shown.clone().unwrap_or_default();
+        let changed = self.unreachable.stringValue().to_string() != caption;
+        let was_unreachable = self.has_unreachable.replace(!names.is_empty());
         if self.question.isHidden() != checking
             && self.unreachable.isHidden() == shown.is_none()
             && self.unreachable.stringValue().to_string() == caption
@@ -261,6 +268,13 @@ impl MainViews {
         self.unreachable.setFrameSize(NSSize::new(GROUP_WIDTH, caption_height));
         self.arrange.set_check(checking);
         self.layout_hero();
+        if changed && self.window.isVisible() {
+            if !names.is_empty() {
+                announce(&self.window, &caption);
+            } else if was_unreachable {
+                announce(&self.window, "All screens are within reach.");
+            }
+        }
     }
 
     pub fn show_status(&self, title: &str, detail: &str) {
@@ -655,6 +669,39 @@ pub(super) fn label(text: &str, size: f64, bold: bool, mtm: MainThreadMarker) ->
     };
     label.setFont(Some(&font));
     label
+}
+
+/// Size a label to all of its text at the available width.
+pub(super) fn wrap_label(label: &NSTextField, width: f64, minimum: f64) -> f64 {
+    label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    label.setMaximumNumberOfLines(0);
+    let height = label.cell().map_or(minimum, |cell| {
+        cell.cellSizeForBounds(rect(0.0, 0.0, width, 10000.0))
+            .height
+            .max(minimum)
+            .ceil()
+    });
+    label.setFrameSize(NSSize::new(width, height));
+    height
+}
+
+/// Announce a changed warning or validation error without moving focus.
+pub(super) fn announce(window: &NSWindow, message: &str) {
+    let text = NSString::from_str(message);
+    let priority = NSNumber::new_isize(NSAccessibilityPriorityLevel::Medium.0);
+    // SAFETY: AppKit's notification keys match the string and numeric values;
+    // the window is a live accessibility element on the main thread.
+    unsafe {
+        let info = NSDictionary::from_slices(
+            &[NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey],
+            &[text.as_ref() as &AnyObject, priority.as_ref() as &AnyObject],
+        );
+        NSAccessibilityPostNotificationWithUserInfo(
+            window,
+            NSAccessibilityAnnouncementRequestedNotification,
+            Some(&info),
+        );
+    }
 }
 
 pub(super) fn button(title: &str, action: Sel, target: &AnyObject, mtm: MainThreadMarker) -> Retained<NSButton> {

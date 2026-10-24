@@ -9,9 +9,9 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSBezierPath, NSColor, NSEvent, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSLineBreakMode, NSMutableParagraphStyle, NSParagraphStyleAttributeName,
-    NSResponder, NSStringDrawing, NSTextAlignment, NSView,
+    NSAccessibility, NSAccessibilityGroupRole, NSApplication, NSBezierPath, NSColor, NSEvent, NSFont,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSLineBreakMode, NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName, NSResponder, NSStringDrawing, NSTextAlignment, NSView,
 };
 use objc2_foundation::{MainThreadMarker, NSDictionary, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
@@ -468,7 +468,12 @@ impl ArrangeView {
             _ => "This system".to_owned(),
         };
         self.setAccessibilityElement(true);
+        // SAFETY: this is AppKit's constant group role.
+        self.setAccessibilityRole(Some(unsafe { NSAccessibilityGroupRole }));
         self.setAccessibilityLabel(Some(&NSString::from_str(&label)));
+        self.setAccessibilityHelp(Some(&NSString::from_str(
+            "Screen arrangement. Use [ and ] to choose a peer, then arrow keys to place it beside this system.",
+        )));
         if self.ivars().drag.get().is_none() {
             *self.ivars().scene.borrow_mut() = scene;
         }

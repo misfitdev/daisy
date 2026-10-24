@@ -1211,7 +1211,7 @@ impl AppDelegate {
         let input = field.clone();
         sheet.present(
             window,
-            "Add a peer by IP",
+            "Add a system by address",
             "Enter the peer's local name or IP address for a direct connection.",
             &field,
             Some(&field),

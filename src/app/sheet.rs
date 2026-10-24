@@ -9,12 +9,12 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSLineBreakMode, NSModalResponse, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSBackingStoreType, NSButton, NSColor, NSModalResponse, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSSize, NSString};
 
 use super::coral_color;
-use super::window::{Panel, button, label, rect};
+use super::window::{Panel, announce, button, label, rect, wrap_label};
 
 const WIDTH: f64 = 380.0;
 const MARGIN: f64 = 20.0;
@@ -25,6 +25,8 @@ type Confirm = Box<dyn Fn() -> Result<(), String>>;
 pub struct SheetIvars {
     window: RefCell<Option<Retained<NSWindow>>>,
     error: RefCell<Option<Retained<NSTextField>>>,
+    buttons: RefCell<Option<(Retained<NSButton>, Retained<NSButton>)>>,
+    choice_changed: RefCell<Option<Box<dyn Fn()>>>,
     confirm: RefCell<Option<Confirm>>,
 }
 
@@ -56,11 +58,20 @@ define_class!(
 
         // Radio buttons need a shared action to act as one group.
         #[unsafe(method(choose:))]
-        fn choose(&self, _sender: Option<&AnyObject>) {}
+        fn choose(&self, _sender: Option<&AnyObject>) {
+            if let Some(changed) = self.ivars().choice_changed.borrow().as_ref() {
+                changed();
+            }
+        }
     }
 );
 
 impl Sheet {
+    pub fn on_choice(&self, changed: impl Fn() + 'static) {
+        changed();
+        *self.ivars().choice_changed.borrow_mut() = Some(Box::new(changed));
+    }
+
     /// A sheet whose form controls can target it before it is presented.
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(SheetIvars::default());
@@ -101,15 +112,14 @@ impl Sheet {
 
         let mut y = MARGIN;
         let heading = label(title, 15.0, true, mtm);
-        heading.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-        heading.setFrame(rect(MARGIN, y, content, 22.0));
+        heading.setFrameOrigin(NSPoint::new(MARGIN, y));
+        y += wrap_label(&heading, content, 22.0) + 4.0;
         root.addSubview(&heading);
-        y += 22.0 + 4.0;
         let detail = label(message, 13.0, false, mtm);
         detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        detail.setFrame(rect(MARGIN, y, content, 18.0));
+        detail.setFrameOrigin(NSPoint::new(MARGIN, y));
+        y += wrap_label(&detail, content, 18.0) + 14.0;
         root.addSubview(&detail);
-        y += 18.0 + 14.0;
 
         let size = form.frame().size;
         form.setFrameOrigin(NSPoint::new(MARGIN, y));
@@ -142,6 +152,7 @@ impl Sheet {
         }
         *self.ivars().window.borrow_mut() = Some(window.clone());
         *self.ivars().error.borrow_mut() = Some(error);
+        *self.ivars().buttons.borrow_mut() = Some((primary, cancel));
         *self.ivars().confirm.borrow_mut() = Some(Box::new(confirm));
         // The buttons do not retain their target, so the completion handler
         // keeps the sheet alive until it closes.
@@ -155,7 +166,22 @@ impl Sheet {
     fn show_error(&self, message: &str) {
         if let Some(error) = self.ivars().error.borrow().as_ref() {
             error.setStringValue(&NSString::from_str(message));
+            let height = wrap_label(error, WIDTH - 2.0 * MARGIN, 16.0);
             error.setHidden(false);
+            if let (Some(window), Some((primary, cancel))) = (
+                self.ivars().window.borrow().as_ref(),
+                self.ivars().buttons.borrow().as_ref(),
+            ) {
+                let y = error.frame().origin.y + height + 14.0;
+                primary.setFrameOrigin(NSPoint::new(primary.frame().origin.x, y));
+                cancel.setFrameOrigin(NSPoint::new(cancel.frame().origin.x, y));
+                let size = NSSize::new(WIDTH, y + 32.0 + MARGIN);
+                window.setContentSize(size);
+                if let Some(root) = window.contentView() {
+                    root.setFrameSize(size);
+                }
+                announce(window, message);
+            }
         }
     }
 

@@ -14,11 +14,15 @@ Open Daisy and find the peer under **Peers**. Click its **Remember…** button, 
 
 | Choice | Trust ends when |
 |---|---|
-| Duration (4 days by default) | That many hours or days pass without a connection. Staying connected renews it. |
+| Until unused for (4 days by default) | That many hours or days pass without a connection. Staying connected renews it. |
 | End of session | The session ends. An accidental drop allows 60 seconds to reconnect; a deliberate stop does not. |
 | Forever | You forget the peer. |
 
 Each system keeps its own choice. Both must still trust each other to connect, so the stricter choice wins. When trust expires, pair again with a new code. Trust in an introduced system also ends when trust in its introducer ends.
+
+A fixed deadline set from the command line appears as **N days from pairing**.
+Saving it unchanged keeps that deadline. Choose **Until unused for** to switch to
+expiry after time without a connection instead.
 
 ## Forget a peer
 
