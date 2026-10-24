@@ -243,14 +243,32 @@ fn peer_row_dialogs_are_sheets(
         .set(main)
         .ok()
         .expect("the test sets the main window once");
+    target
+        .ivars()
+        .pairing
+        .set(super::panel::Panel::new(mtm, target))
+        .ok()
+        .expect("the test sets the pairing panel once");
+    *target.ivars().status.borrow_mut() = crate::controller::Status::Connected { peers: Vec::new() };
     // SAFETY: Daisy implements addPeerByAddress: with an optional sender.
     assert!(unsafe {
         NSApplication::sharedApplication(mtm).sendAction_to_from(sel!(addPeerByAddress:), Some(target), None)
     });
     let main = &target.ivars().main.get().unwrap().window;
+    assert!(
+        main.attachedSheet().is_none(),
+        "adding a system must start with discovery"
+    );
+    let pairing = target.ivars().pairing.get().unwrap();
+    assert!(matches!(pairing.state(), Some(super::panel::State::Waiting { .. })));
+    click(&pairing.panel, "By IP…");
+    assert!(
+        !pairing.panel.isVisible(),
+        "direct entry must close the discovery panel"
+    );
     let sheet = main
         .attachedSheet()
-        .expect("adding a peer must ask on a sheet over the main window");
+        .expect("By IP must ask on a sheet over the main window");
     click(&sheet, "Connect");
     assert!(
         main.attachedSheet().is_some(),

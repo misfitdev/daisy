@@ -266,9 +266,7 @@ define_class!(
 
         #[unsafe(method(addPeerByAddress:))]
         fn add_peer_by_address(&self, _sender: Option<&AnyObject>) {
-            if let Some(views) = self.ivars().main.get() {
-                self.ask_peer_address(&views.window);
-            }
+            self.add_a_system();
         }
 
         #[unsafe(method(addSystem:))]
@@ -312,6 +310,7 @@ define_class!(
             let Some(panel) = self.ivars().pairing.get() else {
                 return;
             };
+            let by_ip = matches!(panel.state(), Some(panel::State::Waiting { .. }));
             match panel.state() {
                 Some(panel::State::Waiting { .. }) => {
                     let _ = self.ivars().controller.send(Command::CancelAdding);
@@ -326,6 +325,12 @@ define_class!(
                 _ => {}
             }
             panel.close();
+            if by_ip {
+                self.open_window();
+                if let Some(views) = self.ivars().main.get() {
+                    self.ask_peer_address(&views.window);
+                }
+            }
         }
 
         #[unsafe(method(toggleAlwaysDiscoverable:))]
@@ -1192,8 +1197,8 @@ impl AppDelegate {
         let input = field.clone();
         sheet.present(
             window,
-            "Add peer by address",
-            "Enter the peer's local name or IP address.",
+            "Add a peer by IP",
+            "Enter the peer's local name or IP address for a direct connection.",
             &field,
             Some(&field),
             "Connect",

@@ -190,8 +190,8 @@ impl MainViews {
         let peers_heading = label("Peers", 13.0, true, mtm);
         root.addSubview(&peers_heading);
         let add_peer = button("+", sel!(addPeerByAddress:), target, mtm);
-        add_peer.setAccessibilityLabel(Some(&NSString::from_str("Add peer by address")));
-        add_peer.setToolTip(Some(&NSString::from_str("Add peer by address")));
+        add_peer.setAccessibilityLabel(Some(&NSString::from_str("Add a system")));
+        add_peer.setToolTip(Some(&NSString::from_str("Add a system")));
         root.addSubview(&add_peer);
         let peers = Panel::group(mtm);
         root.addSubview(&peers);

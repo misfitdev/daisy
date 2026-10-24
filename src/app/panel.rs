@@ -157,7 +157,7 @@ impl Panel {
                     countdown(until.saturating_duration_since(Instant::now()).as_secs())
                 ),
                 None,
-                Some("Cancel"),
+                Some("By IP…"),
             ),
             State::NoneJoined => (
                 "No new system joined".to_owned(),
