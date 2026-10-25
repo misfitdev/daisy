@@ -296,7 +296,7 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
         height: 982.0,
     };
     let mut placement = crate::layout::Placement::new(me, vec![screen]);
-    placement.adopt(saved.0, saved.1, &saved.2);
+    placement.adopt(saved.0, saved.1, &saved.2, trust::now().saturating_mul(1000));
     for peer in &peers {
         placement.show(peer.key, vec![screen]);
     }
@@ -342,7 +342,7 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
                 };
                 match command {
                     Command::Shutdown => break,
-                    Command::Place(key, offset) if placement.put(key, offset, trust::now()) => {
+                    Command::Place(key, offset) if placement.put(key, offset, trust::now().saturating_mul(1000)) => {
                         let _ = store.save_arrangement(&placement.message());
                         let layout = placement.group();
                         if layout.unreachable(me).is_empty() {

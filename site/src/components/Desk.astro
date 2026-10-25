@@ -70,15 +70,18 @@ const svg = renderDesk(initialState(), { pointer: false });
   let offset: Vec = { x: 0, y: 0 };
   let lastReal: Vec | null = null;
   let swiping = false;
+  let swipeEpoch = 0;
   let wheel = 0;
   let wheelTimer = 0;
-  let drag: { id: string; grab: Vec; origin: Vec; target: Vec } | null = null;
+  let noticeTimer = 0;
+  let drag: { id: string; grab: Vec; origin: Vec; target: Vec; start: Vec; moved: boolean } | null = null;
   let started = false;
 
   const bodies = new Map<string, Body>();
   let ropes = new Map<string, Rope>();
   let view: Box | null = null;
   let running = false;
+  let motionFrame = 0;
   let calm = 0;
 
   const name = (id: string) => state.screens.find((s) => s.id === id)?.label ?? "This system";
@@ -178,14 +181,33 @@ const svg = renderDesk(initialState(), { pointer: false });
       running = false;
       return;
     }
-    requestAnimationFrame(tick);
+    motionFrame = requestAnimationFrame(tick);
+  }
+
+  function settleMotion() {
+    cancelAnimationFrame(motionFrame);
+    motionFrame = 0;
+    running = false;
+    const screens = state.screens.map((s) => {
+      const goal = drag?.id === s.id ? drag.target : s;
+      Object.assign(body(s), { x: goal.x, y: goal.y, vx: 0, vy: 0 });
+      return { ...s, x: goal.x, y: goal.y };
+    });
+    view = bounds({ ...state, screens });
+    ropes = new Map(adjacentPairs(state).map(({ key, a, b }) => [key, makeRope(key, a.id, b.id, drawnCenter(a), drawnCenter(b))]));
+    svg.getAnimations({ subtree: true }).forEach((animation) => animation.finish());
+    paint();
   }
 
   function wake() {
     calm = 0;
+    if (still.matches) {
+      settleMotion();
+      return;
+    }
     if (running) return;
     running = true;
-    requestAnimationFrame(tick);
+    motionFrame = requestAnimationFrame(tick);
   }
 
   function say(text: string) {
@@ -217,6 +239,7 @@ const svg = renderDesk(initialState(), { pointer: false });
   }
 
   function bloom(id: string) {
+    if (still.matches) return;
     svg.querySelector<SVGGElement>(`.flower-at[data-id="${id}"] .petals`)?.animate(
       [{ transform: "scale(1) rotate(0deg)" }, { transform: "scale(1.09) rotate(8deg)" }, { transform: "scale(1) rotate(0deg)" }],
       { duration: 640, delay: 220, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
@@ -239,32 +262,52 @@ const svg = renderDesk(initialState(), { pointer: false });
     const y = side === "below" ? r.y + r.h - 24 : side === "above" ? r.y + 40 : state.pointer.y - 24;
     g.innerHTML = `<rect x="${x - 128}" y="${y - 17}" width="256" height="30" rx="15" fill="#2E3235"/><text x="${x}" y="${y + 3}" text-anchor="middle">Release the button to cross</text>`;
     g.getAnimations().forEach((a) => a.cancel());
-    g.animate([{ opacity: 1 }, { opacity: 1, offset: 0.7 }, { opacity: 0 }], { duration: 1400, fill: "forwards" });
+    window.clearTimeout(noticeTimer);
+    noticeTimer = 0;
+    if (still.matches) {
+      noticeTimer = window.setTimeout(() => {
+        g.replaceChildren();
+        noticeTimer = 0;
+      }, 1400);
+    } else {
+      g.animate([{ opacity: 1 }, { opacity: 1, offset: 0.7 }, { opacity: 0 }], { duration: 1400, fill: "forwards" });
+    }
     say("Control never crosses while a mouse button is held.");
   }
 
   function swipe(direction: 1 | -1) {
     if (swiping) return;
+    if (still.matches) {
+      const id = state.active;
+      state.space[id] = ((state.space[id] ?? 0) + direction + SPACES) % SPACES;
+      render();
+      say(`${name(id)} moved to Space ${state.space[id] + 1}.`);
+      return;
+    }
     swiping = true;
+    const epoch = ++swipeEpoch;
+    const finish = () => {
+      if (epoch === swipeEpoch) swiping = false;
+    };
     const id = state.active;
     const w = interior(byId(id)).w;
     const out = svg.querySelector<SVGGElement>(`.screen[data-id="${id}"] .space-wrap`)!;
     const ease = "cubic-bezier(0.22, 1, 0.36, 1)";
-    out.animate([{ transform: "translateX(0)" }, { transform: `translateX(${-direction * w}px)` }], { duration: 380, easing: ease, fill: "forwards" }).finished.then(() => {
+    out.animate([{ transform: "translateX(0)" }, { transform: `translateX(${-direction * w}px)` }], { duration: still.matches ? 0 : 380, easing: ease, fill: "forwards" }).finished.then(() => {
+      if (epoch !== swipeEpoch) return;
       const current = state.space[id] ?? 0;
       state.space[id] = (current + direction + SPACES) % SPACES;
       render();
       const next = svg.querySelector<SVGGElement>(`.screen[data-id="${id}"] .space-wrap`)!;
-      next.animate([{ transform: `translateX(${direction * w}px)` }, { transform: "translateX(0)" }], { duration: 420, easing: ease }).finished.then(() => {
-        swiping = false;
-      });
+      next.animate([{ transform: `translateX(${direction * w}px)` }, { transform: "translateX(0)" }], { duration: still.matches ? 0 : 420, easing: ease }).finished.then(finish, finish);
       say(`${name(id)} moved to Space ${state.space[id] + 1}.`);
-    });
+    }, finish);
   }
 
   function onMove(e: PointerEvent) {
     if (drag) {
       const p = toSvg(e);
+      drag.moved ||= p.x !== drag.start.x || p.y !== drag.start.y;
       const raw = { x: p.x - drag.grab.x, y: p.y - drag.grab.y };
       const slot = snapCandidate(state, drag.id, raw.x, raw.y);
       drag.target = slot && Math.hypot(slot.x - raw.x, slot.y - raw.y) < MAGNET ? slot : raw;
@@ -301,7 +344,7 @@ const svg = renderDesk(initialState(), { pointer: false });
     const s = byId(target.dataset.id!);
     const b = body(s);
     const p = toSvg(e);
-    drag = { id: s.id, grab: { x: p.x - b.x, y: p.y - b.y }, origin: { x: s.x, y: s.y }, target: { x: b.x, y: b.y } };
+    drag = { id: s.id, grab: { x: p.x - b.x, y: p.y - b.y }, origin: { x: s.x, y: s.y }, target: { x: b.x, y: b.y }, start: p, moved: false };
     stage.setPointerCapture(e.pointerId);
     root.classList.add("is-dragging");
     wake();
@@ -312,12 +355,12 @@ const svg = renderDesk(initialState(), { pointer: false });
     if (!drag) return;
     const d = drag;
     drag = null;
-    const ok = snap(state, d.id, d.target.x, d.target.y, d.origin);
+    const ok = d.moved ? snap(state, d.id, d.target.x, d.target.y, d.origin) : true;
     root.classList.remove("is-dragging");
     if (stage.hasPointerCapture(e.pointerId)) stage.releasePointerCapture(e.pointerId);
     syncRopes(true);
     render();
-    say(ok ? `${name(d.id)} snapped into place.` : "That spot would overlap another display or cut a system off, so it went back.");
+    if (d.moved) say(ok ? `${name(d.id)} snapped into place.` : "That spot would overlap another display or cut a system off, so it went back.");
   }
 
   function onKey(e: KeyboardEvent) {
@@ -379,6 +422,8 @@ const svg = renderDesk(initialState(), { pointer: false });
       button.disabled = state.screens.length >= 4;
     }
     if (kind === "reset") {
+      swipeEpoch++;
+      swiping = false;
       state = initialState();
       offset = { x: 0, y: 0 };
       bodies.clear();
@@ -491,7 +536,10 @@ const svg = renderDesk(initialState(), { pointer: false });
     start();
   });
   still.addEventListener("change", () => {
-    if (started) return;
+    if (started) {
+      if (still.matches) wake();
+      return;
+    }
     if (!still.matches) {
       if (demoSeen) playDemo();
       return;

@@ -44,6 +44,23 @@ pub fn plausible(displays: Vec<Rect>) -> Option<Vec<Rect>> {
     .then_some(displays)
 }
 
+/// Arrangement generations use Unix milliseconds plus a short logical-clock
+/// allowance. A peer cannot reserve the far future or exhaust local increments.
+pub const MAX_VERSION_AHEAD_MS: u64 = 5 * 60 * 1000;
+const MAX_OFFSET: f64 = MAX_EXTENT * 3.0 * crate::service::MAX_GROUP as f64;
+
+pub fn plausible_offsets<K: Copy + Ord>(offsets: &[(K, Offset)]) -> bool {
+    let keys: std::collections::BTreeSet<_> = offsets.iter().map(|(key, _)| *key).collect();
+    keys.len() == offsets.len()
+        && offsets
+            .iter()
+            .all(|(_, (x, y))| x.is_finite() && y.is_finite() && x.abs() <= MAX_OFFSET && y.abs() <= MAX_OFFSET)
+}
+
+pub fn plausible_arrangement<K: Copy + Ord>(version: u64, offsets: &[(K, Offset)], now: u64) -> bool {
+    version != u64::MAX && version <= now.saturating_add(MAX_VERSION_AHEAD_MS) && plausible_offsets(offsets)
+}
+
 /// Where a system's displays sit in the group's space.
 pub type Offset = (f64, f64);
 
@@ -394,7 +411,7 @@ impl<K: Copy + Ord> Placement<K> {
     /// Makes this a new version authored here, newer than any seen before
     /// even within the same millisecond.
     fn bump(&mut self, now: u64) {
-        self.version = (now.max(self.version.0 + 1), self.me);
+        self.version = (now.max(self.version.0.saturating_add(1)), self.me);
     }
 
     /// Which arrangement this is; changes whenever it does.
@@ -516,6 +533,25 @@ impl<K: Copy + Ord> Placement<K> {
     /// after a display was added, removed or resized, the shortest way clear
     /// and back within reach, as a new version.
     pub fn repair(&mut self, now: u64) -> bool {
+        let me = self.me;
+        self.repair_using(now, |group, key, offset| {
+            group.reconnect(me, key, group.settle(key, offset))
+        })
+    }
+
+    /// Remove overlap from an adopted snapshot without closing gaps left by a
+    /// departed bridge. Those remaining members keep their chosen positions.
+    pub fn repair_overlaps(&mut self, now: u64) -> bool {
+        self.repair_using(now, |group, key, offset| {
+            if group.overlaps(key, offset) {
+                group.settle(key, offset)
+            } else {
+                offset
+            }
+        })
+    }
+
+    fn repair_using(&mut self, now: u64, fix: impl Fn(&Group<K>, K, Offset) -> Offset) -> bool {
         let mut moved = false;
         for key in self.offsets.keys().copied().collect::<Vec<_>>() {
             if key == self.me {
@@ -525,7 +561,7 @@ impl<K: Copy + Ord> Placement<K> {
             let Some(offset) = group.member(key).map(|member| member.offset) else {
                 continue;
             };
-            let fixed = group.reconnect(self.me, key, group.settle(key, offset));
+            let fixed = fix(&group, key, offset);
             if fixed != offset {
                 self.offsets.insert(key, fixed);
                 moved = true;
@@ -539,8 +575,18 @@ impl<K: Copy + Ord> Placement<K> {
 
     /// Adopts another member's arrangement if it is newer; returns whether
     /// anything changed.
-    pub fn adopt(&mut self, version: u64, author: K, offsets: &[(K, Offset)]) -> bool {
-        if (version, author) <= self.version {
+    pub fn adopt(&mut self, version: u64, author: K, offsets: &[(K, Offset)], now: u64) -> bool {
+        // Startup snapshots may describe a subgroup that has not learned about
+        // every placed member yet. Wait rather than erase a present member's
+        // chosen position or disconnect the peer sending the partial snapshot.
+        if !offsets.iter().any(|(key, _)| *key == self.me)
+            || self
+                .displays
+                .keys()
+                .any(|key| self.offsets.contains_key(key) && !offsets.iter().any(|(incoming, _)| incoming == key))
+            || !plausible_arrangement(version, offsets, now)
+            || (version, author) <= self.version
+        {
             return false;
         }
         self.version = (version, author);
@@ -767,6 +813,95 @@ mod tests {
     use super::*;
 
     #[test]
+    fn arrangement_clock_and_coordinate_limits_have_explicit_boundaries() {
+        let offsets = [(0u8, (0.0, 0.0))];
+        assert!(plausible_arrangement(1_000 + MAX_VERSION_AHEAD_MS, &offsets, 1_000));
+        assert!(!plausible_arrangement(1_001 + MAX_VERSION_AHEAD_MS, &offsets, 1_000));
+        assert!(!plausible_arrangement(u64::MAX, &offsets, u64::MAX));
+        assert!(plausible_offsets(&[(0u8, (MAX_OFFSET, -MAX_OFFSET))]));
+        assert!(!plausible_offsets(&[(0u8, (MAX_OFFSET + 1.0, 0.0))]));
+        assert!(!plausible_offsets(&[(0u8, (0.0, 0.0)), (0, (1.0, 0.0))]));
+    }
+
+    #[test]
+    fn partial_snapshots_preserve_every_placed_present_member() {
+        let mut placement = Placement::new(0u8, vec![LAPTOP]);
+        placement.show(1, vec![PEER]);
+        placement.show(2, vec![PEER]);
+        assert!(placement.adopt(
+            10,
+            0,
+            &[(0, (0.0, 0.0)), (1, (1512.0, 0.0)), (2, (0.0, 982.0))],
+            1_000_000,
+        ));
+        let before = placement.message();
+        let partial = [(0, (0.0, 0.0)), (1, (1512.0, 0.0))];
+        assert!(
+            !placement.adopt(11, 1, &partial, 1_000_000),
+            "a partial snapshot must not erase a present peer's chosen placement"
+        );
+        assert_eq!(placement.message(), before, "deferral must also preserve the version");
+        placement.remove(2);
+        assert!(placement.adopt(11, 1, &partial, 1_000_000));
+        placement.show(3, vec![PEER]);
+        assert!(!placement.adopt(12, 1, &partial, 1_000_000));
+        assert_eq!(placement.version(), (12, 1), "unplaced members do not defer a snapshot");
+        assert_eq!(placement.unplaced(), vec![3]);
+    }
+
+    #[test]
+    fn a_partial_startup_snapshot_cannot_erase_the_local_system() {
+        let mut placement = Placement::new(0u8, vec![LAPTOP]);
+        placement.show(1, vec![PEER]);
+        placement.adopt(10, 0, &[(0, (0.0, 0.0)), (1, (1512.0, 0.0))], 1_000_000);
+        placement.adopt(11, 1, &[(1, (0.0, 0.0))], 1_000_000);
+        assert!(
+            placement.group().members.iter().any(|member| member.key == 0),
+            "a valid partial startup snapshot must not erase the local system"
+        );
+        placement.remove(1);
+        assert_eq!(
+            placement.group(),
+            Group::alone(0, vec![LAPTOP]),
+            "a link ending before the full snapshot must leave local routing usable"
+        );
+    }
+
+    #[test]
+    fn remote_arrangements_reject_nonfinite_offsets_without_mutating_placement() {
+        for offset in [
+            (f64::NAN, 0.0),
+            (0.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 0.0),
+            (f64::MAX, 0.0),
+        ] {
+            let mut placement = Placement::new(0u8, vec![LAPTOP]);
+            placement.show(1, vec![PEER]);
+            placement.adopt(10, 0, &[(0, (0.0, 0.0)), (1, (1512.0, 0.0))], 1_000_000);
+            let before = placement.message();
+            assert!(
+                !placement.adopt(11, 1, &[(0, (0.0, 0.0)), (1, offset)], 1_000_000),
+                "nonfinite arrangement must be rejected before replacing usable geometry"
+            );
+            assert_eq!(placement.message(), before);
+        }
+    }
+
+    #[test]
+    fn an_extreme_remote_version_cannot_break_a_later_local_move() {
+        let mut placement = Placement::new(0u8, vec![LAPTOP]);
+        placement.show(1, vec![PEER]);
+        placement.adopt(10, 0, &[(0, (0.0, 0.0)), (1, (1512.0, 0.0))], 1_000_000);
+        let adopted = placement.adopt(u64::MAX, 1, &[(0, (0.0, 0.0)), (1, (1512.0, 0.0))], 1_000_000);
+        let moved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| placement.put(1, (0.0, 982.0), 12)));
+        assert!(
+            moved.is_ok(),
+            "remote version exhaustion must not panic on a local placement"
+        );
+        assert!(!adopted, "an exhausted remote version must not replace the local clock");
+    }
+
+    #[test]
     fn moving_a_bridge_preserves_members_reached_across_small_gaps() {
         let display = rect(0.0, 0.0, 100.0, 100.0);
         let mut group = Group {
@@ -970,12 +1105,12 @@ mod tests {
         b.place(1, Side::Above, 5);
         // b's is the same version but a greater author: it wins on both
         let (version, author, offsets) = b.message();
-        assert!(a.adopt(version, author, &offsets));
+        assert!(a.adopt(version, author, &offsets, 1_000_000));
         let (version, author, offsets) = a.message();
-        assert!(!b.adopt(version, author, &offsets));
+        assert!(!b.adopt(version, author, &offsets, 1_000_000));
         assert_eq!(a.message(), b.message());
         // an older arrangement never undoes a newer one
-        assert!(!a.adopt(1, 9, &[]));
+        assert!(!a.adopt(1, 9, &[], 1_000_000));
         // the next change here outranks what was adopted
         a.place(2, Side::Below, 0);
         assert!(a.message().0 > b.message().0);
@@ -1143,7 +1278,12 @@ mod tests {
         let mut here = Placement::new(0u8, vec![LAPTOP]);
         here.show(1, vec![PEER]);
         here.show(2, vec![PEER]);
-        here.adopt(1, 0, &[(0, (0.0, 0.0)), (1, (1512.0, 0.0)), (2, (2952.0, 0.0))]);
+        here.adopt(
+            1,
+            0,
+            &[(0, (0.0, 0.0)), (1, (1512.0, 0.0)), (2, (2952.0, 0.0))],
+            1_000_000,
+        );
         // 2 is reached only through 1; moving 1 below the laptop would strand it
         here.put(1, (0.0, 982.0), 2);
         let group = here.group();
@@ -1156,7 +1296,12 @@ mod tests {
         let mut here = Placement::new(0u8, vec![LAPTOP]);
         here.show(1, vec![PEER]);
         here.show(2, vec![PEER]);
-        here.adopt(1, 0, &[(0, (0.0, 0.0)), (1, (1512.0, 0.0)), (2, (9000.0, 9000.0))]);
+        here.adopt(
+            1,
+            0,
+            &[(0, (0.0, 0.0)), (1, (1512.0, 0.0)), (2, (9000.0, 9000.0))],
+            1_000_000,
+        );
         // 1 is still brought back within reach though 2 never can be
         assert!(here.put(1, (4000.0, 50.0), 2));
         assert_eq!(offset_of(&here, 1), (1512.0, 50.0));

@@ -10,7 +10,8 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityGroupRole, NSApplication, NSBezierPath, NSColor, NSEvent, NSFont,
+    NSAccessibility, NSAccessibilityGroupRole, NSAccessibilityPostNotification,
+    NSAccessibilityValueChangedNotification, NSApplication, NSBezierPath, NSColor, NSEvent, NSFont,
     NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSLineBreakMode, NSMutableParagraphStyle,
     NSParagraphStyleAttributeName, NSResponder, NSStringDrawing, NSTextAlignment, NSView, NSWindowOcclusionState,
     NSWorkspace,
@@ -404,6 +405,14 @@ define_class!(
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, _event: &NSEvent) {
             let Some(drag) = self.ivars().drag.take() else { return; };
+            if drag.by == (0.0, 0.0) {
+                let size = self.bounds().size;
+                let fit = Fit::of(&self.ivars().scene.borrow(), (size.width, size.height));
+                self.ivars().motion.borrow_mut().frame(fit.scale, fit.origin, self.can_animate());
+                self.wake();
+                self.redraw();
+                return;
+            }
             let by = drag.fit.to_group(drag.by);
             let offset = (drag.origin.0 + by.0, drag.origin.1 + by.1);
             self.ivars().motion.borrow_mut().hold(drag.key, offset);
@@ -689,6 +698,7 @@ impl ArrangeView {
             }
         }
         *self.ivars().scene.borrow_mut() = scene;
+        self.announce_selection();
         self.wake();
         self.refresh_hints();
         if let Some(window) = self.window() {
@@ -718,18 +728,34 @@ impl ArrangeView {
 
     /// Tells VoiceOver which peer the arrow keys now move.
     fn announce_selection(&self) {
-        let scene = self.ivars().scene.borrow();
-        let Some(selected) = self.selected(&scene) else {
-            return;
+        let text = {
+            let scene = self.ivars().scene.borrow();
+            self.selected(&scene)
+                .and_then(|selected| scene.iter().find(|shown| shown.key == selected))
+                .map(|shown| {
+                    let me = scene.iter().find(|shown| shown.me);
+                    let place = me.map_or("", |me| relation(shown, me));
+                    format!("{}, {place} this system. Arrow keys move it.", shown.name)
+                })
         };
-        let Some(shown) = scene.iter().find(|shown| shown.key == selected) else {
-            return;
+        let previous = self.accessibilityValue();
+        let unchanged = match &text {
+            Some(text) => previous
+                .as_ref()
+                .and_then(|value| value.downcast_ref::<NSString>())
+                .is_some_and(|value| value.to_string() == *text),
+            None => previous.is_none(),
         };
-        let me = scene.iter().find(|shown| shown.me);
-        let place = me.map_or("", |me| relation(shown, me));
-        let text = format!("{}, {place} this system. Arrow keys move it.", shown.name);
-        // SAFETY: an NSString is a valid accessibility value
-        unsafe { self.setAccessibilityValue(Some(&NSString::from_str(&text))) };
+        if unchanged {
+            return;
+        }
+        let text = text.as_deref().map(NSString::from_str);
+        // SAFETY: the NSString is an accessibility value, and this NSView lives
+        // on AppKit's main thread. Notify clients only when the value changes.
+        unsafe {
+            self.setAccessibilityValue(text.as_ref().map(|text| text.as_ref() as &AnyObject));
+            NSAccessibilityPostNotification(self, NSAccessibilityValueChangedNotification);
+        }
     }
 
     fn place(&self, key: PublicKey, offset: Offset) {

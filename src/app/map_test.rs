@@ -38,6 +38,26 @@ pub(super) fn run(mtm: MainThreadMarker, target: &AnyObject) {
         "hidden views never start an animation timer"
     );
     drag_and_keyboard(view, &scene);
+    let mut failed = Vec::new();
+    for (name, probe) in [
+        (
+            "click during motion",
+            click_without_drag_during_motion as fn(&ArrangeView, &[Shown]),
+        ),
+        (
+            "selection fallback",
+            selection_follows_departing_peers as fn(&ArrangeView, &[Shown]),
+        ),
+    ] {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe(view, &scene))).is_err() {
+            failed.push(name);
+        }
+        view.ivars().drag.set(None);
+        view.take_placed();
+        view.show(scene.clone());
+    }
+    assert!(failed.is_empty(), "native arrangement regressions: {failed:?}");
+
     view.ivars().keyboard.set(true);
     scene[1].offset.1 = 200.0;
     view.show(scene.clone());
@@ -205,4 +225,62 @@ fn drag_and_keyboard(view: &ArrangeView, scene: &[Shown]) {
         "keyboard input cancels an interrupted drag"
     );
     assert_eq!(view.take_placed(), Some((scene[1].key, (1512.0, 0.0))));
+}
+
+fn click_without_drag_during_motion(view: &ArrangeView, original: &[Shown]) {
+    use objc2_app_kit::{NSEventModifierFlags, NSEventType};
+    let mut scene = original.to_vec();
+    scene[1].offset.1 = 500.0;
+    view.show(scene.clone());
+    view.ivars()
+        .motion
+        .borrow_mut()
+        .bodies
+        .get_mut(&scene[1].key)
+        .unwrap()
+        .y
+        .value = 250.0;
+    let visual = view.visual_scene();
+    let rect = view.fit(&visual).to_view(visual[1].main().unwrap());
+    let point = NSPoint::new(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+    let event = |kind| {
+        NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        kind, view.convertPoint_toView(point, None), NSEventModifierFlags::empty(),
+        0.1, view.window().unwrap().windowNumber(), None, 0, 1, 1.0,
+    ).unwrap()
+    };
+    view.mouse_down(sel!(mouseDown:), &event(NSEventType::LeftMouseDown));
+    view.mouse_up(sel!(mouseUp:), &event(NSEventType::LeftMouseUp));
+    assert!(
+        view.take_placed().is_none(),
+        "a click without dragging must not commit an interpolated animation pose"
+    );
+}
+
+fn selection_follows_departing_peers(view: &ArrangeView, original: &[Shown]) {
+    let mut scene = original.to_vec();
+    let mut other = scene[1].clone();
+    other.key = PublicKey::from_bytes(&[3; 32]).unwrap();
+    other.name = "Other system".to_owned();
+    other.number = 3;
+    other.offset.0 += 1512.0;
+    scene.push(other.clone());
+    view.show(scene.clone());
+    view.select(Some(scene[1].key));
+    scene.remove(1);
+    view.show(scene);
+    assert_eq!(view.selected(&view.ivars().scene.borrow()), Some(other.key));
+    let value: Option<Retained<NSString>> = unsafe { msg_send![view, accessibilityValue] };
+    assert!(
+        value.is_some_and(|value| value.to_string().contains("Other system")),
+        "accessibility value must name the peer that arrow keys now move"
+    );
+    // An unexpected accessibility-client value must also be cleared safely.
+    unsafe { view.setAccessibilityValue(Some(&objc2_foundation::NSNumber::new_u8(1))) };
+    view.show(vec![original[0].clone()]);
+    let value: Option<Retained<NSString>> = unsafe { msg_send![view, accessibilityValue] };
+    assert!(
+        value.is_none(),
+        "no peer selection may retain a departed peer's accessibility value"
+    );
 }
