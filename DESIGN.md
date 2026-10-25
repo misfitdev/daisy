@@ -418,6 +418,8 @@ language includes spring settling after pointer drops, smooth reframing, a brief
 new members. Dragging holds its coordinate mapping until release. Keyboard
 placement and Reduce Motion are immediate; settled and hidden views stop their
 timer. Motion changes only the drawn pose, never the agreed layout or routing.
+Clicking a moving peer selects it without committing the intermediate pose.
+Accessibility selection follows peer departures and reports value changes.
 At roomy scales, each display has a flower: yellow centers mean a live connection
 and gray means no live session. Compact displays use their matching identifiers.
 Flat anodized-gray U links join nearby live displays, using the same reachability

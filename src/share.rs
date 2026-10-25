@@ -279,7 +279,7 @@ where
     let me = control.state.lock().unwrap_or_else(|e| e.into_inner()).me();
     let mut placement = crate::layout::Placement::new(me, displays.borrow_and_update().clone());
     if let Some((version, author, offsets)) = &group.saved {
-        placement.adopt(*version, *author, offsets);
+        placement.adopt(*version, *author, offsets, now_ms());
     }
     let mut kept = placement.version();
     let mut confirmed = group.saved_confirmation.clone();
@@ -622,6 +622,7 @@ where
                     );
                 }
                 log_transition("incoming", me, Some(peer), &message, &control);
+                let mut repaired = false;
                 let outcome: Result<()> = (|| {
                     match message {
                         Message::FilesOffer { offer } => {
@@ -706,7 +707,9 @@ where
                             let _ = group.trust.send((peer, message));
                         }
                     Message::Arrangement { version, author, offsets } => {
-                            if placement.adopt(version, author, &offsets) {
+                            anyhow::ensure!(crate::layout::plausible_arrangement(version, &offsets, now_ms()), "the peer sent an invalid screen arrangement");
+                            if placement.adopt(version, author, &offsets, now_ms()) {
+                                repaired = placement.repair_overlaps(now_ms());
                                 rearranged = true;
                             }
                         }
@@ -841,6 +844,7 @@ where
                 if rearranged {
                     review_changed = true;
                     rearranged = false;
+                    if repaired { broadcast(&links, arrangement(&placement), &mut ended); }
                     for (key, already_placed) in std::mem::take(&mut arrived) {
                         if recall(&mut placement, &mut layouts, &mut confirmed, &mut restored, key, me) {
                             let _ = group.save_layouts.send(layouts.clone());
@@ -2295,6 +2299,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_overlapping_peer_arrangement_is_repaired_before_reaching_routing() {
+        let ((), _, arranged) = arranging(true, |mut scene: Scene| async move {
+            scene
+                .peer
+                .send(&Message::Displays { displays: vec![SCREEN] })
+                .await
+                .unwrap();
+            settle(&mut scene.peer, 100).await;
+            scene
+                .peer
+                .send(&Message::Arrangement {
+                    version: now_ms().saturating_add(10_000),
+                    author: scene.them,
+                    offsets: vec![(scene.me, (0.0, 0.0)), (scene.them, (0.0, 0.0))],
+                })
+                .await
+                .unwrap();
+            let corrected = next_arrangement(&mut scene.peer).await;
+            let Message::Arrangement { author, offsets, .. } = corrected else {
+                unreachable!()
+            };
+            assert_eq!(author, scene.me);
+            assert!(
+                offsets
+                    .iter()
+                    .any(|(key, offset)| *key == scene.them && *offset != (0.0, 0.0)),
+                "the corrected positions must also reach the peer"
+            );
+            settle(&mut scene.peer, 101).await;
+        })
+        .await;
+        assert_ne!(
+            arranged.last(),
+            Some(&Some((0.0, 0.0))),
+            "an overlapping snapshot must be repaired before it is published to routing"
+        );
+    }
+
+    #[tokio::test]
+    async fn adopting_a_snapshot_preserves_gaps_left_by_a_departed_bridge() {
+        let ((), _, arranged) = arranging(true, |mut scene: Scene| async move {
+            scene
+                .peer
+                .send(&Message::Displays { displays: vec![SCREEN] })
+                .await
+                .unwrap();
+            settle(&mut scene.peer, 102).await;
+            scene
+                .peer
+                .send(&Message::Arrangement {
+                    version: now_ms().saturating_add(10_000),
+                    author: scene.them,
+                    offsets: vec![(scene.me, (0.0, 0.0)), (scene.them, (5000.0, 0.0))],
+                })
+                .await
+                .unwrap();
+            settle(&mut scene.peer, 103).await;
+        })
+        .await;
+        assert_eq!(
+            arranged.last(),
+            Some(&Some((5000.0, 0.0))),
+            "normalization must not silently move a disconnected member"
+        );
+    }
+
+    #[tokio::test]
     async fn a_newer_arrangement_from_the_peer_moves_the_screens() {
         let ((), agreed, arranged) = arranging(true, |mut scene: Scene| async move {
             let peer_key = scene.them;
@@ -2304,7 +2375,7 @@ mod tests {
                 .await
                 .unwrap();
             let newer = Message::Arrangement {
-                version: u64::MAX / 2,
+                version: now_ms().saturating_add(10_000),
                 author: peer_key,
                 offsets: vec![(scene.me, (0.0, 0.0)), (peer_key, (1000.0, 0.0))],
             };
@@ -2387,7 +2458,7 @@ mod tests {
                 .unwrap();
             settle(&mut scene.peer, 1).await;
             let newer = Message::Arrangement {
-                version: u64::MAX / 2,
+                version: now_ms().saturating_add(10_000),
                 author: peer_key,
                 offsets: vec![(scene.me, (0.0, 0.0)), (peer_key, (0.0, 500.0))],
             };
@@ -3003,7 +3074,12 @@ mod tests {
         remote_task.abort();
         let saved = kept.recv().await.unwrap();
         let mut placement = crate::layout::Placement::new(me, vec![SCREEN]);
-        placement.adopt(saved.version, saved.author, &[(me, (0.0, 0.0)), (peer, (0.0, 500.0))]);
+        placement.adopt(
+            saved.version,
+            saved.author,
+            &[(me, (0.0, 0.0)), (peer, (0.0, 500.0))],
+            now_ms(),
+        );
         placement.show(peer, vec![SCREEN]);
         assert!(
             !crate::setup::check_arrangement(&placement.group(), me, placement.version(), Some(&saved)),

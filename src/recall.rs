@@ -90,7 +90,7 @@ impl<K: Copy + Ord> Memory<K> {
                 && placed.len() == keys.len()
                 && entry.offsets.len() == keys.len()
                 && keys.iter().all(|key| placed.contains_key(key))
-                && placed.values().all(|(x, y)| x.is_finite() && y.is_finite())
+                && crate::layout::plausible_offsets(&entry.offsets)
         });
         let excess = self.remembered.len().saturating_sub(MAX_SETUPS);
         self.remembered.drain(..excess);
@@ -100,7 +100,11 @@ impl<K: Copy + Ord> Memory<K> {
     /// Keeps `offsets` as the arrangement for `setup`, as the most recently
     /// used. Returns whether that changed what is remembered.
     pub fn remember(&mut self, setup: Setup<K>, offsets: &BTreeMap<K, Offset>) -> bool {
-        if setup.len() < 2 {
+        if setup.len() < 2
+            || !crate::layout::plausible_offsets(
+                &offsets.iter().map(|(key, offset)| (*key, *offset)).collect::<Vec<_>>(),
+            )
+        {
             return false;
         }
         let Some(offsets) = setup
@@ -243,7 +247,7 @@ mod tests {
         let mut extra = valid.clone();
         extra.offsets.push((C, (0.0, 0.0)));
         invalid.push(extra);
-        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
             let mut bad = valid.clone();
             bad.offsets[0].1.0 = value;
             invalid.push(bad);

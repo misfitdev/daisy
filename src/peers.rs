@@ -286,9 +286,13 @@ impl PeerStore {
         let offsets = file
             .members
             .iter()
-            .filter_map(|placed| Some((PublicKey::from_hex(&placed.key)?, (placed.x, placed.y))))
-            .collect();
-        Some((file.version, author, offsets))
+            .map(|placed| Some((PublicKey::from_hex(&placed.key)?, (placed.x, placed.y))))
+            .collect::<Option<Vec<_>>>()?;
+        crate::layout::plausible_arrangement(file.version, &offsets, trust::now().saturating_mul(1000)).then_some((
+            file.version,
+            author,
+            offsets,
+        ))
     }
 
     pub fn confirmation(&self) -> Option<crate::setup::Confirmation<PublicKey>> {
@@ -1076,6 +1080,45 @@ mod tests {
             },
             signature: vec![0; 64],
         }
+    }
+
+    #[test]
+    fn malformed_current_arrangements_are_not_restored() {
+        let (store, _dir) = store();
+        let mut file = ArrangementFile {
+            version: 10,
+            author: key(1).to_hex(),
+            members: vec![Placed {
+                key: key(1).to_hex(),
+                x: 0.0,
+                y: 0.0,
+            }],
+        };
+        for (version, member_key, x) in [
+            (10, key(1).to_hex(), f64::NAN),
+            (10, key(1).to_hex(), f64::MAX),
+            (u64::MAX, key(1).to_hex(), 0.0),
+            (10, "invalid-key".to_owned(), 0.0),
+        ] {
+            file.version = version;
+            file.members[0].key = member_key;
+            file.members[0].x = x;
+            std::fs::write(&store.arrangement, toml::to_string(&file).unwrap()).unwrap();
+            assert_eq!(store.arrangement(), None);
+        }
+        file.version = 10;
+        file.members[0] = Placed {
+            key: key(1).to_hex(),
+            x: 0.0,
+            y: 0.0,
+        };
+        file.members.push(Placed {
+            key: key(1).to_hex(),
+            x: 1.0,
+            y: 0.0,
+        });
+        std::fs::write(&store.arrangement, toml::to_string(&file).unwrap()).unwrap();
+        assert_eq!(store.arrangement(), None);
     }
 
     #[test]
