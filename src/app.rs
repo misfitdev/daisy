@@ -266,7 +266,15 @@ define_class!(
 
         #[unsafe(method(addPeerByAddress:))]
         fn add_peer_by_address(&self, _sender: Option<&AnyObject>) {
-            if let Some(views) = self.ivars().main.get() {
+            if self.ivars().adding.get() {
+                if let Some(panel) = self.ivars().pairing.get()
+                    && let Some(state) = panel.state()
+                {
+                    panel.show(state, true);
+                }
+            } else if !self.add_a_system()
+                && let Some(views) = self.ivars().main.get()
+            {
                 self.ask_peer_address(&views.window);
             }
         }
@@ -282,6 +290,14 @@ define_class!(
                 return;
             };
             match panel.state() {
+                Some(panel::State::Waiting { .. }) => {
+                    let _ = self.ivars().controller.send(Command::CancelAdding);
+                    panel.close();
+                    self.open_window();
+                    if let Some(views) = self.ivars().main.get() {
+                        self.ask_peer_address(&views.window);
+                    }
+                }
                 Some(panel::State::EnterCode { peer, .. }) => {
                     let text = panel.field.stringValue().to_string();
                     if crate::pairing::PairingCode::parse(text.trim()).is_none() {
@@ -294,7 +310,9 @@ define_class!(
                     }
                     panel.show(panel::State::Checking { peer }, false);
                 }
-                Some(panel::State::NoneJoined) => self.add_a_system(),
+                Some(panel::State::NoneJoined) => {
+                    self.add_a_system();
+                }
                 Some(panel::State::Connected { peer }) => {
                     panel.close();
                     self.open_window();
@@ -1051,7 +1069,11 @@ impl AppDelegate {
                         .unwrap_or_else(|| "Peer".to_owned())
                 })
                 .collect();
-            views.show_check(arranged.as_ref().is_some_and(|view| view.check.is_some()), &unreachable);
+            views.show_check(
+                arranged.as_ref().is_some_and(|view| view.check.is_some()),
+                arranged.as_ref().is_some_and(|view| view.restored),
+                &unreachable,
+            );
             views.show_status(if copy.connected { "" } else { &copy.title }, &copy.detail);
             views.arrange.show(shown);
         }
@@ -1063,20 +1085,21 @@ impl AppDelegate {
     }
 
     /// Opens this group to a new system for a short while, from the menu.
-    fn add_a_system(&self) {
+    fn add_a_system(&self) -> bool {
         let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
         if !crate::setup::can_add_system(
             is_active(&self.ivars().status.borrow()),
             always,
             self.ivars().adding.get(),
         ) {
-            return;
+            return false;
         }
         let _ = self.ivars().controller.send(Command::AddSystem);
         if let Some(panel) = self.ivars().pairing.get() {
             let until = std::time::Instant::now() + controller::ADD_SYSTEM_WINDOW;
             panel.show(panel::State::Waiting { until }, true);
         }
+        true
     }
 
     /// Keeps the pairing panel current: its countdown, and closing
@@ -1188,8 +1211,8 @@ impl AppDelegate {
         let input = field.clone();
         sheet.present(
             window,
-            "Add peer by address",
-            "Enter the peer's local name or IP address.",
+            "Add a system by address",
+            "Enter the peer's local name or IP address for a direct connection.",
             &field,
             Some(&field),
             "Connect",
@@ -1273,16 +1296,13 @@ impl AppDelegate {
         let rows: Vec<window::PeerRow> = peers
             .iter()
             .map(|peer| {
-                let introducer = peer
-                    .introduced_by
-                    .and_then(|key| peers.iter().find(|other| other.key == key))
-                    .map(|other| other.name.as_str());
                 let live = links.get(&peer.key).is_some();
                 window::PeerRow {
+                    number: 2 + peers.iter().filter(|other| other.key < peer.key).count(),
                     name: peer.name.clone(),
                     detail: format!(
                         "{} · {}",
-                        peer_detail(introducer, links.get(&peer.key)),
+                        peer_detail(links.get(&peer.key)),
                         expiry_caption(peer.policy.expiry(peer.paired_at, peer.last_seen, live, now))
                     ),
                     fingerprint: peer.key.fingerprint(),
@@ -1517,13 +1537,10 @@ fn run_controller(controller: Handle, name: String, preview: bool, home: PathBuf
     Ok(())
 }
 
-/// The line under a peer's name: its fingerprint, who introduced it, and
+/// The line under a peer's name:
 /// how its link is doing while it runs.
-fn peer_detail(introducer: Option<&str>, link: Option<&Link>) -> String {
+fn peer_detail(link: Option<&Link>) -> String {
     let mut parts = Vec::new();
-    if let Some(introducer) = introducer {
-        parts.push(format!("via {introducer}"));
-    }
     match link {
         Some(link) if link.peer_locked => parts.push("Locked".to_owned()),
         Some(Link {
@@ -1531,6 +1548,9 @@ fn peer_detail(introducer: Option<&str>, link: Option<&Link>) -> String {
         }) => parts.push(format!("Connected, {ms} ms")),
         Some(_) => parts.push("Connected".to_owned()),
         None => parts.push("Not connected".to_owned()),
+    }
+    if link.is_some_and(|link| link.peer_in_control && !link.peer_locked) {
+        parts.push("In use".to_owned());
     }
     parts.join(" · ")
 }
@@ -1763,13 +1783,10 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_row_says_who_introduced_it_and_how_its_link_is() {
-        assert_eq!(peer_detail(None, None), "Not connected");
-        assert_eq!(
-            peer_detail(Some("Laptop"), Some(&measured(Some(12), false))),
-            "via Laptop · Connected, 12 ms"
-        );
-        assert_eq!(peer_detail(None, Some(&measured(None, true))), "Locked");
+    fn a_peer_row_reports_connection_state_without_introducer_wording() {
+        assert_eq!(peer_detail(None), "Not connected");
+        assert_eq!(peer_detail(Some(&measured(Some(12), false))), "Connected, 12 ms");
+        assert_eq!(peer_detail(Some(&measured(None, true))), "Locked");
     }
 
     #[test]

@@ -8,7 +8,7 @@ A group is up to eight systems, each holding one encrypted session with every ot
 
 Every member listens and advertises with Bonjour, and connects to each trusted member it finds; for each pair, the lower public key opens the connection. For pairing, a group member opens the connection to a system with no peers; between two systems with no peers, the one open to pairing longer opens, and random nonces break a tie. A direct address remains available.
 
-Each member shares its displays and one agreed arrangement: an offset per member that places its displays in a shared space, never overlapping another member's. The greatest `(version, author)` wins everywhere, so every member converges on the same arrangement whoever changes it. A member that joins without a position is placed on the side its pairing chose, clear of the rest. The arrangement is saved, so a member returns where it was placed.
+Each member shares its displays and one agreed arrangement: an offset per member that places its displays in a shared space, never overlapping another member's and never out of the pointer's reach of this system. A drop or display change that would strand a member searches for a clear, reachable edge placement; a drag keeps its current position if no such placement fits. A member already out of reach does not hold a drop back. The greatest `(version, author)` wins everywhere, so every member converges on the same arrangement whoever changes it. A member that joins without a position is placed on the side its pairing chose, clear of the rest. The arrangement is saved, so a member returns where it was placed. Each system also keeps the arrangement last confirmed for each set of members and displays, including ones other members confirmed. When a member joins or its displays change and the resulting set is one it kept, the group starts from that arrangement, counted as confirmed. Members whose displays match the set a person last confirmed stay where they are, and an arrangement that was itself recalled never holds back the next; if the kept arrangement would move them relative to each other, only the arriving member is placed, beside the member it was nearest. A member leaving never starts from a kept arrangement. No message carries kept arrangements: every member of a set was present when it was confirmed and kept it then.
 
 ## Layers
 
@@ -19,12 +19,14 @@ Each member shares its displays and one agreed arrangement: an offset per member
 | Controller | `controller` | Owns the background Tokio runtime, saved setup and typed command/event channels |
 | Connection service | `service` | Shared listen/connect, pairing, trust and input-sharing orchestration used by both UI and CLI |
 | Launcher | `launcher` | Relaunches a bundled CLI invocation as `Daisy.app` so macOS applies the app's permissions; stops it when its terminal goes away |
-| Identity | `identity`, `device`, `peers`, `trust`, `introduce` | This system's long-term keys, trusted peers, how long each stays trusted, and signed introductions and revocations |
+| Identity | `identity`, `device`, `peers`, `trust`, `introduce`, `group_trust` | This system's long-term keys, trusted peers, how long each stays trusted, and sender-signed shared membership records |
 | Session | `session` | Noise handshake, encrypted framing and split send/receive halves |
 | Trust | `pairing` | Pinned keys and pairing through a one-time code |
 | Wire | `protocol` | Messages; see [protocol.md](protocol.md) |
 | Control | `control` | Group-wide ownership and simultaneous-use settling |
 | Layout | `layout` | Display geometry, the agreed arrangement, snapping, and where the pointer goes next |
+| Arrangement motion | `arrangement_motion` | Presentation-only springs, arrival and control emphasis, and rigid chain geometry; never changes routing or shared placement |
+| Recall | `recall` | The arrangement last confirmed for each set of members and displays, and when to start from it |
 | Sharing | `share` | One input core for the group, with a link per member: claims, routing, arrangement, bounded queues, heartbeat and cleanup |
 | Developer diagnostics | `diagnostics`, `macos::diagnostics` | Dynamic trace requests, bounded event capture and encrypted streaming, local collector socket, foreground observations |
 | Latency | `latency` | Round trips per link from heartbeat pings and pongs: a recent average and percentiles |
@@ -76,6 +78,14 @@ launches.
 - **Event-tap thread**: owns the CoreFoundation run loop. Its callback makes decisions under nonblocking locks and hands messages to the runtime through a bounded channel. It never waits, performs I/O, starts a process or lets a panic escape into CoreGraphics.
 - **Swipe-poster thread** on macOS 27: replays swipe steps at least 16 ms apart and coalesces progress that arrives faster, preserving order without stalling the session.
 
+The arrangement has a separate visual pose driven by a bounded spring model.
+Its main-thread timer runs in common run-loop modes only while the window is
+visible and motion is active. Hidden, minimized or occluded windows stop the
+timer; settled views sleep. Pointer dragging holds its coordinate mapping until
+the drop; keyboard placement and Reduce Motion finish the visual pose immediately.
+The shared layout remains authoritative throughout. Chain links use the same
+adjacency geometry as pointer reachability and require live session state.
+
 The network queues and event-tap queue are bounded. If callback state is contended or the local input queue fills, the callback passes input through locally, reclaims local routing when possible and raises a lock-free overflow signal. The runtime then ends the session. Local control and explicit disconnect win over lagging input.
 
 The connection session owns the lifetime of every background input core. Core
@@ -93,7 +103,7 @@ side remains held.
 1. The controller starts automatic listening and browsing, or an optional direct connection from saved `SessionSettings`.
 2. Noise `XX` establishes an encrypted channel and exposes the remote static key. Both sides exchange and verify `DeviceProof`, signed over its handshake hash and sender role with their Secure Enclave device keys, before settling trust.
 3. The trust layer accepts an already-pinned key or, only while both peers explicitly allow pairing, runs SPAKE2 using the six-digit code as input.
-4. Both sides exchange `Layout`, then catch each other up on introductions and revocations, and the link joins the input core. The first link starts the core: one event tap, one injector and one owner of control for every link; the last link to end stops it.
+4. Both sides exchange `Layout`, then catch each other up on shared membership, retention choices and removal tombstones, and the link joins the input core. The first link starts the core: one event tap, one injector and one owner of control for every link; the last link to end stops it.
 5. The event tap on the system in use observes local input. While control is local, events pass through untouched.
 6. Pushing the pointer off one of this system's displays toward another member's display, within 40 points, hides and pins the local pointer, then sends `Enter` to that member with the exact entry point. Control never crosses while a mouse button is held, and never onto a locked member.
 7. Input is swallowed locally and forwarded. A key pressed before crossing keeps its release on the system it was pressed on, so it cannot become stuck remotely.
@@ -115,9 +125,11 @@ The command-line `connect` command runs `service::connect` as a loop. Once a ses
 
 - `identity`: this system's long-term private key pair.
 - `device-identity`: a reference to the non-exportable Secure Enclave P-256 key in the Data Protection Keychain.
-- `trust-v5/peers.toml`: one entry per trusted peer, including key, name, trust policy, pairing time, last-seen time, its signing key and who introduced it.
-- `trust-v5/revocations.toml`: signed revocations this system knows, to pass on.
+- `trust-v5/peers.toml`: one entry per trusted peer, including key, name, trust policy, pairing time, last-seen time, its signing key and independent admission time. The same atomic file stores shared retention choices, removal history and tombstones.
+- `trust-v5/revocations.toml`: the legacy signed removal journal; known removals are carried in shared membership records.
 - `trust-v5/arrangement.toml`: the newest group arrangement it saw.
+- `trust-v5/layouts.toml`: the arrangement last confirmed for each set of
+  members and displays, at most 32, the least recently used dropped first.
 - `trust-v5/arrangement-confirmation.toml`: checked member display sets and
   their arrangement version, retained across reconnects and restarts.
 - `stats.toml`: each running link's round trips, for `daisy stats`.
@@ -174,4 +186,4 @@ pin escaping on the driving system, the cursor straying from replayed moves on
 the driven system, motion resuming after a stall on either side, input queued
 behind the sharing loop, and a peer message that took long to handle. `just
 trace` runs the collector in the background until `just trace-stop`;
-`just trace-summary` lists what a trace recorded.
+`just trace-summary` lists event counts and a chronological timeline, including delayed input with its queue wait, event kind, peer and control generation. It reads sparse records without requiring every event to have the same fields, and reports invalid records it skips.

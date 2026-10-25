@@ -18,21 +18,7 @@ pub struct Confirmation<K> {
 
 impl<K: Copy + Ord> Confirmation<K> {
     pub fn new(group: &crate::layout::Group<K>, (version, author): (u64, K)) -> Self {
-        let mut members: Vec<_> = group
-            .members
-            .iter()
-            .map(|m| {
-                let mut displays = m.displays.clone();
-                displays.sort_by(|a, b| {
-                    a.x.total_cmp(&b.x)
-                        .then(a.y.total_cmp(&b.y))
-                        .then(a.width.total_cmp(&b.width))
-                        .then(a.height.total_cmp(&b.height))
-                });
-                (m.key, displays)
-            })
-            .collect();
-        members.sort_by_key(|(key, _)| *key);
+        let members = crate::recall::setup(group.members.iter().map(|m| (m.key, m.displays.as_slice())));
         Self {
             version,
             author,

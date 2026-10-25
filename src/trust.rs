@@ -1,9 +1,8 @@
-//! How long this system keeps trusting a peer it paired with.
+//! Shared retention policies for group members.
 //!
 //! Trust is never forever unless asked for: a peer paired once, long ago,
-//! must not be able to come back and take over the keyboard. Each side
-//! applies its own policy to the other, and a session needs both to trust
-//! each other, so the stricter of the two always wins.
+//! must not be able to come back and take over the keyboard. Group members
+//! replicate policy choices and activity; each enforces expiry on its clock.
 
 use std::fmt;
 use std::str::FromStr;

@@ -65,6 +65,9 @@ pub(super) fn run() {
     update_controls_report_and_follow_the_switch(mtm, &target);
     an_update_relaunch_closes_the_advanced_sheet(mtm, &target);
     arrangement_confirmation(mtm);
+    super::map::native_presentation(mtm, &target);
+    form_sheets_wrap_and_grow(mtm, &target);
+    retention_edits_keep_deadlines_explicit(mtm, &target);
 }
 
 /// macOS refuses to quit an app with a sheet open, so an update's relaunch
@@ -139,45 +142,44 @@ fn arrangement_confirmation(mtm: objc2_foundation::MainThreadMarker) {
         views.question.isHidden() && store.confirmation().is_some()
     });
     let confirmed = store.confirmation().unwrap();
+    assert!(
+        !views.unreachable.isHidden() && views.unreachable.stringValue().to_string().contains("Studio"),
+        "confirming placement must not hide an unreachable peer"
+    );
     views.window.close();
     let layout = target.ivars().arranged.borrow().as_ref().unwrap().layout.clone();
     target.handle_event(Event::Arranged(crate::share::ArrangementView {
         unreachable: layout.unreachable(me),
         layout: layout.clone(),
         check: None,
+        restored: false,
     }));
     assert!(
         !views.window.isVisible(),
         "an unchanged reconnect leaves the window alone"
     );
+    // a drop out of reach lands within it, so it confirms without asking
     target
         .ivars()
         .controller
         .send(Command::Place(peer, (6000.0, 0.0)))
         .unwrap();
-    wait_for("a newly stranded arrangement", || {
+    wait_for("a drop out of reach to land within it", || {
         drain();
-        !views.question.isHidden()
+        store
+            .confirmation()
+            .is_some_and(|saved| saved.version > confirmed.version)
+            && target
+                .ivars()
+                .arranged
+                .borrow()
+                .as_ref()
+                .is_some_and(|arranged| arranged.unreachable.is_empty())
     });
-    target
-        .ivars()
-        .controller
-        .send(Command::Place(peer, (1512.0, 0.0)))
-        .unwrap();
-    wait_for("a fixing drag to dismiss", || {
-        drain();
-        views.question.isHidden()
-    });
-    assert!(store.confirmation().unwrap().version > confirmed.version);
+    assert!(views.question.isHidden());
     assert!(
-        target
-            .ivars()
-            .arranged
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .unreachable
-            .is_empty()
+        views.unreachable.isHidden(),
+        "the warning clears when every peer is reachable"
     );
     target.ivars().controller.shutdown().unwrap();
     views.window.close();
@@ -216,7 +218,7 @@ fn peer_row_dialogs_are_sheets(
         side: crate::input::Side::Right,
         side_chosen: 0,
         signing: None,
-        introduced_by: None,
+        admitted_at: now,
     }];
 
     let open = |action| {
@@ -252,14 +254,72 @@ fn peer_row_dialogs_are_sheets(
         .set(main)
         .ok()
         .expect("the test sets the main window once");
+    target
+        .ivars()
+        .pairing
+        .set(super::panel::Panel::new(mtm, target))
+        .ok()
+        .expect("the test sets the pairing panel once");
+    let main = &target.ivars().main.get().unwrap().window;
+    for (status, always) in [
+        (crate::controller::Status::Idle, false),
+        (crate::controller::Status::Connected { peers: Vec::new() }, true),
+    ] {
+        *target.ivars().status.borrow_mut() = status;
+        target.ivars().settings.borrow_mut().always_discoverable = always;
+        // SAFETY: Daisy implements this action with an optional sender.
+        assert!(unsafe {
+            NSApplication::sharedApplication(mtm).sendAction_to_from(sel!(addPeerByAddress:), Some(target), None)
+        });
+        let sheet = main
+            .attachedSheet()
+            .expect("direct address entry must remain available without discovery");
+        click(&sheet, "Cancel");
+        wait_for("Cancel to close direct address entry", || {
+            main.attachedSheet().is_none()
+        });
+    }
+    target.ivars().settings.borrow_mut().always_discoverable = false;
+    *target.ivars().status.borrow_mut() = crate::controller::Status::Connected { peers: Vec::new() };
     // SAFETY: Daisy implements addPeerByAddress: with an optional sender.
     assert!(unsafe {
         NSApplication::sharedApplication(mtm).sendAction_to_from(sel!(addPeerByAddress:), Some(target), None)
     });
     let main = &target.ivars().main.get().unwrap().window;
+    assert!(
+        main.attachedSheet().is_none(),
+        "adding a system must start with discovery"
+    );
+    let pairing = target.ivars().pairing.get().unwrap();
+    assert!(matches!(pairing.state(), Some(super::panel::State::Waiting { .. })));
+    let escape = objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        objc2_app_kit::NSEventType::KeyDown,
+        objc2_foundation::NSPoint::new(0.0, 0.0),
+        objc2_app_kit::NSEventModifierFlags::empty(),
+        0.0,
+        pairing.panel.windowNumber(),
+        None,
+        &NSString::from_str("\u{1b}"),
+        &NSString::from_str("\u{1b}"),
+        false,
+        53,
+    ).unwrap();
+    assert!(pairing.panel.contentView().unwrap().performKeyEquivalent(&escape));
+    assert!(!pairing.panel.isVisible(), "Escape must dismiss discovery");
+    assert!(main.attachedSheet().is_none(), "Escape must not open address entry");
+    target.add_a_system();
+    click(&pairing.panel, "By Address…");
+    assert!(
+        !pairing.panel.isVisible(),
+        "direct entry must close the discovery panel"
+    );
     let sheet = main
         .attachedSheet()
-        .expect("adding a peer must ask on a sheet over the main window");
+        .expect("By Address must ask on a sheet over the main window");
+    assert_wrapped_text_fits(
+        &sheet,
+        "Enter the peer's local name or IP address for a direct connection.",
+    );
     click(&sheet, "Connect");
     assert!(
         main.attachedSheet().is_some(),
@@ -285,6 +345,111 @@ fn peer_row_dialogs_are_sheets(
             _ => false,
         })
     });
+}
+
+fn assert_wrapped_text_fits(window: &objc2_app_kit::NSWindow, text: &str) {
+    use objc2::MainThreadOnly;
+    use objc2_app_kit::{NSTextField, NSView};
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+    fn find(view: &NSView, text: &str) -> Option<objc2::rc::Retained<NSTextField>> {
+        use objc2::Message;
+        view.subviews().iter().find_map(|child| {
+            child
+                .downcast_ref::<NSTextField>()
+                .filter(|field| field.stringValue().to_string() == text)
+                .map(|field| field.retain())
+                .or_else(|| find(&child, text))
+        })
+    }
+    let field = find(&window.contentView().unwrap(), text).expect("the full text is in the sheet");
+    let reference = NSTextField::wrappingLabelWithString(&NSString::from_str(text), window.mtm());
+    reference.setFont(field.font().as_deref());
+    let expected = reference
+        .cell()
+        .unwrap()
+        .cellSizeForBounds(NSRect::new(
+            NSPoint::ZERO,
+            NSSize::new(field.frame().size.width, 10000.0),
+        ))
+        .height;
+    assert!(field.frame().size.height >= expected, "text must fit: {text}");
+}
+
+fn form_sheets_wrap_and_grow(mtm: objc2_foundation::MainThreadMarker, target: &super::AppDelegate) {
+    use objc2::MainThreadOnly;
+    use objc2_app_kit::NSView;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let parent = super::window::MainViews::new(mtm, target);
+    let form = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::ZERO, NSSize::new(340.0, 24.0)));
+    let sheet = super::sheet::Sheet::new(mtm);
+    let title = "Remember the system with a very long name that needs more than one line?";
+    let message = "Enter the peer's local name or IP address for a direct connection.";
+    let error = "The address could not be saved. Check that Daisy can write its data folder, then try again without closing this dialog or losing the address you entered.";
+    sheet.present(&parent.window, title, message, &form, None, "Save", move || {
+        Err(error.to_owned())
+    });
+    let window = parent.window.attachedSheet().unwrap();
+    assert_wrapped_text_fits(&window, title);
+    assert_wrapped_text_fits(&window, message);
+    let height = window.contentView().unwrap().frame().size.height;
+    click(&window, "Save");
+    assert_wrapped_text_fits(&window, error);
+    assert!(
+        window.contentView().unwrap().frame().size.height > height,
+        "a multiline error grows the sheet"
+    );
+    click(&window, "Cancel");
+    wait_for("the layout test sheet to close", || {
+        parent.window.attachedSheet().is_none()
+    });
+    parent.window.close();
+}
+
+fn retention_edits_keep_deadlines_explicit(mtm: objc2_foundation::MainThreadMarker, target: &super::AppDelegate) {
+    use crate::trust::Policy;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let parent = super::window::MainViews::new(mtm, target);
+    let saved = Rc::new(Cell::new(None));
+    let chosen = saved.clone();
+    super::trust_form::present(
+        &parent.window,
+        "Remember Studio until?",
+        Policy::Days(4),
+        move |policy| chosen.set(Some(policy)),
+    );
+    let sheet = parent.window.attachedSheet().unwrap();
+    click(&sheet, "Save");
+    wait_for("the unchanged deadline sheet to close", || {
+        parent.window.attachedSheet().is_none()
+    });
+    assert_eq!(
+        saved.get(),
+        None,
+        "saving an untouched fixed deadline does not renew or change it"
+    );
+    let chosen = saved.clone();
+    super::trust_form::present(
+        &parent.window,
+        "Remember Studio until?",
+        Policy::Days(4),
+        move |policy| chosen.set(Some(policy)),
+    );
+    let sheet = parent.window.attachedSheet().unwrap();
+    click(&sheet, "Until unused for");
+    click(&sheet, "Save");
+    wait_for("the chosen idle policy sheet to close", || {
+        parent.window.attachedSheet().is_none()
+    });
+    assert_eq!(
+        saved.get(),
+        Some(Policy::Idle(96)),
+        "explicitly choosing idle trust changes even an equal-length deadline"
+    );
+    parent.window.close();
 }
 
 fn click(sheet: &objc2_app_kit::NSWindow, title: &str) {

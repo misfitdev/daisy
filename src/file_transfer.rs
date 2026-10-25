@@ -92,6 +92,35 @@ pub struct Progress {
     pub cancelled: AtomicBool,
 }
 
+#[derive(Default)]
+struct OfferRetryGuard {
+    failed_clipboard: Option<i64>,
+}
+
+impl OfferRetryGuard {
+    fn should_attempt(&mut self, clipboard_changed: bool, crossing: bool, current: i64) -> bool {
+        if clipboard_changed {
+            self.failed_clipboard = None;
+        }
+        crossing && self.failed_clipboard != Some(current)
+    }
+
+    fn failed(&mut self, current: i64) {
+        self.failed_clipboard = Some(current);
+    }
+}
+
+#[derive(Debug)]
+struct OfferQueueFull;
+
+impl std::fmt::Display for OfferQueueFull {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("file-offer queue is full")
+    }
+}
+
+impl std::error::Error for OfferQueueFull {}
+
 pub struct Hub {
     identity: Identity,
     signer: crate::device::Signer,
@@ -106,6 +135,8 @@ pub struct Hub {
     receiver: Mutex<Option<mpsc::Receiver<Message>>>,
     pub runtime: tokio::runtime::Handle,
     crossing: AtomicBool,
+    #[cfg(all(target_os = "macos", not(test)))]
+    offer_retry: Mutex<OfferRetryGuard>,
 }
 
 async fn accept_connection<T, F, Fut>(mut accept: F) -> T
@@ -158,6 +189,8 @@ impl Hub {
             receiver: Mutex::new(Some(receiver)),
             runtime: tokio::runtime::Handle::current(),
             crossing: AtomicBool::new(false),
+            #[cfg(all(target_os = "macos", not(test)))]
+            offer_retry: Mutex::default(),
         });
         let running = hub.clone();
         let task = tokio::spawn(async move {
@@ -243,13 +276,22 @@ impl Hub {
                 return Some(current);
             }
             let crossing = self.crossing.swap(false, Ordering::AcqRel);
-            if *count != Some(current) || crossing {
+            let clipboard_changed = *count != Some(current);
+            let should_attempt = lock(&self.offer_retry).should_attempt(clipboard_changed, crossing, current);
+            if clipboard_changed || crossing {
                 *count = Some(current);
-                lock(&self.local).take();
-                if crossing && *self.enabled.borrow() {
+                if clipboard_changed {
+                    lock(&self.local).take();
+                }
+                if crossing && *self.enabled.borrow() && should_attempt {
                     match crate::macos::file_pasteboard::copied_paths().and_then(|paths| self.offer(paths)) {
                         Ok(()) => {}
+                        Err(error) if error.is::<OfferQueueFull>() => {
+                            self.crossing.store(true, Ordering::Release);
+                            tracing::debug!("copied-file offer deferred until its queue has room");
+                        }
                         Err(error) => {
+                            lock(&self.offer_retry).failed(current);
                             tracing::warn!(error = ?error, "copied files could not be offered");
                             crate::macos::file_pasteboard::offer_failed(format!("{error:#}"));
                         }
@@ -268,6 +310,10 @@ impl Hub {
         if paths.is_empty() || lock(&self.active).is_empty() {
             return Ok(());
         }
+        let queued = self.messages.try_reserve().map_err(|error| match error {
+            mpsc::error::TrySendError::Full(()) => anyhow::Error::new(OfferQueueFull),
+            mpsc::error::TrySendError::Closed(()) => anyhow::anyhow!("file-offer queue is closed"),
+        })?;
         let snapshot = Arc::new(snapshot(paths, self.port)?);
         let offer = snapshot.offer.clone();
         let peers = lock(&self.active).keys().copied().collect::<Vec<_>>();
@@ -275,9 +321,7 @@ impl Hub {
             leases: Leases::new(offer.clone(), peers, Instant::now()),
             snapshot,
         });
-        self.messages
-            .try_send(Message::FilesOffer { offer })
-            .context("file-offer queue is full")?;
+        queued.send(Message::FilesOffer { offer });
         Ok(())
     }
 
@@ -1271,6 +1315,17 @@ mod tests {
     use super::*;
     use crate::trust::Policy;
 
+    #[test]
+    fn failed_offer_waits_for_clipboard_change_before_retrying() {
+        let mut retry = OfferRetryGuard::default();
+        assert!(retry.should_attempt(true, true, 17));
+        retry.failed(17);
+        assert!(!retry.should_attempt(false, true, 17));
+        assert!(!retry.should_attempt(false, true, 17));
+        assert!(!retry.should_attempt(false, false, 18));
+        assert!(retry.should_attempt(true, true, 18));
+    }
+
     struct Pair {
         _homes: [tempfile::TempDir; 2],
         source: Arc<Hub>,
@@ -1337,6 +1392,28 @@ mod tests {
             active: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
         })
+    }
+
+    #[tokio::test]
+    async fn a_full_offer_queue_preserves_the_current_offer_and_allows_retry() {
+        let pair = pair();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("copied.txt");
+        fs::write(&path, b"copied contents").unwrap();
+        let mut messages = pair.source.take_messages();
+        pair.source.offer(vec![path.clone()]).unwrap();
+        let original = remote_offer(&pair.source).offer.id;
+        assert!(matches!(messages.try_recv().unwrap(), Message::FilesOffer { .. }));
+        while pair.source.messages.try_send(Message::Ping { nonce: 1 }).is_ok() {}
+        let error = pair.source.offer(vec![path.clone()]).unwrap_err();
+        assert!(
+            error.is::<OfferQueueFull>(),
+            "queue congestion must be distinguishable from a clipboard failure"
+        );
+        assert_eq!(remote_offer(&pair.source).offer.id, original);
+        while messages.try_recv().is_ok() {}
+        pair.source.offer(vec![path]).unwrap();
+        assert!(matches!(messages.try_recv().unwrap(), Message::FilesOffer { .. }));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -40,11 +40,17 @@ After a failed or cancelled code prompt, Daisy waits 15 seconds before opening a
 2. **Try:** Restore the network connection. If its IP changed, [submit its current address](usage.md#connect-by-address). For expired trust, [pair again](getting-started.md#pair); for a protocol mismatch, [update Daisy](usage.md#update-daisy).
 3. **Expect:** A previously connected, still-trusted peer reconnects without another code after network recovery. For identity errors, use the checks below rather than repeatedly reconnecting.
 
-**If Daisy reports a changed identity:** confirm the address belongs to the intended system and whether its owner deliberately replaced its Daisy identity. If the change was expected, [forget the old peer entry](trust.md#forget-a-peer), then [invite and pair the replacement](usage.md#grow-a-group). Forgetting removes the old peer and its introduced systems from the whole group; they need new pairing to rejoin.
+**If Daisy reports a changed identity:** confirm the address belongs to the intended system and whether its owner deliberately replaced its Daisy identity. If the change was expected, [forget the old peer entry](trust.md#forget-a-peer), then [invite and pair the replacement](usage.md#grow-a-group). Forgetting removes the old peer from the whole group; its replacement needs new pairing to rejoin. Other members remain trusted.
 
 If the change was unexpected or cannot be explained, keep the connection closed and [report it privately](../SECURITY.md). Do not reset identity or approve new pairing just to clear the error.
 
 Daisy ends a silent connection after three seconds to release remote input. Repeated reconnecting is a symptom, not proof of a particular network fault.
+
+## Screens moved when a system joined
+
+1. **Check:** The arrangement says **Restored the layout from last time these screens were together.** Daisy started from the arrangement last confirmed for these systems and displays.
+2. **Try:** Drag the screens to match your desk.
+3. **Expect:** The new arrangement is remembered for this combination and used the next time it comes back.
 
 ## Repeated “Pasting from…” banners
 

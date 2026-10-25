@@ -7,11 +7,13 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSBackingStoreType, NSBezelStyle, NSBezierPath, NSBox, NSBoxType, NSButton, NSCellImagePosition,
-    NSColor, NSFont, NSImage, NSImageView, NSLineBreakMode, NSPopUpButton, NSResponder, NSTextField, NSView, NSWindow,
+    NSAccessibility, NSAccessibilityAnnouncementKey, NSAccessibilityAnnouncementRequestedNotification,
+    NSAccessibilityPostNotificationWithUserInfo, NSAccessibilityPriorityKey, NSAccessibilityPriorityLevel,
+    NSBackingStoreType, NSBezelStyle, NSBezierPath, NSBox, NSBoxType, NSButton, NSCellImagePosition, NSColor, NSFont,
+    NSImage, NSImageView, NSLineBreakMode, NSPopUpButton, NSResponder, NSTextField, NSView, NSWindow,
     NSWindowStyleMask,
 };
-use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{MainThreadMarker, NSDictionary, NSNumber, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
 use super::coral_color;
 use super::map::ArrangeView;
@@ -89,6 +91,7 @@ pub struct MainViews {
     rule: Retained<NSBox>,
     pub question: Retained<NSTextField>,
     pub unreachable: Retained<NSTextField>,
+    has_unreachable: Cell<bool>,
     pub looks_right: Retained<NSButton>,
     pub window: Retained<NSWindow>,
     root: Retained<Panel>,
@@ -108,13 +111,31 @@ pub struct MainViews {
 /// One paired peer, as its row shows it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PeerRow {
+    pub number: usize,
     pub name: String,
-    /// Who introduced it, how its link is doing and when trust in it ends.
+    /// How its link is doing and when shared trust in it ends.
     pub detail: String,
     /// Shown on hover and to VoiceOver, so it is not mistaken for a code.
     pub fingerprint: String,
     /// What VoiceOver hears for the trust button; its face reads "Remember…".
     pub trust: String,
+}
+
+/// Reachability stays visible after placement is confirmed. Restoration
+/// and placement hints appear only when there is no reachability warning.
+pub fn caption(checking: bool, restored: bool, names: &[String]) -> Option<String> {
+    if !names.is_empty() {
+        Some(format!(
+            "Cannot reach: {}. Drag the screens closer together.",
+            names.join(", ")
+        ))
+    } else if checking {
+        Some("Drag the screens to match your desk.".to_owned())
+    } else if restored {
+        Some("Restored the layout from last time these screens were together.".to_owned())
+    } else {
+        None
+    }
 }
 
 impl MainViews {
@@ -174,8 +195,8 @@ impl MainViews {
         let peers_heading = label("Peers", 13.0, true, mtm);
         root.addSubview(&peers_heading);
         let add_peer = button("+", sel!(addPeerByAddress:), target, mtm);
-        add_peer.setAccessibilityLabel(Some(&NSString::from_str("Add peer by address")));
-        add_peer.setToolTip(Some(&NSString::from_str("Add peer by address")));
+        add_peer.setAccessibilityLabel(Some(&NSString::from_str("Add a system")));
+        add_peer.setToolTip(Some(&NSString::from_str("Add a system")));
         root.addSubview(&add_peer);
         let peers = Panel::group(mtm);
         root.addSubview(&peers);
@@ -198,6 +219,7 @@ impl MainViews {
             rule,
             question,
             unreachable,
+            has_unreachable: Cell::new(false),
             looks_right,
             window,
             root,
@@ -214,24 +236,29 @@ impl MainViews {
         };
         views.root.addSubview(&escape_key(sel!(closeKeyWindow:), target, mtm));
         views.show_peers(&[], target);
-        views.show_check(false, &[]);
+        views.show_check(false, false, &[]);
         views.show_status("Not Sharing", "");
         views.window.center();
         views
     }
 
-    pub fn show_check(&self, checking: bool, names: &[String]) {
-        let caption = if names.is_empty() {
-            "Drag the screens to match your desk.".to_owned()
-        } else {
-            format!("Cannot reach: {}. Drag the screens closer together.", names.join(", "))
-        };
-        if self.question.isHidden() != checking && self.unreachable.stringValue().to_string() == caption {
+    pub fn show_check(&self, checking: bool, restored: bool, names: &[String]) {
+        let shown = caption(checking, restored, names);
+        let caption = shown.clone().unwrap_or_default();
+        let changed = self.unreachable.stringValue().to_string() != caption;
+        let was_unreachable = self.has_unreachable.replace(!names.is_empty());
+        if self.question.isHidden() != checking
+            && self.unreachable.isHidden() == shown.is_none()
+            && self.unreachable.stringValue().to_string() == caption
+        {
             return;
         }
         self.question.setHidden(!checking);
-        self.unreachable.setHidden(!checking);
+        self.unreachable.setHidden(shown.is_none());
         self.looks_right.setHidden(!checking);
+        // below the question while checking, or in its place
+        self.unreachable
+            .setFrameOrigin(NSPoint::new(MARGIN, if checking { 38.0 } else { 14.0 }));
         self.unreachable.setStringValue(&NSString::from_str(&caption));
         self.unreachable.setToolTip(Some(&NSString::from_str(&caption)));
         let caption_height = self.unreachable.cell().map_or(18.0, |cell| {
@@ -242,6 +269,13 @@ impl MainViews {
         self.unreachable.setFrameSize(NSSize::new(GROUP_WIDTH, caption_height));
         self.arrange.set_check(checking);
         self.layout_hero();
+        if changed && self.window.isVisible() {
+            if !names.is_empty() {
+                announce(&self.window, &caption);
+            } else if was_unreachable {
+                announce(&self.window, "All screens are within reach.");
+            }
+        }
     }
 
     pub fn show_status(&self, title: &str, detail: &str) {
@@ -260,10 +294,12 @@ impl MainViews {
     }
 
     fn layout_hero(&self) {
-        let extra = if self.question.isHidden() {
-            0.0
-        } else {
+        let extra = if !self.question.isHidden() {
             46.0 + self.unreachable.frame().size.height
+        } else if !self.unreachable.isHidden() {
+            8.0 + self.unreachable.frame().size.height
+        } else {
+            0.0
         };
         self.arrange.setFrameOrigin(NSPoint::new(MARGIN, 14.0 + extra));
         let mut y = 152.0 + extra;
@@ -301,7 +337,7 @@ impl MainViews {
             if index > 0 {
                 separator(&self.peers, y, mtm);
             }
-            let name = label(&peer.name, 13.0, false, mtm);
+            let name = label(&format!("{} · {}", peer.number, peer.name), 13.0, false, mtm);
             name.setToolTip(Some(&NSString::from_str(&format!(
                 "Key fingerprint {}",
                 peer.fingerprint
@@ -636,6 +672,39 @@ pub(super) fn label(text: &str, size: f64, bold: bool, mtm: MainThreadMarker) ->
     label
 }
 
+/// Size a label to all of its text at the available width.
+pub(super) fn wrap_label(label: &NSTextField, width: f64, minimum: f64) -> f64 {
+    label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    label.setMaximumNumberOfLines(0);
+    let height = label.cell().map_or(minimum, |cell| {
+        cell.cellSizeForBounds(rect(0.0, 0.0, width, 10000.0))
+            .height
+            .max(minimum)
+            .ceil()
+    });
+    label.setFrameSize(NSSize::new(width, height));
+    height
+}
+
+/// Announce a changed warning or validation error without moving focus.
+pub(super) fn announce(window: &NSWindow, message: &str) {
+    let text = NSString::from_str(message);
+    let priority = NSNumber::new_isize(NSAccessibilityPriorityLevel::Medium.0);
+    // SAFETY: AppKit's notification keys match the string and numeric values;
+    // the window is a live accessibility element on the main thread.
+    unsafe {
+        let info = NSDictionary::from_slices(
+            &[NSAccessibilityAnnouncementKey, NSAccessibilityPriorityKey],
+            &[text.as_ref() as &AnyObject, priority.as_ref() as &AnyObject],
+        );
+        NSAccessibilityPostNotificationWithUserInfo(
+            window,
+            NSAccessibilityAnnouncementRequestedNotification,
+            Some(&info),
+        );
+    }
+}
+
 pub(super) fn button(title: &str, action: Sel, target: &AnyObject, mtm: MainThreadMarker) -> Retained<NSButton> {
     // SAFETY: target implements action and outlives the window
     unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(target), Some(action), mtm) }
@@ -667,4 +736,25 @@ fn icon_button(
 
 pub(super) fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_restored_layout_says_so_unless_it_is_being_checked() {
+        assert_eq!(super::caption(false, false, &[]), None);
+        assert_eq!(
+            super::caption(false, true, &[]).as_deref(),
+            Some("Restored the layout from last time these screens were together.")
+        );
+        let names = ["Studio".to_owned()];
+        assert_eq!(
+            super::caption(true, true, &names).as_deref(),
+            Some("Cannot reach: Studio. Drag the screens closer together.")
+        );
+        assert_eq!(
+            super::caption(true, false, &[]).as_deref(),
+            Some("Drag the screens to match your desk.")
+        );
+    }
 }

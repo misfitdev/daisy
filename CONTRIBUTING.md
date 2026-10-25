@@ -192,7 +192,7 @@ Explain why in the body; the diff shows what. Keep pull requests to one change w
 
 ## Issues and security
 
-Report bugs and ideas in GitHub issues. The maintainer's roadmap is tracked with [Beads](https://github.com/gastownhall/beads) and synced through a private DoltHub database. Bead changes do not need commits to this repository; see [.beads/README.md](.beads/README.md) to configure a clone.
+Report bugs and ideas in GitHub issues. The maintainer's roadmap is tracked with [Beads](https://github.com/gastownhall/beads) and synced through a private DoltHub database. Bead changes do not need commits to this repository; see [.beads/README.md](https://github.com/misfitdev/daisy/blob/main/.beads/README.md) to configure a clone.
 
 Report security problems privately, never in a public issue; see [SECURITY.md](SECURITY.md).
 

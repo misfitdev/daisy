@@ -161,6 +161,10 @@ pub enum Message {
         author: PublicKey,
         fingerprint: [u8; 32],
     },
+    /// Shared membership, retention choices and renewal, attested by the sender.
+    GroupTrust {
+        announcement: crate::introduce::Signed<crate::group_trust::Announcement>,
+    },
 }
 
 /// One copied clipboard, wherever it has travelled: the system it was copied
@@ -224,6 +228,29 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_trust_is_appended_without_changing_existing_tags() {
+        let signer = crate::device::Signer::generate().unwrap();
+        let member = PublicKey::from_bytes(&[1; 32]).unwrap();
+        let message = Message::GroupTrust {
+            announcement: crate::introduce::Signed::<crate::group_trust::Announcement>::new(
+                &signer,
+                crate::group_trust::Announcement {
+                    by: member,
+                    record: crate::group_trust::Record {
+                        member,
+                        stamp: Default::default(),
+                        state: crate::group_trust::State::Removed { at: 123 },
+                    },
+                },
+            )
+            .unwrap(),
+        };
+        let encoded = message.encode().unwrap();
+        assert_eq!(encoded[0], 31);
+        assert_eq!(Message::decode(&encoded).unwrap(), message);
+    }
 
     #[test]
     fn messages_round_trip() {

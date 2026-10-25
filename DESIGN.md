@@ -327,9 +327,9 @@ the distance to each edge, may change direction along the way, and interlock acr
 display seams. Never put the flower on a bezel, at a seam, or only on a central
 machine. Displays are drawn as graphite-bezel outlines on paper.
 
-**The Magnet Spring Rule.** Arranged displays move on springs (stiffness 340, damping
-ratio 0.7), snap magnetically to a neighbour within 56 units, and settle with a small
-overshoot. The view eases to the new bounds and follows a display while it is
+**The Magnet Spring Rule.** Displays in the website demonstration move on springs
+(stiffness 340, damping ratio 0.7), snap magnetically to a neighbour within 56 units,
+and settle with a small overshoot. The view eases to the new bounds and follows a display while it is
 dragged. The animation loop sleeps once everything has settled.
 
 ### Landing thread
@@ -406,8 +406,24 @@ action only; it never lectures about codes.
 
 In the arrangement, the system in control is outlined in coral rather than
 filled, so coral stays an action color. Peer displays show an open-hand cursor.
-Peer rows show connection state and who introduced the peer; the key fingerprint
-is a tooltip, so it is never mistaken for a code.
+Peer rows show connection state, including **In use**, and matching numbered
+identifiers. Small arrangement displays show only their number; full names stay
+in the list. This system is number 1. The key fingerprint is a tooltip.
+All display borders draw after links and labels. Coral emphasis and native
+keyboard focus sit inside the display boundary, preserving apparent alignment.
+
+The native arrangement uses springs with stiffness 340 and damping coefficient
+29.5 (damping ratio about 0.8), preserving its quieter settling. Its motion
+language includes spring settling after pointer drops, smooth reframing, a brief bloom when control changes, and a small arrival for
+new members. Dragging holds its coordinate mapping until release. Keyboard
+placement and Reduce Motion are immediate; settled and hidden views stop their
+timer. Motion changes only the drawn pose, never the agreed layout or routing.
+At roomy scales, each display has a flower: yellow centers mean a live connection
+and gray means no live session. Compact displays use their matching identifiers.
+Flat anodized-gray U links join nearby live displays, using the same reachability
+geometry as input crossing. Links remain rigid as they tug;
+labels stay legible above them. A coral outline and **In use** text identify the
+system in control, so ownership never depends on color or animation alone.
 
 Conditional rows close up when hidden. Granted permissions retain a quiet text
 status and remove their action buttons. Use native AppKit controls, system type,

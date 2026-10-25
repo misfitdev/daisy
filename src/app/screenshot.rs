@@ -33,6 +33,7 @@ pub fn save(path: &Path) -> Result<()> {
     let (laptop, studio) = (key(1), key(2));
     views.arrange.show(vec![
         Shown {
+            number: 1,
             key: laptop,
             name: "Laptop".to_owned(),
             displays: vec![rect(0.0, 0.0, 1512.0, 982.0)],
@@ -43,6 +44,7 @@ pub fn save(path: &Path) -> Result<()> {
             hint: String::new(),
         },
         Shown {
+            number: 2,
             key: studio,
             name: "Studio".to_owned(),
             displays: vec![rect(0.0, 0.0, 2560.0, 1440.0), rect(2560.0, 260.0, 1920.0, 1080.0)],
@@ -56,6 +58,7 @@ pub fn save(path: &Path) -> Result<()> {
     views.show_status("", "");
     views.show_peers(
         &[PeerRow {
+            number: 2,
             name: "Studio".to_owned(),
             detail: "Connected, 4 ms · Renews while connected".to_owned(),
             fingerprint: String::new(),
@@ -73,7 +76,7 @@ pub fn save(path: &Path) -> Result<()> {
     write_png(&frame, path)
 }
 
-fn write_png(view: &NSView, path: &Path) -> Result<()> {
+pub(super) fn write_png(view: &NSView, path: &Path) -> Result<()> {
     let bounds = view.bounds();
     view.layoutSubtreeIfNeeded();
     let rep = view

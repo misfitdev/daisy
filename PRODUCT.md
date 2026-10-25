@@ -69,8 +69,9 @@ long that trust lasts.
   used.
 - Pairing codes are safe only as PAKE input. Never ask people to compare a code
   by eye as a security check.
-- Both systems enforce their own trust policy, so the stricter policy wins. When
-  trust ends, the systems must pair again.
+- Group membership and retention choices synchronize across the group. Each
+  system enforces the shared policy. Removing a member leaves the others trusted.
+  When trust ends, the systems must pair again.
 - Systems pair by sharing: a system with no peers accepts one while sharing,
   and a group accepts a new system only during Add a System or with Always
   discoverable on. The new system shows the code. The **+** beside **Peers** adds an address for networks without Bonjour

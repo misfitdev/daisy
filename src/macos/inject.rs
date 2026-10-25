@@ -413,7 +413,11 @@ mod tests {
             (57, 0x0001_0000),
         ] {
             for flags in [flag, 0] {
-                let action = Action::Modifiers { code, flags };
+                let action = Action::Modifiers {
+                    code,
+                    down: crate::input::modifier_is_down(code, flags),
+                    flags,
+                };
                 let event = keyboard_event(std::ptr::null_mut(), action.keyboard().unwrap());
                 assert!(!event.is_null());
                 assert_eq!(unsafe { CGEventGetFlags(event) }, flags);
