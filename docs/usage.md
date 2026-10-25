@@ -163,6 +163,10 @@ or use the [Homebrew upgrade steps](#homebrew).
 Different releases can connect when they share a network protocol. See the
 [protocol compatibility rules](protocol.md#handshake).
 
+When upgrading from 0.10.x to 0.11.0, update every system in the sharing group
+together. Version 0.11.0 uses protocol 8 and cannot connect to earlier releases.
+Existing device identities, paired trust and saved arrangements stay in place.
+
 An update relaunch preserves a data directory selected with `--home` and a name
 selected with `--name`.
 
