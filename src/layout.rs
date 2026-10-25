@@ -577,9 +577,13 @@ impl<K: Copy + Ord> Placement<K> {
     /// anything changed.
     pub fn adopt(&mut self, version: u64, author: K, offsets: &[(K, Offset)], now: u64) -> bool {
         // Startup snapshots may describe a subgroup that has not learned about
-        // this system yet. Wait for its complete snapshot without deleting our
-        // usable local placement or disconnecting that peer.
+        // every placed member yet. Wait rather than erase a present member's
+        // chosen position or disconnect the peer sending the partial snapshot.
         if !offsets.iter().any(|(key, _)| *key == self.me)
+            || self
+                .displays
+                .keys()
+                .any(|key| self.offsets.contains_key(key) && !offsets.iter().any(|(incoming, _)| incoming == key))
             || !plausible_arrangement(version, offsets, now)
             || (version, author) <= self.version
         {
@@ -817,6 +821,32 @@ mod tests {
         assert!(plausible_offsets(&[(0u8, (MAX_OFFSET, -MAX_OFFSET))]));
         assert!(!plausible_offsets(&[(0u8, (MAX_OFFSET + 1.0, 0.0))]));
         assert!(!plausible_offsets(&[(0u8, (0.0, 0.0)), (0, (1.0, 0.0))]));
+    }
+
+    #[test]
+    fn partial_snapshots_preserve_every_placed_present_member() {
+        let mut placement = Placement::new(0u8, vec![LAPTOP]);
+        placement.show(1, vec![PEER]);
+        placement.show(2, vec![PEER]);
+        assert!(placement.adopt(
+            10,
+            0,
+            &[(0, (0.0, 0.0)), (1, (1512.0, 0.0)), (2, (0.0, 982.0))],
+            1_000_000,
+        ));
+        let before = placement.message();
+        let partial = [(0, (0.0, 0.0)), (1, (1512.0, 0.0))];
+        assert!(
+            !placement.adopt(11, 1, &partial, 1_000_000),
+            "a partial snapshot must not erase a present peer's chosen placement"
+        );
+        assert_eq!(placement.message(), before, "deferral must also preserve the version");
+        placement.remove(2);
+        assert!(placement.adopt(11, 1, &partial, 1_000_000));
+        placement.show(3, vec![PEER]);
+        assert!(!placement.adopt(12, 1, &partial, 1_000_000));
+        assert_eq!(placement.version(), (12, 1), "unplaced members do not defer a snapshot");
+        assert_eq!(placement.unplaced(), vec![3]);
     }
 
     #[test]

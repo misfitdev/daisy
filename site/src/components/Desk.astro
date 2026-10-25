@@ -73,6 +73,7 @@ const svg = renderDesk(initialState(), { pointer: false });
   let swipeEpoch = 0;
   let wheel = 0;
   let wheelTimer = 0;
+  let noticeTimer = 0;
   let drag: { id: string; grab: Vec; origin: Vec; target: Vec; start: Vec; moved: boolean } | null = null;
   let started = false;
 
@@ -261,7 +262,16 @@ const svg = renderDesk(initialState(), { pointer: false });
     const y = side === "below" ? r.y + r.h - 24 : side === "above" ? r.y + 40 : state.pointer.y - 24;
     g.innerHTML = `<rect x="${x - 128}" y="${y - 17}" width="256" height="30" rx="15" fill="#2E3235"/><text x="${x}" y="${y + 3}" text-anchor="middle">Release the button to cross</text>`;
     g.getAnimations().forEach((a) => a.cancel());
-    g.animate([{ opacity: 1 }, { opacity: 1, offset: 0.7 }, { opacity: 0 }], { duration: 1400, fill: "forwards" });
+    window.clearTimeout(noticeTimer);
+    noticeTimer = 0;
+    if (still.matches) {
+      noticeTimer = window.setTimeout(() => {
+        g.replaceChildren();
+        noticeTimer = 0;
+      }, 1400);
+    } else {
+      g.animate([{ opacity: 1 }, { opacity: 1, offset: 0.7 }, { opacity: 0 }], { duration: 1400, fill: "forwards" });
+    }
     say("Control never crosses while a mouse button is held.");
   }
 
