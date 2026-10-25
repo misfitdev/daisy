@@ -40,8 +40,6 @@ const DETENT: f64 = 6.0;
 /// One system as the arrangement shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shown {
-    /// Compact identifier matched to the peer list; this system is 1.
-    pub number: usize,
     pub key: PublicKey,
     pub name: String,
     /// Its displays in its own coordinates, and where they sit in the group.
@@ -63,10 +61,9 @@ impl Shown {
         })
     }
 
-    /// The display its name is drawn on: the largest.
+    /// The device display comes first, followed by any external displays.
     fn main(&self) -> Option<Rect> {
-        self.placed()
-            .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
+        self.placed().next()
     }
 }
 
@@ -104,15 +101,6 @@ pub fn scene(
                 (false, _, false) => "Drag to rearrange",
             };
             Shown {
-                number: if mine {
-                    1
-                } else {
-                    names
-                        .keys()
-                        .filter(|key| **key != me)
-                        .position(|key| *key == member.key)
-                        .map_or(0, |index| index + 2)
-                },
                 key: member.key,
                 name: names.get(&member.key).cloned().unwrap_or_default(),
                 displays: member.displays.clone(),
@@ -311,16 +299,8 @@ define_class!(
                 let to = fit.to_view(to);
                 let age = if a.in_control == Some(true) { appearance(a).2 } else { appearance(b).2 };
                 let (from, to) = if b.in_control == Some(true) { (to, from) } else { (from, to) };
-                let above_a = captions.get(&a.key).copied().unwrap_or(false);
-                let above_b = captions.get(&b.key).copied().unwrap_or(false);
-                // The direction of the pulse follows the system gaining control.
-                let (above_from, above_to) = if b.in_control == Some(true) { (above_b, above_a) } else { (above_a, above_b) };
-                if compact_display(from) || compact_display(to) {
-                    if let Some((start, end)) = compact_connection(from, to) {
-                        draw_chain(start, end, 0.0, age, alpha);
-                    }
-                } else {
-                    draw_chain(glyph_center(from, above_from), glyph_center(to, above_to), glyph_size(from).max(glyph_size(to)) / 2.0 + 4.0, age, alpha);
+                if let Some((start, end)) = border_connection(from, to) {
+                    draw_chain(start, end, age, alpha);
                 }
             }
             for shown in &scene {
@@ -328,9 +308,9 @@ define_class!(
                 let alpha = if self.ivars().checking.get() || !someone_in_control { 1.0 }
                     else { INACTIVE_ALPHA + (1.0 - INACTIVE_ALPHA) * emphasis };
                 let main = shown.main();
-                for display in shown.placed() {
+                for (display_index, display) in shown.placed().enumerate() {
                     let flower = if shown.in_control.is_some() { self.ivars().connected_flower.as_deref() } else { self.ivars().disconnected_flower.as_deref() };
-                    draw_identity(shown, arriving(fit.to_view(display), arrival), alpha * arrival, main == Some(display), pulse, flower, captions.get(&shown.key).copied().unwrap_or(false));
+                    draw_identity(shown, arriving(fit.to_view(display), arrival), alpha * arrival, if main == Some(display) { None } else { Some(display_index) }, pulse, flower, captions.get(&shown.key).copied().unwrap_or(false));
                 }
             }
             // Borders are last: captions and links cannot erase an edge.
@@ -833,6 +813,7 @@ fn connections(scene: &[Shown]) -> Vec<(usize, usize, Rect, Rect)> {
     let geometry: Vec<_> = displays.iter().map(|(_, display)| *display).collect();
     crate::arrangement_motion::connections(&geometry)
         .into_iter()
+        .filter(|&(a, b)| displays[a].0 != displays[b].0)
         .map(|(a, b)| (displays[a].0, displays[b].0, displays[a].1.rect, displays[b].1.rect))
         .collect()
 }
@@ -864,9 +845,11 @@ fn compact_display(view: Rect) -> bool {
     view.width < 140.0 || view.height < 64.0
 }
 
-/// Dense arrangements use a short pair of links at the shared edge, leaving
-/// identifiers clear. A corner contact needs no diagonal across other labels.
-fn compact_connection(from: Rect, to: Rect) -> Option<(Offset, Offset)> {
+/// Five links straddle the shared edge, leaving captions and flowers clear.
+fn border_connection(from: Rect, to: Rect) -> Option<(Offset, Offset)> {
+    let dx = to.x + to.width / 2.0 - from.x - from.width / 2.0;
+    let dy = to.y + to.height / 2.0 - from.y - from.height / 2.0;
+    let diagonal = |x: f64, y: f64| Some(((x - dx.signum(), y - dy.signum()), (x + dx.signum(), y + dy.signum())));
     let overlap_x = (from.x + from.width).min(to.x + to.width) - from.x.max(to.x);
     let overlap_y = (from.y + from.height).min(to.y + to.height) - from.y.max(to.y);
     if overlap_y > 1.0 && overlap_x <= 1.0 {
@@ -876,8 +859,8 @@ fn compact_connection(from: Rect, to: Rect) -> Option<(Offset, Offset)> {
         } else {
             (to.x + to.width + from.x) / 2.0
         };
-        let sign = if from.x < to.x { 1.0 } else { -1.0 };
-        Some(((x - 16.0 * sign, y), (x + 16.0 * sign, y)))
+        let sign = dx.signum();
+        Some(((x - sign, y), (x + sign, y)))
     } else if overlap_x > 1.0 && overlap_y <= 1.0 {
         let x = from.x.max(to.x) + overlap_x / 2.0;
         let y = if from.y < to.y {
@@ -885,10 +868,20 @@ fn compact_connection(from: Rect, to: Rect) -> Option<(Offset, Offset)> {
         } else {
             (to.y + to.height + from.y) / 2.0
         };
-        let sign = if from.y < to.y { 1.0 } else { -1.0 };
-        Some(((x, y - 16.0 * sign), (x, y + 16.0 * sign)))
+        diagonal(x, y)
     } else {
-        None
+        let x = if from.x < to.x {
+            (from.x + from.width + to.x) / 2.0
+        } else {
+            (to.x + to.width + from.x) / 2.0
+        };
+        let y = if from.y < to.y {
+            (from.y + from.height + to.y) / 2.0
+        } else {
+            (to.y + to.height + from.y) / 2.0
+        };
+        let (dx, dy) = ((to.x - from.x).signum(), (to.y - from.y).signum());
+        Some(((x - dx, y - dy), (x + dx, y + dy)))
     }
 }
 
@@ -896,16 +889,13 @@ fn glyph_size(view: Rect) -> f64 {
     (view.height * 0.26).min(28.0)
 }
 
-fn glyph_center(view: Rect, caption_above: bool) -> Offset {
-    (
-        view.x + view.width / 2.0,
-        view.y + view.height / 2.0 + (glyph_size(view) / 2.0 + 2.0) * if caption_above { 1.0 } else { -1.0 },
-    )
+fn glyph_center(view: Rect) -> Offset {
+    (view.x + view.width / 2.0, view.y + view.height / 2.0)
 }
 
-fn draw_chain(from: Offset, to: Offset, clearance: f64, pulse: Option<f64>, alpha: f64) {
+fn draw_chain(from: Offset, to: Offset, pulse: Option<f64>, alpha: f64) {
     NSColor::colorWithSRGBRed_green_blue_alpha(0.45, 0.49, 0.52, alpha).setStroke();
-    for link in chain(from, to, clearance, pulse) {
+    for link in chain(from, to, pulse) {
         let (sin, cos) = link.angle.sin_cos();
         let point = |x: f64, y: f64| {
             NSPoint::new(
@@ -914,11 +904,14 @@ fn draw_chain(from: Offset, to: Offset, clearance: f64, pulse: Option<f64>, alph
             )
         };
         let path = NSBezierPath::bezierPath();
-        path.moveToPoint(point(21.5, -13.0));
+        path.moveToPoint(point(8.5, -13.0));
         path.lineToPoint(point(-8.5, -13.0));
         path.curveToPoint_controlPoint1_controlPoint2(point(-21.5, 0.0), point(-15.68, -13.0), point(-21.5, -7.18));
         path.curveToPoint_controlPoint1_controlPoint2(point(-8.5, 13.0), point(-21.5, 7.18), point(-15.68, 13.0));
-        path.lineToPoint(point(21.5, 13.0));
+        path.lineToPoint(point(8.5, 13.0));
+        path.curveToPoint_controlPoint1_controlPoint2(point(21.5, 0.0), point(15.68, 13.0), point(21.5, 7.18));
+        path.curveToPoint_controlPoint1_controlPoint2(point(8.5, -13.0), point(21.5, -7.18), point(15.68, -13.0));
+        path.closePath();
         path.setLineWidth(9.5 * LINK_SCALE);
         path.stroke();
     }
@@ -976,18 +969,19 @@ fn draw_identity(
     shown: &Shown,
     view: Rect,
     alpha: f64,
-    main: bool,
+    external: Option<usize>,
     pulse: Option<f64>,
     flower: Option<&NSImage>,
     caption_above: bool,
 ) {
+    let main = external.is_none();
     let active = shown.in_control == Some(true);
     let size = glyph_size(view);
     let bloom = pulse.map_or(1.0, |age| {
         1.0 + ((age / 0.55).clamp(0.0, 1.0) * std::f64::consts::PI).sin() * 0.07
     });
-    if let Some(daisy) = flower.filter(|_| !compact_display(view)) {
-        let center = glyph_center(view, caption_above);
+    if let Some(daisy) = flower.filter(|_| main) {
+        let center = glyph_center(view);
         let at = NSRect::new(
             NSPoint::new(center.0 - size * bloom / 2.0, center.1 - size * bloom / 2.0),
             NSSize::new(size * bloom, size * bloom),
@@ -1005,33 +999,30 @@ fn draw_identity(
             )
         };
     }
-    if !main {
-        return;
-    }
     let compact = compact_display(view);
-    let name = if compact {
-        if shown.me && view.width >= 110.0 {
-            format!("{} · This system", shown.number)
-        } else if shown.me && view.width >= 60.0 {
-            format!("{} · Here", shown.number)
-        } else {
-            shown.number.to_string()
-        }
+    let name = if let Some(number) = external {
+        format!("{}:{number}", shown.name)
+    } else if compact && shown.me {
+        if view.width >= 110.0 { "This system" } else { "Here" }.to_owned()
     } else if shown.locked {
-        format!("{} · {} · Locked", shown.number, shown.name)
+        format!("{} · Locked", shown.name)
+    } else if active {
+        format!("{} · In use", shown.name)
     } else {
-        if active {
-            format!("{} · {} · In use", shown.number, shown.name)
-        } else {
-            format!("{} · {}", shown.number, shown.name)
-        }
+        shown.name.clone()
     };
     let name_height = 16.0;
-    let name_y = if compact {
+    let name_y = if !main {
         view.y + (view.height - name_height) / 2.0
     } else {
-        (view.y + view.height / 2.0 + if caption_above { -18.0 } else { 2.0 })
-            .clamp(view.y + 5.0, view.y + view.height - name_height - 5.0)
+        (view.y
+            + view.height / 2.0
+            + if caption_above {
+                -size / 2.0 - name_height - 4.0
+            } else {
+                size / 2.0 + 4.0
+            })
+        .clamp(view.y + 5.0, view.y + view.height - name_height - 5.0)
     };
     let font = if active {
         NSFont::boldSystemFontOfSize(11.0)
@@ -1118,6 +1109,35 @@ mod tests {
             peer_locked,
             ..Link::default()
         }
+    }
+
+    #[test]
+    fn screenshot_shows_all_four_transfer_paths() {
+        let shown = super::super::screenshot::sample_scene();
+        let paths = connections(&shown);
+        assert_eq!(paths.len(), 4);
+        let mut angles = Vec::new();
+        for (_, _, from, to) in paths {
+            let (a, b) = border_connection(from, to).unwrap();
+            angles.push((b.1 - a.1).atan2(b.0 - a.0).abs());
+        }
+        assert_eq!(angles.iter().filter(|&&a| a < 1e-9).count(), 2);
+        assert_eq!(
+            angles
+                .iter()
+                .filter(|&&a| (a - std::f64::consts::FRAC_PI_4).abs() < 1e-9)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn external_displays_do_not_chain_to_their_own_system() {
+        let links = BTreeMap::from([(key(2), link(true, false, false))]);
+        let mut shown = scene(key(1), &names(), Some(&pair()), &[LAPTOP], &links);
+        shown.truncate(1);
+        shown[0].displays.push(Rect { x: 1512.0, ..LAPTOP });
+        assert!(connections(&shown).is_empty());
     }
 
     #[test]

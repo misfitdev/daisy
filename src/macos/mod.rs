@@ -69,7 +69,12 @@ pub fn displays() -> Result<Vec<Rect>> {
     if error != 0 || count == 0 {
         bail!("could not list displays (CoreGraphics error {error})");
     }
-    Ok(displays[..count as usize]
+    let displays = &mut displays[..count as usize];
+    // SAFETY: every id came from CoreGraphics. Keep the device display first
+    // so peers can place its identity without extra wire metadata.
+    displays
+        .sort_by_key(|&display| unsafe { (ffi::CGDisplayIsBuiltin(display) == 0, display != ffi::CGMainDisplayID()) });
+    Ok(displays
         .iter()
         // SAFETY: each id came from CGGetOnlineDisplayList
         .filter(|&&display| unsafe { ffi::CGDisplayMirrorsDisplay(display) } == 0)

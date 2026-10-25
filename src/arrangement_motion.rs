@@ -213,8 +213,7 @@ pub fn caption_above(display: Rect, neighbor: Rect) -> bool {
     neighbor.y + neighbor.height / 2.0 - display.y - display.height / 2.0 > display.height.min(neighbor.height) * 0.35
 }
 
-/// A whole U-shaped link. Scale is fixed in view points, never stretched
-/// to bridge a gap. Alternate links face each other, with bowls at each end.
+/// A whole oval link, fixed in view points rather than stretched to fill a gap.
 pub struct ChainLink {
     pub center: Offset,
     pub angle: f64,
@@ -222,37 +221,25 @@ pub struct ChainLink {
 
 pub const LINK_SCALE: f64 = 0.18;
 
-pub fn chain(from: Offset, to: Offset, clearance: f64, pulse: Option<f64>) -> Vec<ChainLink> {
+/// Two full links on either side of a bisected center link.
+pub fn chain(from: Offset, to: Offset, pulse: Option<f64>) -> Vec<ChainLink> {
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
     let distance = dx.hypot(dy);
-    let room = distance - 2.0 * (clearance + 26.25 * LINK_SCALE);
-    let tip = 37.0 * LINK_SCALE;
-    let bowl = 47.5 * LINK_SCALE;
-    if room < tip || !distance.is_finite() {
+    if !distance.is_finite() || distance < 1.0 {
         return Vec::new();
     }
-    let mut pairs = ((room + bowl) / (tip + bowl)).ceil().clamp(1.0, 64.0) as usize;
-    let span = |pairs: usize| pairs as f64 * tip + (pairs - 1) as f64 * bowl;
-    while pairs > 1 && (span(pairs) - room) / (pairs * 2 - 1) as f64 > 14.0 * LINK_SCALE {
-        pairs -= 1;
-    }
-    let tighten = ((span(pairs) - room) / (pairs * 2 - 1) as f64).max(0.0);
-    let (tip, bowl) = (tip - tighten, bowl - tighten);
-    let length = pairs as f64 * tip + (pairs - 1) as f64 * bowl;
+    let midpoint = ((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
     let (ux, uy) = (dx / distance, dy / distance);
-    let mut at = (distance - length) / 2.0;
-    (0..pairs * 2)
+    (0..5)
         .map(|index| {
-            let phase = pulse.map_or(0.0, |age| {
-                ((age - index as f64 * (0.45 / (pairs * 2) as f64).min(0.022)) / 0.22).clamp(0.0, 1.0)
-            });
+            let at = (index as f64 - 2.0) * 40.0 * LINK_SCALE;
+            let phase = pulse.map_or(0.0, |age| ((age - index as f64 * 0.022) / 0.22).clamp(0.0, 1.0));
             let lift = (phase * std::f64::consts::PI).sin() * 0.8;
-            let link = ChainLink {
-                center: (from.0 + ux * at - uy * lift, from.1 + uy * at + ux * lift),
-                angle: dy.atan2(dx) + if index % 2 == 0 { 0.0 } else { std::f64::consts::PI },
-            };
-            at += if index % 2 == 0 { tip } else { bowl };
-            link
+            let turn = (index as f64 - 2.0) * 0.12;
+            ChainLink {
+                center: (midpoint.0 + ux * at - uy * lift, midpoint.1 + uy * at + ux * lift),
+                angle: dy.atan2(dx) + turn + if index % 2 == 1 { std::f64::consts::PI } else { 0.0 },
+            }
         })
         .collect()
 }
@@ -309,14 +296,14 @@ mod tests {
     }
 
     #[test]
-    fn chain_uses_even_rigid_links_with_clearance_and_no_short_gap_fallback() {
-        assert!(chain((0.0, 0.0), (20.0, 0.0), 14.0, None).is_empty());
+    fn chain_straddles_the_border_with_five_rigid_links() {
         for end in [(120.0, 0.0), (0.0, 120.0), (100.0, 100.0)] {
-            let links = chain((0.0, 0.0), end, 14.0, None);
-            assert!(links.len() >= 2 && links.len().is_multiple_of(2));
-            assert!(links[0].center.0.hypot(links[0].center.1) > 14.0);
-            for pair in links.as_chunks::<2>().0 {
-                assert!(((pair[1].angle - pair[0].angle) - std::f64::consts::PI).abs() < 1e-9);
+            let links = chain((0.0, 0.0), end, None);
+            assert_eq!(links.len(), 5);
+            assert_eq!(links[2].center, (end.0 / 2.0, end.1 / 2.0));
+            for link in [&links[1], &links[3]] {
+                let distance = (link.center.0 - links[2].center.0).hypot(link.center.1 - links[2].center.1);
+                assert!((distance - 40.0 * LINK_SCALE).abs() < 1e-9);
             }
         }
     }
