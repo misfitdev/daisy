@@ -24,6 +24,7 @@ const MARGIN: f64 = 20.0;
 const ROW: f64 = 38.0;
 const PEER_ROW: f64 = 50.0;
 const HERO: f64 = 250.0;
+const STATUS_Y: f64 = HERO - 14.0;
 const GROUP_WIDTH: f64 = WIDTH - 2.0 * MARGIN;
 const ADVANCED_WIDTH: f64 = 460.0;
 
@@ -184,13 +185,13 @@ impl MainViews {
         hero.addSubview(&arrange);
         let title = label("Not Sharing", 15.0, true, mtm);
         title.setAlignment(objc2_app_kit::NSTextAlignment::Center);
-        title.setFrame(rect(MARGIN, 152.0, GROUP_WIDTH, 22.0));
+        title.setFrame(rect(MARGIN, STATUS_Y, GROUP_WIDTH, 22.0));
         hero.addSubview(&title);
         let detail = label("", 12.0, false, mtm);
         detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
         detail.setAlignment(objc2_app_kit::NSTextAlignment::Center);
         detail.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-        detail.setFrame(rect(MARGIN, 176.0, GROUP_WIDTH, 18.0));
+        detail.setFrame(rect(MARGIN, STATUS_Y + 24.0, GROUP_WIDTH, 18.0));
         hero.addSubview(&detail);
         let rule = NSBox::initWithFrame(NSBox::alloc(mtm), rect(0.0, HERO, WIDTH, 1.0));
         rule.setBoxType(NSBoxType::Separator);
@@ -297,6 +298,38 @@ impl MainViews {
         self.layout_hero();
     }
 
+    #[cfg(test)]
+    pub(super) fn test_status_layout(&self) {
+        for checking in [false, true] {
+            self.show_check(checking, false, &[]);
+            for (title, detail) in [
+                ("Not Sharing", ""),
+                ("Connecting", "Finding peers"),
+                ("", "Waiting for permission"),
+            ] {
+                self.show_status(title, detail);
+                let bottom = self.arrange.frame().origin.y + self.arrange.frame().size.height;
+                let mut previous = bottom;
+                for label in [&self.title, &self.detail] {
+                    if !label.isHidden() {
+                        let frame = label.frame();
+                        assert!(
+                            frame.origin.y >= previous,
+                            "status label overlaps arrangement or another label"
+                        );
+                        previous = frame.origin.y + frame.size.height;
+                        assert!(
+                            previous <= self.hero.frame().size.height,
+                            "status label extends beyond hero"
+                        );
+                    }
+                }
+            }
+        }
+        self.show_check(false, false, &[]);
+        self.show_status("Not Sharing", "");
+    }
+
     fn layout_hero(&self) {
         let extra = if !self.question.isHidden() {
             46.0 + self.unreachable.frame().size.height
@@ -306,7 +339,7 @@ impl MainViews {
             0.0
         };
         self.arrange.setFrameOrigin(NSPoint::new(MARGIN, 14.0 + extra));
-        let mut y = 152.0 + extra;
+        let mut y = STATUS_Y + extra;
         if !self.title.isHidden() {
             self.title.setFrameOrigin(NSPoint::new(MARGIN, y));
             y += 24.0;
@@ -315,7 +348,7 @@ impl MainViews {
             self.detail.setFrameOrigin(NSPoint::new(MARGIN, y));
             y += 24.0;
         }
-        let height = y + HERO - 152.0;
+        let height = y + HERO - STATUS_Y;
         self.hero.setFrameSize(NSSize::new(WIDTH, height));
         self.rule.setFrameOrigin(NSPoint::new(0.0, height));
         self.layout();

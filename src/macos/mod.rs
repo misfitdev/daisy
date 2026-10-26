@@ -69,24 +69,29 @@ pub fn displays() -> Result<Vec<Rect>> {
     if error != 0 || count == 0 {
         bail!("could not list displays (CoreGraphics error {error})");
     }
-    let displays = &mut displays[..count as usize];
-    // SAFETY: every id came from CoreGraphics. Keep the device display first
-    // so peers can place its identity without extra wire metadata.
-    displays
-        .sort_by_key(|&display| unsafe { (ffi::CGDisplayIsBuiltin(display) == 0, display != ffi::CGMainDisplayID()) });
-    Ok(displays
+    // SAFETY: CoreGraphics supplies the primary display id.
+    let main = unsafe { ffi::CGMainDisplayID() };
+    let facts = displays[..count as usize]
         .iter()
-        // SAFETY: each id came from CGGetOnlineDisplayList
+        // SAFETY: each id came from CGGetOnlineDisplayList.
         .filter(|&&display| unsafe { ffi::CGDisplayMirrorsDisplay(display) } == 0)
-        // SAFETY: as above
-        .map(|&display| unsafe { ffi::CGDisplayBounds(display) })
-        .map(|rect| Rect {
-            x: rect.origin.x,
-            y: rect.origin.y,
-            width: rect.size.width,
-            height: rect.size.height,
+        .map(|&display| {
+            // SAFETY: each id came from CoreGraphics.
+            let rect = unsafe { ffi::CGDisplayBounds(display) };
+            crate::layout::DisplayFacts {
+                rect: Rect {
+                    x: rect.origin.x,
+                    y: rect.origin.y,
+                    width: rect.size.width,
+                    height: rect.size.height,
+                },
+                // SAFETY: as above.
+                builtin: unsafe { ffi::CGDisplayIsBuiltin(display) } != 0,
+                main: display == main,
+            }
         })
-        .collect())
+        .collect();
+    Ok(crate::layout::ordered_displays(facts))
 }
 
 /// The running macOS major version, or 0 if it cannot be read.

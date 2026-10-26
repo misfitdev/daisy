@@ -213,6 +213,69 @@ pub fn caption_above(display: Rect, neighbor: Rect) -> bool {
     neighbor.y + neighbor.height / 2.0 - display.y - display.height / 2.0 > display.height.min(neighbor.height) * 0.35
 }
 
+/// Five links straddle the shared edge, leaving captions and flowers clear.
+pub fn border_connection(from: Rect, to: Rect) -> Option<(Offset, Offset)> {
+    let dx = to.x + to.width / 2.0 - from.x - from.width / 2.0;
+    let dy = to.y + to.height / 2.0 - from.y - from.height / 2.0;
+    let diagonal = |x: f64, y: f64| Some(((x - dx.signum(), y - dy.signum()), (x + dx.signum(), y + dy.signum())));
+    let overlap_x = (from.x + from.width).min(to.x + to.width) - from.x.max(to.x);
+    let overlap_y = (from.y + from.height).min(to.y + to.height) - from.y.max(to.y);
+    if overlap_y > 1.0 && overlap_x <= 1.0 {
+        let y = from.y.max(to.y) + overlap_y / 2.0;
+        let x = if from.x < to.x {
+            (from.x + from.width + to.x) / 2.0
+        } else {
+            (to.x + to.width + from.x) / 2.0
+        };
+        let sign = dx.signum();
+        Some(((x - sign, y), (x + sign, y)))
+    } else if overlap_x > 1.0 && overlap_y <= 1.0 {
+        let x = from.x.max(to.x) + overlap_x / 2.0;
+        let y = if from.y < to.y {
+            (from.y + from.height + to.y) / 2.0
+        } else {
+            (to.y + to.height + from.y) / 2.0
+        };
+        diagonal(x, y)
+    } else {
+        let x = if from.x < to.x {
+            (from.x + from.width + to.x) / 2.0
+        } else {
+            (to.x + to.width + from.x) / 2.0
+        };
+        let y = if from.y < to.y {
+            (from.y + from.height + to.y) / 2.0
+        } else {
+            (to.y + to.height + from.y) / 2.0
+        };
+        let (dx, dy) = ((to.x - from.x).signum(), (to.y - from.y).signum());
+        Some(((x - dx, y - dy), (x + dx, y + dy)))
+    }
+}
+
+/// The primary display keeps its system name; external numbering starts at one.
+pub fn display_label(
+    name: &str,
+    local: bool,
+    locked: bool,
+    active: bool,
+    view: Rect,
+    external: Option<usize>,
+) -> String {
+    let compact = view.width < 140.0 || view.height < 64.0;
+    if let Some(number) = external {
+        format!("{name}:{number}")
+    } else if compact && local {
+        if view.width >= 110.0 { "This system" } else { "Here" }.to_owned()
+    } else if locked {
+        format!("{name} · Locked")
+    } else if active {
+        format!("{name} · In use")
+    } else {
+        name.to_owned()
+    }
+}
+
 /// A whole oval link, fixed in view points rather than stretched to fill a gap.
 pub struct ChainLink {
     pub center: Offset,
@@ -254,6 +317,56 @@ mod tests {
             offset: (x, 0.0),
             active,
             connected: true,
+        }
+    }
+
+    #[test]
+    fn border_paths_keep_horizontal_diagonal_and_corner_endpoints() {
+        let from = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+        };
+        for (x, y, expected) in [
+            (100.0, 0.0, ((99.0, 40.0), (101.0, 40.0))),
+            (-100.0, 0.0, ((1.0, 40.0), (-1.0, 40.0))),
+            (100.0, 20.0, ((99.0, 50.0), (101.0, 50.0))),
+            (40.0, 80.0, ((69.0, 79.0), (71.0, 81.0))),
+            (40.0, -80.0, ((69.0, 1.0), (71.0, -1.0))),
+            (100.0, 80.0, ((99.0, 79.0), (101.0, 81.0))),
+            (-100.0, 80.0, ((1.0, 79.0), (-1.0, 81.0))),
+        ] {
+            assert_eq!(
+                border_connection(from, Rect { x, y, ..from }),
+                Some(expected),
+                "neighbor at {x}, {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_labels_preserve_precedence_and_compact_thresholds() {
+        for (local, locked, active, width, height, external, expected) in [
+            (false, false, false, 200.0, 100.0, None, "Studio"),
+            (true, false, false, 200.0, 100.0, None, "Studio"),
+            (false, false, true, 200.0, 100.0, None, "Studio · In use"),
+            (false, true, true, 200.0, 100.0, None, "Studio · Locked"),
+            (true, true, true, 110.0, 100.0, None, "This system"),
+            (true, false, false, 109.9, 100.0, None, "Here"),
+            (true, false, false, 140.0, 64.0, None, "Studio"),
+            (true, false, false, 140.0, 63.9, None, "This system"),
+            (false, false, false, 100.0, 100.0, None, "Studio"),
+            (true, true, true, 100.0, 50.0, Some(1), "Studio:1"),
+            (false, false, false, 200.0, 100.0, Some(2), "Studio:2"),
+        ] {
+            let view = Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+            };
+            assert_eq!(display_label("Studio", local, locked, active, view, external), expected);
         }
     }
 

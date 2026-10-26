@@ -6,6 +6,7 @@ use super::*;
 /// frame captures render the actual AppKit view, not a separate web mockup.
 pub(super) fn run(mtm: MainThreadMarker, target: &AnyObject) {
     let views = super::super::window::MainViews::new(mtm, target);
+    views.test_status_layout();
     let view = &views.arrange;
     let display = Rect {
         x: 0.0,

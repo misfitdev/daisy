@@ -22,7 +22,7 @@ use objc2_foundation::{
 };
 
 use super::{coral_color, flower_image};
-use crate::arrangement_motion::{LINK_SCALE, Motion, Target, chain};
+use crate::arrangement_motion::{LINK_SCALE, Motion, Target, border_connection, chain, display_label};
 use crate::control::Link;
 use crate::identity::PublicKey;
 use crate::input::{Rect, Side};
@@ -841,50 +841,6 @@ fn arriving(rect: Rect, arrival: f64) -> Rect {
     }
 }
 
-fn compact_display(view: Rect) -> bool {
-    view.width < 140.0 || view.height < 64.0
-}
-
-/// Five links straddle the shared edge, leaving captions and flowers clear.
-fn border_connection(from: Rect, to: Rect) -> Option<(Offset, Offset)> {
-    let dx = to.x + to.width / 2.0 - from.x - from.width / 2.0;
-    let dy = to.y + to.height / 2.0 - from.y - from.height / 2.0;
-    let diagonal = |x: f64, y: f64| Some(((x - dx.signum(), y - dy.signum()), (x + dx.signum(), y + dy.signum())));
-    let overlap_x = (from.x + from.width).min(to.x + to.width) - from.x.max(to.x);
-    let overlap_y = (from.y + from.height).min(to.y + to.height) - from.y.max(to.y);
-    if overlap_y > 1.0 && overlap_x <= 1.0 {
-        let y = from.y.max(to.y) + overlap_y / 2.0;
-        let x = if from.x < to.x {
-            (from.x + from.width + to.x) / 2.0
-        } else {
-            (to.x + to.width + from.x) / 2.0
-        };
-        let sign = dx.signum();
-        Some(((x - sign, y), (x + sign, y)))
-    } else if overlap_x > 1.0 && overlap_y <= 1.0 {
-        let x = from.x.max(to.x) + overlap_x / 2.0;
-        let y = if from.y < to.y {
-            (from.y + from.height + to.y) / 2.0
-        } else {
-            (to.y + to.height + from.y) / 2.0
-        };
-        diagonal(x, y)
-    } else {
-        let x = if from.x < to.x {
-            (from.x + from.width + to.x) / 2.0
-        } else {
-            (to.x + to.width + from.x) / 2.0
-        };
-        let y = if from.y < to.y {
-            (from.y + from.height + to.y) / 2.0
-        } else {
-            (to.y + to.height + from.y) / 2.0
-        };
-        let (dx, dy) = ((to.x - from.x).signum(), (to.y - from.y).signum());
-        Some(((x - dx, y - dy), (x + dx, y + dy)))
-    }
-}
-
 fn glyph_size(view: Rect) -> f64 {
     (view.height * 0.26).min(28.0)
 }
@@ -999,18 +955,7 @@ fn draw_identity(
             )
         };
     }
-    let compact = compact_display(view);
-    let name = if let Some(number) = external {
-        format!("{}:{number}", shown.name)
-    } else if compact && shown.me {
-        if view.width >= 110.0 { "This system" } else { "Here" }.to_owned()
-    } else if shown.locked {
-        format!("{} · Locked", shown.name)
-    } else if active {
-        format!("{} · In use", shown.name)
-    } else {
-        shown.name.clone()
-    };
+    let name = display_label(&shown.name, shown.me, shown.locked, active, view, external);
     let name_height = 16.0;
     let name_y = if !main {
         view.y + (view.height - name_height) / 2.0
