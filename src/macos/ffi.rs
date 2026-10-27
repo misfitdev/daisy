@@ -140,6 +140,7 @@ unsafe extern "C" {
 
     pub fn CGGetOnlineDisplayList(max: u32, displays: *mut CGDirectDisplayID, count: *mut u32) -> i32;
     pub fn CGDisplayMirrorsDisplay(display: CGDirectDisplayID) -> CGDirectDisplayID;
+    pub fn CGDisplayIsBuiltin(display: CGDirectDisplayID) -> u32;
     pub fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
     pub fn CGMainDisplayID() -> CGDirectDisplayID;
     pub fn CGDisplayHideCursor(display: CGDirectDisplayID) -> i32;

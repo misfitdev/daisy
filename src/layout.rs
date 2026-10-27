@@ -12,6 +12,21 @@ use std::collections::BTreeMap;
 
 use crate::input::{Point, Rect, Side};
 
+/// Platform facts needed to identify the display that represents this system.
+#[derive(Clone, Copy, Debug)]
+pub struct DisplayFacts {
+    pub rect: Rect,
+    pub builtin: bool,
+    pub main: bool,
+}
+
+/// Prefer the built-in display, then the primary external display. Preserve the
+/// platform order among remaining externals so their labels stay consistent.
+pub fn ordered_displays(mut displays: Vec<DisplayFacts>) -> Vec<Rect> {
+    displays.sort_by_key(|display| (!display.builtin, !display.main));
+    displays.into_iter().map(|display| display.rect).collect()
+}
+
 /// How close an edge comes before it snaps flush or into line.
 pub const SNAP: f64 = 8.0;
 /// How far past its own displays the pointer may travel to reach another
@@ -811,6 +826,38 @@ fn clamp(display: &Rect, point: Point) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_display_order_prefers_builtin_then_main_and_keeps_external_order() {
+        let fact = |x, builtin, main| DisplayFacts {
+            rect: Rect {
+                x,
+                y: 0.0,
+                width: 100.0,
+                height: 80.0,
+            },
+            builtin,
+            main,
+        };
+        let secondary = fact(1.0, false, false);
+        let primary = fact(2.0, false, true);
+        let builtin = fact(3.0, true, false);
+        let other = fact(4.0, false, false);
+        assert_eq!(
+            ordered_displays(vec![secondary, primary, builtin, other]),
+            vec![builtin.rect, primary.rect, secondary.rect, other.rect]
+        );
+        assert_eq!(
+            ordered_displays(vec![secondary, primary, other]),
+            vec![primary.rect, secondary.rect, other.rect],
+            "primary external takes over without a built-in display"
+        );
+        assert_eq!(
+            ordered_displays(vec![other, secondary]),
+            vec![other.rect, secondary.rect]
+        );
+        assert!(ordered_displays(Vec::new()).is_empty());
+    }
 
     #[test]
     fn arrangement_clock_and_coordinate_limits_have_explicit_boundaries() {

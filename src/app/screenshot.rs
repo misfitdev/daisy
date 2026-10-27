@@ -30,40 +30,23 @@ pub fn save(path: &Path) -> Result<()> {
     let light = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua });
     views.window.setAppearance(light.as_deref());
 
-    let (laptop, studio) = (key(1), key(2));
-    views.arrange.show(vec![
-        Shown {
-            number: 1,
-            key: laptop,
-            name: "Laptop".to_owned(),
-            displays: vec![rect(0.0, 0.0, 1512.0, 982.0)],
-            offset: (0.0, 0.0),
-            me: true,
-            in_control: Some(true),
-            locked: false,
-            hint: String::new(),
-        },
-        Shown {
-            number: 2,
-            key: studio,
-            name: "Studio".to_owned(),
-            displays: vec![rect(0.0, 0.0, 2560.0, 1440.0), rect(2560.0, 260.0, 1920.0, 1080.0)],
-            offset: (1512.0, -229.0),
-            me: false,
-            in_control: Some(false),
-            locked: false,
-            hint: String::new(),
-        },
-    ]);
+    views.arrange.show(sample_scene());
     views.show_status("", "");
     views.show_peers(
-        &[PeerRow {
-            number: 2,
-            name: "Studio".to_owned(),
-            detail: "Connected, 4 ms · Renews while connected".to_owned(),
-            fingerprint: String::new(),
-            trust: "Until unused for 4 days".to_owned(),
-        }],
+        &[
+            PeerRow {
+                name: "Studio".to_owned(),
+                detail: "Connected, 4 ms · Renews while connected".to_owned(),
+                fingerprint: String::new(),
+                trust: "Until unused for 4 days".to_owned(),
+            },
+            PeerRow {
+                name: "Desktop".to_owned(),
+                detail: "Connected · 3 ms".to_owned(),
+                fingerprint: String::new(),
+                trust: "Until unused for 4 days".to_owned(),
+            },
+        ],
         as_target(&target),
     );
     views.start.setHidden(true);
@@ -129,4 +112,41 @@ fn key(byte: u8) -> PublicKey {
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
     Rect { x, y, width, height }
+}
+
+/// A shared sample for the website image and its transfer-path checks.
+pub(super) fn sample_scene() -> Vec<Shown> {
+    let (laptop, studio, desktop) = (key(1), key(2), key(3));
+    vec![
+        Shown {
+            key: laptop,
+            name: "Laptop".to_owned(),
+            displays: vec![rect(0.0, 0.0, 1512.0, 982.0)],
+            offset: (0.0, 0.0),
+            me: true,
+            in_control: Some(true),
+            locked: false,
+            hint: String::new(),
+        },
+        Shown {
+            key: studio,
+            name: "Studio".to_owned(),
+            displays: vec![rect(0.0, 0.0, 1512.0, 982.0), rect(-1928.0, -1440.0, 3440.0, 1440.0)],
+            offset: (1512.0, 0.0),
+            me: false,
+            in_control: Some(false),
+            locked: false,
+            hint: String::new(),
+        },
+        Shown {
+            key: desktop,
+            name: "Desktop".to_owned(),
+            displays: vec![rect(0.0, 0.0, 1920.0, 1080.0)],
+            offset: (3024.0, -1080.0),
+            me: false,
+            in_control: Some(false),
+            locked: false,
+            hint: String::new(),
+        },
+    ]
 }

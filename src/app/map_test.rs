@@ -6,6 +6,7 @@ use super::*;
 /// frame captures render the actual AppKit view, not a separate web mockup.
 pub(super) fn run(mtm: MainThreadMarker, target: &AnyObject) {
     let views = super::super::window::MainViews::new(mtm, target);
+    views.test_status_layout();
     let view = &views.arrange;
     let display = Rect {
         x: 0.0,
@@ -14,7 +15,6 @@ pub(super) fn run(mtm: MainThreadMarker, target: &AnyObject) {
         height: 982.0,
     };
     let shown = |byte: u8, name: &str, offset, active| Shown {
-        number: byte as usize,
         key: PublicKey::from_bytes(&[byte; 32]).unwrap(),
         name: name.to_owned(),
         displays: vec![display],
@@ -32,6 +32,21 @@ pub(super) fn run(mtm: MainThreadMarker, target: &AnyObject) {
         shown(1, "Local system", (0.0, 0.0), true),
         shown(2, "Studio", (1512.0, 0.0), false),
     ];
+    let mut laptop = scene[0].clone();
+    laptop.displays.push(Rect {
+        width: 2560.0,
+        height: 1440.0,
+        x: 1512.0,
+        y: 0.0,
+    });
+    assert_eq!(laptop.main(), Some(display), "identity stays on the device display");
+    assert_eq!(glyph_center(display), (756.0, 491.0));
+    laptop.displays.remove(0);
+    assert_eq!(
+        laptop.main(),
+        laptop.placed().next(),
+        "an external display takes over when alone"
+    );
     view.show(scene.clone());
     assert!(
         view.ivars().timer.borrow().is_none(),
@@ -101,7 +116,6 @@ pub(super) fn run(mtm: MainThreadMarker, target: &AnyObject) {
         views.stop.setHidden(false);
         views.show_peers(
             &["Studio", "Laptop"].map(|name| super::super::window::PeerRow {
-                number: 2,
                 name: name.to_owned(),
                 detail: "Connected".to_owned(),
                 fingerprint: String::new(),
@@ -171,7 +185,6 @@ pub(super) fn run(mtm: MainThreadMarker, target: &AnyObject) {
             .collect();
         let rows: Vec<_> = (2..=8)
             .map(|n| super::super::window::PeerRow {
-                number: n,
                 name: format!("System {n}"),
                 detail: "Connected · Renews while connected".into(),
                 fingerprint: String::new(),
@@ -262,7 +275,6 @@ fn selection_follows_departing_peers(view: &ArrangeView, original: &[Shown]) {
     let mut other = scene[1].clone();
     other.key = PublicKey::from_bytes(&[3; 32]).unwrap();
     other.name = "Other system".to_owned();
-    other.number = 3;
     other.offset.0 += 1512.0;
     scene.push(other.clone());
     view.show(scene.clone());

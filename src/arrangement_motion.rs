@@ -213,8 +213,70 @@ pub fn caption_above(display: Rect, neighbor: Rect) -> bool {
     neighbor.y + neighbor.height / 2.0 - display.y - display.height / 2.0 > display.height.min(neighbor.height) * 0.35
 }
 
-/// A whole U-shaped link. Scale is fixed in view points, never stretched
-/// to bridge a gap. Alternate links face each other, with bowls at each end.
+/// Five links straddle the shared edge, leaving captions and flowers clear.
+pub fn border_connection(from: Rect, to: Rect) -> Option<(Offset, Offset)> {
+    let dx = to.x + to.width / 2.0 - from.x - from.width / 2.0;
+    let dy = to.y + to.height / 2.0 - from.y - from.height / 2.0;
+    let diagonal = |x: f64, y: f64| Some(((x - dx.signum(), y - dy.signum()), (x + dx.signum(), y + dy.signum())));
+    let overlap_x = (from.x + from.width).min(to.x + to.width) - from.x.max(to.x);
+    let overlap_y = (from.y + from.height).min(to.y + to.height) - from.y.max(to.y);
+    if overlap_y > 1.0 && overlap_x <= 1.0 {
+        let y = from.y.max(to.y) + overlap_y / 2.0;
+        let x = if from.x < to.x {
+            (from.x + from.width + to.x) / 2.0
+        } else {
+            (to.x + to.width + from.x) / 2.0
+        };
+        let sign = dx.signum();
+        Some(((x - sign, y), (x + sign, y)))
+    } else if overlap_x > 1.0 && overlap_y <= 1.0 {
+        let x = from.x.max(to.x) + overlap_x / 2.0;
+        let y = if from.y < to.y {
+            (from.y + from.height + to.y) / 2.0
+        } else {
+            (to.y + to.height + from.y) / 2.0
+        };
+        diagonal(x, y)
+    } else {
+        let x = if from.x < to.x {
+            (from.x + from.width + to.x) / 2.0
+        } else {
+            (to.x + to.width + from.x) / 2.0
+        };
+        let y = if from.y < to.y {
+            (from.y + from.height + to.y) / 2.0
+        } else {
+            (to.y + to.height + from.y) / 2.0
+        };
+        let (dx, dy) = ((to.x - from.x).signum(), (to.y - from.y).signum());
+        Some(((x - dx, y - dy), (x + dx, y + dy)))
+    }
+}
+
+/// The primary display keeps its system name; external numbering starts at one.
+pub fn display_label(
+    name: &str,
+    local: bool,
+    locked: bool,
+    active: bool,
+    view: Rect,
+    external: Option<usize>,
+) -> String {
+    let compact = view.width < 140.0 || view.height < 64.0;
+    if let Some(number) = external {
+        format!("{name}:{number}")
+    } else if compact && local {
+        if view.width >= 110.0 { "This system" } else { "Here" }.to_owned()
+    } else if locked {
+        format!("{name} · Locked")
+    } else if active {
+        format!("{name} · In use")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// A whole oval link, fixed in view points rather than stretched to fill a gap.
 pub struct ChainLink {
     pub center: Offset,
     pub angle: f64,
@@ -222,37 +284,25 @@ pub struct ChainLink {
 
 pub const LINK_SCALE: f64 = 0.18;
 
-pub fn chain(from: Offset, to: Offset, clearance: f64, pulse: Option<f64>) -> Vec<ChainLink> {
+/// Two full links on either side of a bisected center link.
+pub fn chain(from: Offset, to: Offset, pulse: Option<f64>) -> Vec<ChainLink> {
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
     let distance = dx.hypot(dy);
-    let room = distance - 2.0 * (clearance + 26.25 * LINK_SCALE);
-    let tip = 37.0 * LINK_SCALE;
-    let bowl = 47.5 * LINK_SCALE;
-    if room < tip || !distance.is_finite() {
+    if !distance.is_finite() || distance < 1.0 {
         return Vec::new();
     }
-    let mut pairs = ((room + bowl) / (tip + bowl)).ceil().clamp(1.0, 64.0) as usize;
-    let span = |pairs: usize| pairs as f64 * tip + (pairs - 1) as f64 * bowl;
-    while pairs > 1 && (span(pairs) - room) / (pairs * 2 - 1) as f64 > 14.0 * LINK_SCALE {
-        pairs -= 1;
-    }
-    let tighten = ((span(pairs) - room) / (pairs * 2 - 1) as f64).max(0.0);
-    let (tip, bowl) = (tip - tighten, bowl - tighten);
-    let length = pairs as f64 * tip + (pairs - 1) as f64 * bowl;
+    let midpoint = ((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
     let (ux, uy) = (dx / distance, dy / distance);
-    let mut at = (distance - length) / 2.0;
-    (0..pairs * 2)
+    (0..5)
         .map(|index| {
-            let phase = pulse.map_or(0.0, |age| {
-                ((age - index as f64 * (0.45 / (pairs * 2) as f64).min(0.022)) / 0.22).clamp(0.0, 1.0)
-            });
+            let at = (index as f64 - 2.0) * 40.0 * LINK_SCALE;
+            let phase = pulse.map_or(0.0, |age| ((age - index as f64 * 0.022) / 0.22).clamp(0.0, 1.0));
             let lift = (phase * std::f64::consts::PI).sin() * 0.8;
-            let link = ChainLink {
-                center: (from.0 + ux * at - uy * lift, from.1 + uy * at + ux * lift),
-                angle: dy.atan2(dx) + if index % 2 == 0 { 0.0 } else { std::f64::consts::PI },
-            };
-            at += if index % 2 == 0 { tip } else { bowl };
-            link
+            let turn = (index as f64 - 2.0) * 0.12;
+            ChainLink {
+                center: (midpoint.0 + ux * at - uy * lift, midpoint.1 + uy * at + ux * lift),
+                angle: dy.atan2(dx) + turn + if index % 2 == 1 { std::f64::consts::PI } else { 0.0 },
+            }
         })
         .collect()
 }
@@ -267,6 +317,56 @@ mod tests {
             offset: (x, 0.0),
             active,
             connected: true,
+        }
+    }
+
+    #[test]
+    fn border_paths_keep_horizontal_diagonal_and_corner_endpoints() {
+        let from = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+        };
+        for (x, y, expected) in [
+            (100.0, 0.0, ((99.0, 40.0), (101.0, 40.0))),
+            (-100.0, 0.0, ((1.0, 40.0), (-1.0, 40.0))),
+            (100.0, 20.0, ((99.0, 50.0), (101.0, 50.0))),
+            (40.0, 80.0, ((69.0, 79.0), (71.0, 81.0))),
+            (40.0, -80.0, ((69.0, 1.0), (71.0, -1.0))),
+            (100.0, 80.0, ((99.0, 79.0), (101.0, 81.0))),
+            (-100.0, 80.0, ((1.0, 79.0), (-1.0, 81.0))),
+        ] {
+            assert_eq!(
+                border_connection(from, Rect { x, y, ..from }),
+                Some(expected),
+                "neighbor at {x}, {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_labels_preserve_precedence_and_compact_thresholds() {
+        for (local, locked, active, width, height, external, expected) in [
+            (false, false, false, 200.0, 100.0, None, "Studio"),
+            (true, false, false, 200.0, 100.0, None, "Studio"),
+            (false, false, true, 200.0, 100.0, None, "Studio · In use"),
+            (false, true, true, 200.0, 100.0, None, "Studio · Locked"),
+            (true, true, true, 110.0, 100.0, None, "This system"),
+            (true, false, false, 109.9, 100.0, None, "Here"),
+            (true, false, false, 140.0, 64.0, None, "Studio"),
+            (true, false, false, 140.0, 63.9, None, "This system"),
+            (false, false, false, 100.0, 100.0, None, "Studio"),
+            (true, true, true, 100.0, 50.0, Some(1), "Studio:1"),
+            (false, false, false, 200.0, 100.0, Some(2), "Studio:2"),
+        ] {
+            let view = Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height,
+            };
+            assert_eq!(display_label("Studio", local, locked, active, view, external), expected);
         }
     }
 
@@ -309,14 +409,14 @@ mod tests {
     }
 
     #[test]
-    fn chain_uses_even_rigid_links_with_clearance_and_no_short_gap_fallback() {
-        assert!(chain((0.0, 0.0), (20.0, 0.0), 14.0, None).is_empty());
+    fn chain_straddles_the_border_with_five_rigid_links() {
         for end in [(120.0, 0.0), (0.0, 120.0), (100.0, 100.0)] {
-            let links = chain((0.0, 0.0), end, 14.0, None);
-            assert!(links.len() >= 2 && links.len().is_multiple_of(2));
-            assert!(links[0].center.0.hypot(links[0].center.1) > 14.0);
-            for pair in links.as_chunks::<2>().0 {
-                assert!(((pair[1].angle - pair[0].angle) - std::f64::consts::PI).abs() < 1e-9);
+            let links = chain((0.0, 0.0), end, None);
+            assert_eq!(links.len(), 5);
+            assert_eq!(links[2].center, (end.0 / 2.0, end.1 / 2.0));
+            for link in [&links[1], &links[3]] {
+                let distance = (link.center.0 - links[2].center.0).hypot(link.center.1 - links[2].center.1);
+                assert!((distance - 40.0 * LINK_SCALE).abs() < 1e-9);
             }
         }
     }

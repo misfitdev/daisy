@@ -1298,7 +1298,6 @@ impl AppDelegate {
             .map(|peer| {
                 let live = links.get(&peer.key).is_some();
                 window::PeerRow {
-                    number: 2 + peers.iter().filter(|other| other.key < peer.key).count(),
                     name: peer.name.clone(),
                     detail: format!(
                         "{} · {}",
