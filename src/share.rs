@@ -24,6 +24,8 @@ use crate::session::{Channel, ChannelReceiver, ChannelSender, SessionError};
 const HEARTBEAT: Duration = Duration::from_secs(1);
 /// Silence after which the peer is presumed gone.
 const SILENCE_LIMIT: Duration = Duration::from_secs(3);
+/// Keep input state through a brief loss of the last link.
+const EMPTY_GRACE: Duration = Duration::from_secs(15);
 
 /// Puts the pointer back on this system when control returns to it.
 pub trait Pointer {
@@ -179,6 +181,9 @@ where
         agreed_tx: layout.arranging.agreed_tx,
         done,
     }));
+    // This single-link entrypoint cannot add another member. Once its link
+    // ends, the core can exit without waiting for a reconnect on this channel.
+    drop(members);
     let group = Group {
         files: None,
         displays: tokio::sync::watch::channel(vec![layout.screen]).1,
@@ -301,6 +306,8 @@ where
         .context("the input control is already in use by another session")?;
     let (received_tx, mut received) = mpsc::channel::<Received>(INCOMING_CAPACITY);
     let mut links: std::collections::BTreeMap<PublicKey, Link> = std::collections::BTreeMap::new();
+    let mut had_link = false;
+    let mut empty_since = None;
     // the peer the pointer crossed onto, while this system drives it
     let mut crossed: Option<PublicKey> = None;
     // the peer driving this system while its pointer is here
@@ -498,12 +505,30 @@ where
             continue;
         }
         if links.is_empty() {
+            // Publish the removal before parking the empty core; otherwise
+            // the window retains the departed peer throughout the grace.
+            if review_changed {
+                continue;
+            }
             waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
             if waiting.is_empty() {
-                return Ok(());
+                if !had_link {
+                    return Ok(());
+                }
+                let since = *empty_since.get_or_insert_with(Instant::now);
+                tokio::select! {
+                    change = membership.recv() => match change {
+                        Some(change) => waiting.push_back(change),
+                        None => return Ok(()),
+                    },
+                    _ = tokio::time::sleep_until(since + EMPTY_GRACE) => return Ok(()),
+                    error = &mut until => return Err(error),
+                }
             }
             continue;
         }
+        had_link = true;
+        empty_since = None;
         tokio::select! {
             _ = trace.changed.notified() => {},
             message = receive_file_message(&mut file_messages) => {
@@ -515,9 +540,10 @@ where
                     }
                 }
             },
-            change = membership.recv() => match change {
-                Some(change) => waiting.push_back(change),
-                None => std::future::pending::<()>().await,
+            change = membership.recv(), if !membership.is_closed() => {
+                if let Some(change) = change {
+                    waiting.push_back(change);
+                }
             },
             _ = wakeups.recv() => {
                 let mut state = control.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2566,6 +2592,60 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_empty_group_accepts_a_returning_link_before_its_grace_expires() {
+        let (control, members, mut membership, mut far, mut ended, _keys) = group_of(2, None).await;
+        let first = membership.recv().await.unwrap();
+        let second = membership.recv().await.unwrap();
+        members.send(first).unwrap();
+        let local = group(&control);
+        let mut view = local.arranged.subscribe();
+        let task = tokio::spawn(async move {
+            let (_capture, input) = mpsc::channel(16);
+            let (mut pointer, mut injector, mut board) = (Returned::default(), Recorded::default(), no_clipboard());
+            run(
+                local,
+                VecDeque::new(),
+                &mut membership,
+                input,
+                &mut pointer,
+                &mut injector,
+                &mut board,
+                pending(),
+            )
+            .await
+        });
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        view_when(&mut view, |view| view.layout.members.len() == 2).await;
+
+        drop(far.remove(0));
+        ended.remove(0).await.unwrap().unwrap();
+        view_when(&mut view, |view| view.layout.members.len() == 1).await;
+        assert!(!task.is_finished(), "a brief disconnect should retain the sharing core");
+
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(14)).await;
+        assert!(!task.is_finished());
+        members.send(second).unwrap();
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        view_when(&mut view, |view| view.layout.members.len() == 2).await;
+        assert!(!task.is_finished(), "the new link joined the original core");
+
+        drop(far.remove(0));
+        ended.remove(0).await.unwrap().unwrap();
+        view_when(&mut view, |view| view.layout.members.len() == 1).await;
+        tokio::time::advance(Duration::from_secs(14)).await;
+        assert!(!task.is_finished(), "the grace resets after a running link ends");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

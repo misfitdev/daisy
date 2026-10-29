@@ -300,7 +300,10 @@ define_class!(
                 let age = if a.in_control == Some(true) { appearance(a).2 } else { appearance(b).2 };
                 let (from, to) = if b.in_control == Some(true) { (to, from) } else { (from, to) };
                 if let Some((start, end)) = border_connection(from, to) {
-                    draw_chain(start, end, age, alpha);
+                    let overlap_x = (from.x + from.width).min(to.x + to.width) - from.x.max(to.x);
+                    let overlap_y = (from.y + from.height).min(to.y + to.height) - from.y.max(to.y);
+                    // A corner has no shared edge to carry a five-link chain.
+                    draw_chain(start, end, age, alpha, overlap_x <= 1.0 && overlap_y <= 1.0);
                 }
             }
             for shown in &scene {
@@ -849,9 +852,12 @@ fn glyph_center(view: Rect) -> Offset {
     (view.x + view.width / 2.0, view.y + view.height / 2.0)
 }
 
-fn draw_chain(from: Offset, to: Offset, pulse: Option<f64>, alpha: f64) {
+fn draw_chain(from: Offset, to: Offset, pulse: Option<f64>, alpha: f64, corner: bool) {
     NSColor::colorWithSRGBRed_green_blue_alpha(0.45, 0.49, 0.52, alpha).setStroke();
-    for link in chain(from, to, pulse) {
+    for (index, link) in chain(from, to, pulse).into_iter().enumerate() {
+        if corner && index != 2 {
+            continue;
+        }
         let (sin, cos) = link.angle.sin_cos();
         let point = |x: f64, y: f64| {
             NSPoint::new(

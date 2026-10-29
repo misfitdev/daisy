@@ -838,10 +838,15 @@ impl ControllerObserver {
 impl ServiceObserver for ControllerObserver {
     fn waiting(&mut self, _name: &str, _key: PublicKey, port: u16, pairing: Option<Policy>) {
         self.waiting = Some((port, pairing.is_some()));
-        self.send_waiting(port, pairing.is_some());
+        if self.linked.is_empty() {
+            self.send_waiting(port, pairing.is_some());
+        }
     }
 
     fn connecting(&mut self, address: &str, peer: Option<&str>) {
+        if !self.linked.is_empty() {
+            return;
+        }
         let _ = self.events.send(Event::Status(Status::Connecting {
             address: address.to_owned(),
             peer: peer.map(str::to_owned),
@@ -849,6 +854,9 @@ impl ServiceObserver for ControllerObserver {
     }
 
     fn reconnecting(&mut self, address: &str, peer: Option<&str>, wait: std::time::Duration) {
+        if !self.linked.is_empty() {
+            return;
+        }
         let _ = self.events.send(Event::Status(Status::Reconnecting {
             address: address.to_owned(),
             peer: peer.map(str::to_owned),
@@ -917,7 +925,9 @@ impl ServiceObserver for ControllerObserver {
         }
         if let Some((port, _)) = self.waiting {
             self.waiting = Some((port, false));
-            self.send_waiting(port, false);
+            if self.linked.is_empty() {
+                self.send_waiting(port, false);
+            }
         }
     }
 
@@ -1167,6 +1177,46 @@ mod tests {
         observer.disconnected("Desk", desk);
         let last = std::iter::from_fn(|| received.try_recv().ok()).last();
         assert!(matches!(last, Some(Event::Status(Status::Waiting { .. }))));
+    }
+
+    #[test]
+    fn looking_for_another_peer_keeps_the_running_group_visible() {
+        let directory = tempfile::tempdir().unwrap();
+        let (events, received) = mpsc::channel();
+        let mut observer = ControllerObserver {
+            told_version: None,
+            events,
+            home: directory.path().to_owned(),
+            waiting: None,
+            stats: std::collections::BTreeMap::new(),
+            linked: Vec::new(),
+            adding: false,
+        };
+        let connected = Identity::generate().unwrap().public_key();
+        let newcomer = Identity::generate().unwrap().public_key();
+        observer.connected("Studio", connected, Side::Right);
+        assert!(matches!(
+            received.recv().unwrap(),
+            Event::Status(Status::Connected { .. })
+        ));
+
+        observer.waiting("New", newcomer, service::DEFAULT_PORT, Some(Policy::IDLE));
+        observer.connecting("192.0.2.1", Some("New"));
+        observer.reconnecting("192.0.2.1", Some("New"), std::time::Duration::from_secs(2));
+        observer.pairing_opened();
+        assert!(matches!(received.recv().unwrap(), Event::Adding(true)));
+        observer.pairing_closed();
+        assert!(matches!(received.recv().unwrap(), Event::Adding(false)));
+        assert!(
+            received.try_recv().is_err(),
+            "other connection activity must not clear the arrangement"
+        );
+
+        observer.disconnected("Studio", connected);
+        assert!(matches!(
+            received.recv().unwrap(),
+            Event::Status(Status::Waiting { pairing: false, .. })
+        ));
     }
 
     #[test]
