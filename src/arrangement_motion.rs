@@ -253,6 +253,13 @@ pub fn border_connection(from: Rect, to: Rect) -> Option<(Offset, Offset)> {
     }
 }
 
+/// A corner has no shared edge to carry a five-link chain.
+pub fn corner_contact(from: Rect, to: Rect) -> bool {
+    let overlap_x = (from.x + from.width).min(to.x + to.width) - from.x.max(to.x);
+    let overlap_y = (from.y + from.height).min(to.y + to.height) - from.y.max(to.y);
+    overlap_x <= 1.0 && overlap_y <= 1.0
+}
+
 /// The primary display keeps its system name; external numbering starts at one.
 pub fn display_label(
     name: &str,
@@ -307,6 +314,18 @@ pub fn chain(from: Offset, to: Offset, pulse: Option<f64>) -> Vec<ChainLink> {
         .collect()
 }
 
+/// Draw only the center link where displays meet at a corner.
+pub fn connection_chain(from: Rect, to: Rect, pulse: Option<f64>) -> Vec<ChainLink> {
+    let Some((start, end)) = border_connection(from, to) else {
+        return Vec::new();
+    };
+    let mut links = chain(start, end, pulse);
+    if corner_contact(from, to) && links.len() == 5 {
+        links = vec![links.remove(2)];
+    }
+    links
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +361,26 @@ mod tests {
                 Some(expected),
                 "neighbor at {x}, {y}"
             );
+        }
+    }
+
+    #[test]
+    fn corner_contacts_draw_one_link_and_shared_edges_draw_five() {
+        let from = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+        };
+        for (x, y, corner, count) in [
+            (100.0, 0.0, false, 5),
+            (40.0, 80.0, false, 5),
+            (100.0, 80.0, true, 1),
+            (-100.0, 80.0, true, 1),
+        ] {
+            let to = Rect { x, y, ..from };
+            assert_eq!(corner_contact(from, to), corner, "neighbor at {x}, {y}");
+            assert_eq!(connection_chain(from, to, None).len(), count, "neighbor at {x}, {y}");
         }
     }
 

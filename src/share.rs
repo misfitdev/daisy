@@ -2648,6 +2648,80 @@ mod tests {
         task.await.unwrap().unwrap();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_returning_peer_keeps_its_saved_offset_in_the_same_core() {
+        let me = Identity::generate().unwrap();
+        let peer = Identity::generate().unwrap();
+        let peer_key = peer.public_key();
+        let (members, membership) = mpsc::unbounded_channel();
+        let (a, b) = duplex(1 << 17);
+        let (here, there) = tokio::join!(Channel::initiate(a, &me), Channel::respond(b, &peer));
+        let (done, end) = oneshot::channel();
+        members
+            .send(Membership::Join(Joining {
+                channel: here.unwrap(),
+                agreed: (Side::Left, 0),
+                initiator: true,
+                agreed_tx: mpsc::unbounded_channel().0,
+                done,
+            }))
+            .unwrap();
+        let mut there = there.unwrap();
+        let control = Arc::new(SharedControl::new(me.public_key(), me.public_key()));
+        let mut local = group(&control);
+        local.saved = Some((
+            10,
+            me.public_key(),
+            vec![(me.public_key(), (0.0, 0.0)), (peer_key, (1000.0, 200.0))],
+        ));
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+
+        there.send(&Message::Displays { displays: vec![SCREEN] }).await.unwrap();
+        let shown = view_when(&mut view, |view| view.layout.members.len() == 2).await;
+        let offset = shown
+            .layout
+            .members
+            .iter()
+            .find(|member| member.key == peer_key)
+            .unwrap()
+            .offset;
+        assert_eq!(offset, (1000.0, 200.0));
+
+        drop(there);
+        end.await.unwrap().unwrap();
+        view_when(&mut view, |view| view.layout.members.len() == 1).await;
+        assert!(!task.is_finished());
+
+        let (a, b) = duplex(1 << 17);
+        let (here, there) = tokio::join!(Channel::initiate(a, &me), Channel::respond(b, &peer));
+        let (done, _end) = oneshot::channel();
+        members
+            .send(Membership::Join(Joining {
+                channel: here.unwrap(),
+                agreed: (Side::Left, 0),
+                initiator: true,
+                agreed_tx: mpsc::unbounded_channel().0,
+                done,
+            }))
+            .unwrap();
+        let mut there = there.unwrap();
+        there.send(&Message::Displays { displays: vec![SCREEN] }).await.unwrap();
+        let shown = view_when(&mut view, |view| view.layout.members.len() == 2).await;
+        assert_eq!(
+            shown
+                .layout
+                .members
+                .iter()
+                .find(|member| member.key == peer_key)
+                .unwrap()
+                .offset,
+            offset
+        );
+        assert!(!task.is_finished(), "the returning peer joined the original core");
+        task.abort();
+    }
+
     #[tokio::test]
     async fn a_returning_peer_with_an_overlapping_saved_offset_is_repaired_and_broadcast() {
         let (control, _members, membership, mut far, _ended, keys) = group_of(1, None).await;

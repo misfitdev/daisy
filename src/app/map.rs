@@ -22,7 +22,7 @@ use objc2_foundation::{
 };
 
 use super::{coral_color, flower_image};
-use crate::arrangement_motion::{LINK_SCALE, Motion, Target, border_connection, chain, display_label};
+use crate::arrangement_motion::{ChainLink, LINK_SCALE, Motion, Target, connection_chain, display_label};
 use crate::control::Link;
 use crate::identity::PublicKey;
 use crate::input::{Rect, Side};
@@ -299,12 +299,7 @@ define_class!(
                 let to = fit.to_view(to);
                 let age = if a.in_control == Some(true) { appearance(a).2 } else { appearance(b).2 };
                 let (from, to) = if b.in_control == Some(true) { (to, from) } else { (from, to) };
-                if let Some((start, end)) = border_connection(from, to) {
-                    let overlap_x = (from.x + from.width).min(to.x + to.width) - from.x.max(to.x);
-                    let overlap_y = (from.y + from.height).min(to.y + to.height) - from.y.max(to.y);
-                    // A corner has no shared edge to carry a five-link chain.
-                    draw_chain(start, end, age, alpha, overlap_x <= 1.0 && overlap_y <= 1.0);
-                }
+                draw_chain(connection_chain(from, to, age), alpha);
             }
             for shown in &scene {
                 let (emphasis, arrival, pulse) = appearance(shown);
@@ -852,12 +847,9 @@ fn glyph_center(view: Rect) -> Offset {
     (view.x + view.width / 2.0, view.y + view.height / 2.0)
 }
 
-fn draw_chain(from: Offset, to: Offset, pulse: Option<f64>, alpha: f64, corner: bool) {
+fn draw_chain(links: Vec<ChainLink>, alpha: f64) {
     NSColor::colorWithSRGBRed_green_blue_alpha(0.45, 0.49, 0.52, alpha).setStroke();
-    for (index, link) in chain(from, to, pulse).into_iter().enumerate() {
-        if corner && index != 2 {
-            continue;
-        }
+    for link in links {
         let (sin, cos) = link.angle.sin_cos();
         let point = |x: f64, y: f64| {
             NSPoint::new(
@@ -1069,7 +1061,7 @@ mod tests {
         assert_eq!(paths.len(), 4);
         let mut angles = Vec::new();
         for (_, _, from, to) in paths {
-            let (a, b) = border_connection(from, to).unwrap();
+            let (a, b) = crate::arrangement_motion::border_connection(from, to).unwrap();
             angles.push((b.1 - a.1).atan2(b.0 - a.0).abs());
         }
         assert_eq!(angles.iter().filter(|&&a| a < 1e-9).count(), 2);
