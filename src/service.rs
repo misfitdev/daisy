@@ -1416,7 +1416,7 @@ async fn run_core_once(
     let _revocations = AbortOnDrop(tokio::spawn(send_group_trust(hub.clone())));
     let (save, mut saving) = mpsc::unbounded_channel::<crate::peers::Arrangement>();
     let store = peers.clone();
-    let _saver = AbortOnDrop(tokio::spawn(async move {
+    let saver = tokio::spawn(async move {
         while let Some(arrangement) = saving.recv().await {
             if let Err(error) = store.save_arrangement(&arrangement) {
                 tracing::warn!(
@@ -1425,19 +1425,19 @@ async fn run_core_once(
                 );
             }
         }
-    }));
+    });
     let (save_confirmation, mut confirmations) = mpsc::unbounded_channel();
     let confirmation_store = peers.clone();
-    let _confirmation_saving = AbortOnDrop(tokio::spawn(async move {
+    let confirmation_saving = tokio::spawn(async move {
         while let Some(confirmation) = confirmations.recv().await {
             if let Err(error) = confirmation_store.save_confirmation(&confirmation) {
                 tracing::error!(error = ?error, "screen confirmation could not be saved");
             }
         }
-    }));
+    });
     let (save_layouts, mut layout_saving) = mpsc::unbounded_channel::<crate::recall::Memory<_>>();
     let layout_store = peers.clone();
-    let _layout_saving = AbortOnDrop(tokio::spawn(async move {
+    let layout_saving = tokio::spawn(async move {
         while let Some(layouts) = layout_saving.recv().await {
             if let Err(error) = layout_store.save_layouts(&layouts) {
                 tracing::warn!(
@@ -1446,7 +1446,7 @@ async fn run_core_once(
                 );
             }
         }
-    }));
+    });
     let group = share::Group {
         files: hub.files.clone(),
         displays: watched,
@@ -1473,7 +1473,16 @@ async fn run_core_once(
         &mut sharing,
         until,
     );
-    run.await
+    let result = run.await;
+    // The core drops its senders on exit. Drain the queued state writes before
+    // the next core reads them, including after a connection failure.
+    let (arrangement, confirmation, layouts) = tokio::join!(saver, confirmation_saving, layout_saving);
+    for write in [arrangement, confirmation, layouts] {
+        if let Err(error) = write {
+            tracing::warn!(?error, "a screen state writer stopped unexpectedly");
+        }
+    }
+    result
 }
 
 /// What a member starting a link with `key` is told: every system this one

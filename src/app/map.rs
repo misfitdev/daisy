@@ -22,7 +22,7 @@ use objc2_foundation::{
 };
 
 use super::{coral_color, flower_image};
-use crate::arrangement_motion::{LINK_SCALE, Motion, Target, border_connection, chain, display_label};
+use crate::arrangement_motion::{ChainLink, LINK_SCALE, Motion, Target, connection_chain, display_label};
 use crate::control::Link;
 use crate::identity::PublicKey;
 use crate::input::{Rect, Side};
@@ -295,13 +295,11 @@ define_class!(
                 let b = &scene[b];
                 let alpha = motion.bodies.get(&a.key).map_or(1.0, |body| body.connection.value)
                     .min(motion.bodies.get(&b.key).map_or(1.0, |body| body.connection.value)).clamp(0.0, 1.0);
-                let from = fit.to_view(from);
-                let to = fit.to_view(to);
+                let view_from = fit.to_view(from);
+                let view_to = fit.to_view(to);
                 let age = if a.in_control == Some(true) { appearance(a).2 } else { appearance(b).2 };
-                let (from, to) = if b.in_control == Some(true) { (to, from) } else { (from, to) };
-                if let Some((start, end)) = border_connection(from, to) {
-                    draw_chain(start, end, age, alpha);
-                }
+                let (view_from, view_to) = if b.in_control == Some(true) { (view_to, view_from) } else { (view_from, view_to) };
+                draw_chain(connection_chain(from, to, view_from, view_to, age), alpha);
             }
             for shown in &scene {
                 let (emphasis, arrival, pulse) = appearance(shown);
@@ -849,9 +847,9 @@ fn glyph_center(view: Rect) -> Offset {
     (view.x + view.width / 2.0, view.y + view.height / 2.0)
 }
 
-fn draw_chain(from: Offset, to: Offset, pulse: Option<f64>, alpha: f64) {
+fn draw_chain(links: Vec<ChainLink>, alpha: f64) {
     NSColor::colorWithSRGBRed_green_blue_alpha(0.45, 0.49, 0.52, alpha).setStroke();
-    for link in chain(from, to, pulse) {
+    for link in links {
         let (sin, cos) = link.angle.sin_cos();
         let point = |x: f64, y: f64| {
             NSPoint::new(
@@ -1057,13 +1055,13 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_shows_all_four_transfer_paths() {
+    fn screenshot_has_four_connections_with_border_angles() {
         let shown = super::super::screenshot::sample_scene();
         let paths = connections(&shown);
         assert_eq!(paths.len(), 4);
         let mut angles = Vec::new();
         for (_, _, from, to) in paths {
-            let (a, b) = border_connection(from, to).unwrap();
+            let (a, b) = crate::arrangement_motion::border_connection(from, to).unwrap();
             angles.push((b.1 - a.1).atan2(b.0 - a.0).abs());
         }
         assert_eq!(angles.iter().filter(|&&a| a < 1e-9).count(), 2);

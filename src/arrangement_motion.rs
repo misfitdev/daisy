@@ -253,6 +253,13 @@ pub fn border_connection(from: Rect, to: Rect) -> Option<(Offset, Offset)> {
     }
 }
 
+/// A corner has no shared edge to carry a five-link chain.
+pub fn corner_contact(from: Rect, to: Rect) -> bool {
+    let overlap_x = (from.x + from.width).min(to.x + to.width) - from.x.max(to.x);
+    let overlap_y = (from.y + from.height).min(to.y + to.height) - from.y.max(to.y);
+    overlap_x <= 1.0 && overlap_y <= 1.0
+}
+
 /// The primary display keeps its system name; external numbering starts at one.
 pub fn display_label(
     name: &str,
@@ -307,6 +314,18 @@ pub fn chain(from: Offset, to: Offset, pulse: Option<f64>) -> Vec<ChainLink> {
         .collect()
 }
 
+/// Classify contact in display coordinates, then draw in view coordinates.
+pub fn connection_chain(from: Rect, to: Rect, view_from: Rect, view_to: Rect, pulse: Option<f64>) -> Vec<ChainLink> {
+    let Some((start, end)) = border_connection(view_from, view_to) else {
+        return Vec::new();
+    };
+    let mut links = chain(start, end, pulse);
+    if corner_contact(from, to) && links.len() == 5 {
+        links = vec![links.remove(2)];
+    }
+    links
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +362,48 @@ mod tests {
                 "neighbor at {x}, {y}"
             );
         }
+    }
+
+    #[test]
+    fn corner_contacts_draw_one_link_and_shared_edges_draw_five() {
+        let from = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 80.0,
+        };
+        for (x, y, corner, count) in [
+            (100.0, 0.0, false, 5),
+            (40.0, 80.0, false, 5),
+            (100.0, 80.0, true, 1),
+            (-100.0, 80.0, true, 1),
+        ] {
+            let to = Rect { x, y, ..from };
+            assert_eq!(corner_contact(from, to), corner, "neighbor at {x}, {y}");
+            let links = connection_chain(from, to, from, to, None);
+            assert_eq!(links.len(), count, "neighbor at {x}, {y}");
+            if corner {
+                let (start, end) = border_connection(from, to).unwrap();
+                assert_eq!(links[0].center, ((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0));
+            }
+        }
+        let narrow_edge = Rect {
+            x: 100.0,
+            y: 78.0,
+            ..from
+        };
+        let scale = |rect: Rect| Rect {
+            x: rect.x * 0.1,
+            y: rect.y * 0.1,
+            width: rect.width * 0.1,
+            height: rect.height * 0.1,
+        };
+        assert!(!corner_contact(from, narrow_edge));
+        assert!(corner_contact(scale(from), scale(narrow_edge)));
+        assert_eq!(
+            connection_chain(from, narrow_edge, scale(from), scale(narrow_edge), None).len(),
+            5
+        );
     }
 
     #[test]
