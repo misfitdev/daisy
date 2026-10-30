@@ -2674,6 +2674,8 @@ mod tests {
             me.public_key(),
             vec![(me.public_key(), (0.0, 0.0)), (peer_key, (1000.0, 200.0))],
         ));
+        let (choose, choices) = watch::channel(None);
+        local.choices = choices;
         let mut view = local.arranged.subscribe();
         let task = start_arrangement_session(local, membership);
 
@@ -2687,6 +2689,14 @@ mod tests {
             .unwrap()
             .offset;
         assert_eq!(offset, (1000.0, 200.0));
+        choose.send_replace(Some(Choice::Move((peer_key, (1000.0, 250.0)))));
+        view_when(&mut view, |view| {
+            view.layout
+                .members
+                .iter()
+                .any(|member| member.key == peer_key && member.offset == (1000.0, 250.0))
+        })
+        .await;
 
         drop(there);
         end.await.unwrap().unwrap();
@@ -2716,7 +2726,7 @@ mod tests {
                 .find(|member| member.key == peer_key)
                 .unwrap()
                 .offset,
-            offset
+            (1000.0, 250.0)
         );
         assert!(!task.is_finished(), "the returning peer joined the original core");
         task.abort();

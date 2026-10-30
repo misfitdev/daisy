@@ -314,9 +314,9 @@ pub fn chain(from: Offset, to: Offset, pulse: Option<f64>) -> Vec<ChainLink> {
         .collect()
 }
 
-/// Draw only the center link where displays meet at a corner.
-pub fn connection_chain(from: Rect, to: Rect, pulse: Option<f64>) -> Vec<ChainLink> {
-    let Some((start, end)) = border_connection(from, to) else {
+/// Classify contact in display coordinates, then draw in view coordinates.
+pub fn connection_chain(from: Rect, to: Rect, view_from: Rect, view_to: Rect, pulse: Option<f64>) -> Vec<ChainLink> {
+    let Some((start, end)) = border_connection(view_from, view_to) else {
         return Vec::new();
     };
     let mut links = chain(start, end, pulse);
@@ -380,8 +380,30 @@ mod tests {
         ] {
             let to = Rect { x, y, ..from };
             assert_eq!(corner_contact(from, to), corner, "neighbor at {x}, {y}");
-            assert_eq!(connection_chain(from, to, None).len(), count, "neighbor at {x}, {y}");
+            let links = connection_chain(from, to, from, to, None);
+            assert_eq!(links.len(), count, "neighbor at {x}, {y}");
+            if corner {
+                let (start, end) = border_connection(from, to).unwrap();
+                assert_eq!(links[0].center, ((start.0 + end.0) / 2.0, (start.1 + end.1) / 2.0));
+            }
         }
+        let narrow_edge = Rect {
+            x: 100.0,
+            y: 78.0,
+            ..from
+        };
+        let scale = |rect: Rect| Rect {
+            x: rect.x * 0.1,
+            y: rect.y * 0.1,
+            width: rect.width * 0.1,
+            height: rect.height * 0.1,
+        };
+        assert!(!corner_contact(from, narrow_edge));
+        assert!(corner_contact(scale(from), scale(narrow_edge)));
+        assert_eq!(
+            connection_chain(from, narrow_edge, scale(from), scale(narrow_edge), None).len(),
+            5
+        );
     }
 
     #[test]

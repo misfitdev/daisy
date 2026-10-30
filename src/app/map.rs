@@ -295,11 +295,11 @@ define_class!(
                 let b = &scene[b];
                 let alpha = motion.bodies.get(&a.key).map_or(1.0, |body| body.connection.value)
                     .min(motion.bodies.get(&b.key).map_or(1.0, |body| body.connection.value)).clamp(0.0, 1.0);
-                let from = fit.to_view(from);
-                let to = fit.to_view(to);
+                let view_from = fit.to_view(from);
+                let view_to = fit.to_view(to);
                 let age = if a.in_control == Some(true) { appearance(a).2 } else { appearance(b).2 };
-                let (from, to) = if b.in_control == Some(true) { (to, from) } else { (from, to) };
-                draw_chain(connection_chain(from, to, age), alpha);
+                let (view_from, view_to) = if b.in_control == Some(true) { (view_to, view_from) } else { (view_from, view_to) };
+                draw_chain(connection_chain(from, to, view_from, view_to, age), alpha);
             }
             for shown in &scene {
                 let (emphasis, arrival, pulse) = appearance(shown);
@@ -1055,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_shows_all_four_transfer_paths() {
+    fn screenshot_has_four_connections_with_border_angles() {
         let shown = super::super::screenshot::sample_scene();
         let paths = connections(&shown);
         assert_eq!(paths.len(), 4);

@@ -1303,6 +1303,19 @@ mod tests {
     }
 
     #[test]
+    fn a_departed_member_keeps_its_last_placement_for_return() {
+        let mut here = Placement::new(0u8, vec![LAPTOP]);
+        here.show(1, vec![PEER]);
+        here.place(1, Side::Right, 1);
+        assert!(here.put(1, (1512.0, 250.0), 2));
+        assert_eq!(offset_of(&here, 1), (1512.0, 250.0));
+        assert!(here.remove(1));
+        assert_eq!(here.group().members.len(), 1);
+        assert!(here.show(1, vec![PEER]));
+        assert_eq!(offset_of(&here, 1), (1512.0, 250.0));
+    }
+
+    #[test]
     fn a_drop_out_of_reach_lands_on_the_nearest_edge_it_can_reach() {
         let mut here = Placement::new(0u8, vec![LAPTOP]);
         here.show(1, vec![PEER]);
