@@ -299,6 +299,20 @@ impl MainViews {
 
     #[cfg(test)]
     pub(super) fn test_status_layout(&self) {
+        for (checking, saveable, applicable) in [
+            (true, false, false),
+            (true, true, false),
+            (false, true, true),
+            (false, false, true),
+        ] {
+            self.show_check(checking, saveable, applicable, &[]);
+            let save = self.save_arrangement.frame();
+            let apply = self.apply_arrangement.frame();
+            assert!(save.origin.x >= self.question.frame().origin.x + self.question.frame().size.width);
+            assert!(apply.origin.x >= save.origin.x + save.size.width);
+            assert!(apply.origin.x + apply.size.width <= self.hero.frame().size.width - MARGIN);
+            assert!(self.arrange.frame().origin.y >= save.origin.y + save.size.height);
+        }
         for checking in [false, true] {
             self.show_check(checking, false, false, &[]);
             for (title, detail) in [

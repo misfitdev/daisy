@@ -168,12 +168,51 @@ fn arrangement_confirmation(mtm: objc2_foundation::MainThreadMarker) {
         let arranged = target.ivars().arranged.borrow();
         let Some(view) = arranged.as_ref() else { return false };
         let setup = view.snapshot.as_ref().unwrap().members.clone();
-        store.layouts().get(&setup).is_some()
+        store.layouts().unwrap().get(&setup).is_some()
     });
     assert!(views.apply_arrangement.isEnabled());
+    let saved_offset = target
+        .ivars()
+        .arranged
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .layout
+        .members
+        .iter()
+        .find(|member| member.key == peer)
+        .unwrap()
+        .offset;
+    target
+        .ivars()
+        .controller
+        .send(Command::Place(peer, (-1000.0, 0.0)))
+        .unwrap();
+    wait_for("a later placement to move the peer", || {
+        drain();
+        target.ivars().arranged.borrow().as_ref().is_some_and(|view| {
+            view.layout
+                .members
+                .iter()
+                .find(|member| member.key == peer)
+                .is_some_and(|member| member.offset != saved_offset)
+        })
+    });
+    click(&views.window, "Apply saved");
+    wait_for("Apply saved to restore the saved position", || {
+        drain();
+        target.ivars().arranged.borrow().as_ref().is_some_and(|view| {
+            view.layout
+                .members
+                .iter()
+                .find(|member| member.key == peer)
+                .is_some_and(|member| member.offset == saved_offset)
+        })
+    });
     views.window.close();
     let layout = target.ivars().arranged.borrow().as_ref().unwrap().layout.clone();
     target.handle_event(Event::Arranged(crate::share::ArrangementView {
+        save_error: false,
         unreachable: layout.unreachable(me),
         layout,
         check: None,

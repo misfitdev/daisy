@@ -14,7 +14,7 @@ use std::thread;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc as tokio_mpsc, oneshot, watch};
 
 use crate::identity::{Identity, PublicKey};
 use crate::input::Side;
@@ -338,8 +338,13 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
                     snapshot: Some(crate::share::Confirmation::new(&layout, placement.version())),
                     saveable: layout.members.len() > 1
                         && layout.unreachable(me).is_empty()
-                        && placement.placed().len() == layout.members.len(),
-                    applicable: store.layouts().get(&placement.setup()).is_some(),
+                        && placement.unplaced().is_empty(),
+                    applicable: store
+                        .layouts()
+                        .ok()
+                        .and_then(|layouts| layouts.get(&placement.setup()).map(|_| ()))
+                        .is_some(),
+                    save_error: false,
                     layout,
                 }));
                 let Some(command) = commands.blocking_recv() else {
@@ -360,20 +365,22 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
                         let layout = placement.group();
                         if layout.members.len() > 1
                             && layout.unreachable(me).is_empty()
-                            && placement.placed().len() == layout.members.len()
+                            && placement.unplaced().is_empty()
+                            && store.remember_layout(placement.setup(), &placement.placed()).is_ok()
                         {
-                            let mut layouts = store.layouts();
-                            if layouts.remember(placement.setup(), &placement.placed()) {
-                                let _ = store.save_layouts(&layouts);
-                            }
                             confirmed = Some(snapshot);
                         }
                     }
                     Command::ApplyArrangement(snapshot)
                         if snapshot == crate::share::Confirmation::new(&placement.group(), placement.version()) =>
                     {
-                        if let Some(offsets) = store.layouts().get(&placement.setup()) {
-                            if placement.restore(offsets, trust::now().saturating_mul(1000)) {
+                        if let Some(offsets) = store
+                            .layouts()
+                            .ok()
+                            .and_then(|layouts| layouts.get(&placement.setup()).map(|offsets| offsets.to_vec()))
+                        {
+                            if placement.restore(&offsets, trust::now().saturating_mul(1000)) {
+                                placement.repair(trust::now().saturating_mul(1000));
                                 let _ = store.save_arrangement(&placement.message());
                             }
                             confirmed = Some(crate::share::Confirmation::new(&placement.group(), placement.version()));
@@ -427,7 +434,8 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
     // always advertised while sharing; the advertisement names no one
     let (_discoverable, discoverable) = watch::channel(true);
-    let (arrange, arrangement) = watch::channel(None);
+    let (arrange, _) = broadcast::channel(256);
+    let arrangement = arrange.clone();
     let base_listening = |stored: &AppSettings| {
         listening(
             stored.always_discoverable,
@@ -656,13 +664,13 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 }
             }
             Command::SaveArrangement(snapshot) => {
-                arrange.send_replace(Some(crate::share::Choice::Save(snapshot)));
+                let _ = arrange.send(crate::share::Choice::Save(snapshot));
             }
             Command::ApplyArrangement(snapshot) => {
-                arrange.send_replace(Some(crate::share::Choice::Apply(snapshot)));
+                let _ = arrange.send(crate::share::Choice::Apply(snapshot));
             }
             Command::Place(key, offset) => {
-                arrange.send_replace(Some(crate::share::Choice::Move((key, offset))));
+                let _ = arrange.send(crate::share::Choice::Move((key, offset)));
             }
             Command::Shutdown => {
                 if let Some(running) = session.take() {
@@ -730,7 +738,7 @@ struct Live {
     addresses: tokio_mpsc::UnboundedReceiver<(String, Option<PublicKey>)>,
     clipboard: watch::Receiver<bool>,
     discoverable: watch::Receiver<bool>,
-    arrangement: watch::Receiver<Option<crate::share::Choice>>,
+    arrangement: broadcast::Sender<crate::share::Choice>,
     listening: watch::Receiver<Listening>,
 }
 
@@ -742,7 +750,6 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
         arrangement,
         mut listening,
     } = live;
-    // the session starts from the current choice; only later ones are news
     listening.mark_unchanged();
     let Start { settings, side_chosen } = start;
     let result = async {
@@ -922,6 +929,13 @@ impl ServiceObserver for ControllerObserver {
     }
 
     fn arranged(&mut self, layout: &crate::share::ArrangementView) {
+        if layout.save_error {
+            let _ = send_problem(
+                &self.events,
+                "Arrangement could not be saved",
+                "Check that Daisy can write its data folder, then try Save arrangement again.".to_owned(),
+            );
+        }
         let _ = self.events.send(Event::Arranged(layout.clone()));
     }
 

@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::clipboard::Sharing;
 use crate::discovery::{self, Advertiser};
@@ -443,7 +443,7 @@ pub struct SessionConfig<'a> {
     /// Whether a waiting system advertises itself with Bonjour.
     pub discoverable: &'a watch::Receiver<bool>,
     /// Members moved on this system while a session runs, if it can rearrange.
-    pub arrangement: Option<&'a watch::Receiver<Option<share::Choice>>>,
+    pub arrangement: Option<&'a broadcast::Sender<share::Choice>>,
     /// When a running group accepts a new system.
     pub listening: Option<&'a watch::Receiver<Listening>>,
     /// Signs this system's introductions and revocations.
@@ -1189,7 +1189,7 @@ pub struct Hub {
     peers: PeerStore,
     clipboard: watch::Receiver<bool>,
     clipboard_history: std::sync::Arc<std::sync::Mutex<crate::clipboard::History>>,
-    choices: watch::Receiver<Option<share::Choice>>,
+    choices: broadcast::Sender<share::Choice>,
     running: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<share::Membership<TcpStream>>>>>,
     reports: std::sync::Arc<watch::Sender<share::Reports>>,
     arranged: std::sync::Arc<watch::Sender<share::ArrangementView>>,
@@ -1438,28 +1438,30 @@ async fn run_core_once(
             }
         }
     });
-    let (save_layouts, mut layout_saving) = mpsc::unbounded_channel::<crate::saved_layouts::Memory<_>>();
+    let (save_layouts, mut layout_saving) = mpsc::unbounded_channel::<share::SaveLayout>();
     let layout_store = peers.clone();
     let layout_saving = tokio::spawn(async move {
-        while let Some(layouts) = layout_saving.recv().await {
-            if let Err(error) = layout_store.save_layouts(&layouts) {
+        while let Some(request) = layout_saving.recv().await {
+            let result = layout_store.remember_layout(request.setup, &request.offsets);
+            if let Err(error) = &result {
                 tracing::warn!(
                     error = format!("{error:#}"),
                     "the explicitly saved screen arrangements could not be saved"
                 );
             }
+            let _ = request.done.send(result);
         }
     });
     let group = share::Group {
         files: hub.files.clone(),
         displays: watched,
         control,
-        choices: choices.clone(),
+        choices: choices.subscribe(),
         arranged: hub.arranged.clone(),
         saved: peers.arrangement(),
         saved_confirmation: peers.confirmation(),
         save_confirmation,
-        layouts: peers.layouts(),
+        layouts: peers.layouts()?,
         save_layouts,
         save,
         reports: reports.clone(),
@@ -1533,13 +1535,8 @@ fn announcement_of(config: &SessionConfig<'_>, key: PublicKey) -> Result<Option<
 /// Sides chosen on this system during a session. Without a way to choose,
 /// as from the command line, it never changes, and the peer's choices still
 /// apply.
-fn session_choices(
-    arrangement: Option<&watch::Receiver<Option<share::Choice>>>,
-) -> watch::Receiver<Option<share::Choice>> {
-    let mut choices = arrangement.cloned().unwrap_or_else(|| watch::channel(None).1);
-    // only choices made during this session count
-    choices.mark_unchanged();
-    choices
+fn session_choices(arrangement: Option<&broadcast::Sender<share::Choice>>) -> broadcast::Sender<share::Choice> {
+    arrangement.cloned().unwrap_or_else(|| broadcast::channel(256).0)
 }
 
 /// Add the default Daisy port when the address has none.

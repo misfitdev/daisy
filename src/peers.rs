@@ -304,18 +304,32 @@ impl PeerStore {
             .context("saving the checked screen arrangement")
     }
 
-    /// Arrangements explicitly saved on this system; none if they cannot be read.
-    pub fn layouts(&self) -> crate::saved_layouts::Memory<PublicKey> {
-        fs::read_to_string(&self.layouts)
-            .ok()
-            .and_then(|text| toml::from_str(&text).ok())
-            .map(crate::saved_layouts::Memory::validated)
-            .unwrap_or_default()
+    /// Arrangements explicitly saved on this system. A missing file starts empty.
+    pub fn layouts(&self) -> Result<crate::saved_layouts::Memory<PublicKey>> {
+        let text = match fs::read_to_string(&self.layouts) {
+            Ok(text) => text,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Default::default()),
+            Err(error) => return Err(error).with_context(|| format!("reading {}", self.layouts.display())),
+        };
+        Ok(toml::from_str::<crate::saved_layouts::Memory<PublicKey>>(&text)
+            .with_context(|| format!("reading {}", self.layouts.display()))?
+            .validated())
     }
 
-    pub fn save_layouts(&self, layouts: &crate::saved_layouts::Memory<PublicKey>) -> Result<()> {
-        crate::state_file::write(&self.layouts, toml::to_string(layouts)?.as_bytes())
-            .context("saving the explicitly saved screen arrangements")
+    /// Reload and update under the stable peer-store lock so another process's
+    /// save is retained. Return the committed memory for this session's view.
+    pub fn remember_layout(
+        &self,
+        setup: crate::saved_layouts::Setup<PublicKey>,
+        offsets: &std::collections::BTreeMap<PublicKey, crate::layout::Offset>,
+    ) -> Result<crate::saved_layouts::Memory<PublicKey>> {
+        let _lock = self.lock()?;
+        let mut layouts = self.layouts()?;
+        if layouts.remember(setup, offsets) {
+            crate::state_file::write(&self.layouts, toml::to_string(&layouts)?.as_bytes())
+                .context("saving the explicitly saved screen arrangements")?;
+        }
+        Ok(layouts)
     }
 
     /// Keeps `arrangement` for the next time the group meets.
@@ -1374,9 +1388,9 @@ mod tests {
     }
 
     #[test]
-    fn remembered_layouts_survive_reopening_and_a_damaged_file_is_forgotten() {
+    fn remembered_layouts_survive_reopening_and_a_damaged_file_blocks_saves() {
         let (store, dir) = store();
-        assert_eq!(store.layouts(), crate::saved_layouts::Memory::default());
+        assert_eq!(store.layouts().unwrap(), crate::saved_layouts::Memory::default());
         let screen = |width| crate::input::Rect {
             x: 0.0,
             y: 0.0,
@@ -1388,10 +1402,53 @@ mod tests {
             crate::saved_layouts::setup([(key(1), &[screen(1000.0)][..]), (key(2), &[screen(1200.0)][..])]),
             &[(key(1), (0.0, 0.0)), (key(2), (1000.0, 0.0))].into_iter().collect(),
         );
-        store.save_layouts(&layouts).unwrap();
-        assert_eq!(PeerStore::open(dir.path()).unwrap().layouts(), layouts);
+        store
+            .remember_layout(
+                crate::saved_layouts::setup([(key(1), &[screen(1000.0)][..]), (key(2), &[screen(1200.0)][..])]),
+                &[(key(1), (0.0, 0.0)), (key(2), (1000.0, 0.0))].into_iter().collect(),
+            )
+            .unwrap();
+        assert_eq!(PeerStore::open(dir.path()).unwrap().layouts().unwrap(), layouts);
         fs::write(dir.path().join("trust-v5/saved-layouts.toml"), "not toml [").unwrap();
-        assert_eq!(store.layouts(), crate::saved_layouts::Memory::default());
+        assert!(store.layouts().is_err());
+        assert!(
+            store
+                .remember_layout(
+                    crate::saved_layouts::setup([(key(1), &[screen(1000.0)][..]), (key(2), &[screen(1200.0)][..])]),
+                    &[(key(1), (0.0, 0.0)), (key(2), (1000.0, 0.0))].into_iter().collect(),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("trust-v5/saved-layouts.toml")).unwrap(),
+            "not toml ["
+        );
+    }
+
+    #[test]
+    fn another_store_save_is_retained_when_saving_a_new_setup() {
+        let (store, dir) = store();
+        let other = PeerStore::open(dir.path()).unwrap();
+        let display = crate::input::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let pair = crate::saved_layouts::setup([(key(1), &[display][..]), (key(2), &[display][..])]);
+        let trio = crate::saved_layouts::setup([
+            (key(1), &[display][..]),
+            (key(2), &[display][..]),
+            (key(3), &[display][..]),
+        ]);
+        let positions = [(key(1), (0.0, 0.0)), (key(2), (100.0, 0.0)), (key(3), (200.0, 0.0))]
+            .into_iter()
+            .collect();
+        store.remember_layout(pair.clone(), &positions).unwrap();
+        other.remember_layout(trio.clone(), &positions).unwrap();
+        let saved = store.layouts().unwrap();
+        assert!(saved.get(&pair).is_some());
+        assert!(saved.get(&trio).is_some());
     }
 
     #[test]
@@ -1409,7 +1466,7 @@ mod tests {
             &[(key(1), (0.0, 0.0)), (key(2), (100.0, 0.0))].into_iter().collect(),
         );
         fs::write(dir.path().join("trust-v5/layouts.toml"), toml::to_string(&old).unwrap()).unwrap();
-        assert_eq!(store.layouts(), crate::saved_layouts::Memory::default());
+        assert_eq!(store.layouts().unwrap(), crate::saved_layouts::Memory::default());
     }
 
     #[test]
@@ -1436,7 +1493,7 @@ mod tests {
             toml::to_string(&value).unwrap(),
         )
         .unwrap();
-        assert_eq!(store.layouts(), crate::saved_layouts::Memory::default());
+        assert_eq!(store.layouts().unwrap(), crate::saved_layouts::Memory::default());
     }
 
     #[test]

@@ -70,6 +70,18 @@ impl<K: Copy + Ord> Memory<K> {
                 && keys.iter().all(|key| placed.contains_key(key))
                 && crate::layout::plausible_offsets(&entry.offsets)
         });
+        // A damaged file may contain repeated setups. Keep the last save.
+        let mut seen = Vec::new();
+        self.remembered.reverse();
+        self.remembered.retain(|entry| {
+            if seen.contains(&entry.setup) {
+                false
+            } else {
+                seen.push(entry.setup.clone());
+                true
+            }
+        });
+        self.remembered.reverse();
         let excess = self.remembered.len().saturating_sub(MAX_SETUPS);
         self.remembered.drain(..excess);
         self
@@ -107,6 +119,7 @@ impl<K: Copy + Ord> Memory<K> {
     pub fn get(&self, setup: &Setup<K>) -> Option<&[(K, Offset)]> {
         self.remembered
             .iter()
+            .rev()
             .find(|entry| entry.setup == *setup)
             .map(|entry| entry.offsets.as_slice())
     }
@@ -198,6 +211,25 @@ mod tests {
             loaded.remembered.last().unwrap().setup[0].1[0].width,
             1000.0 + (MAX_SETUPS + 2) as f64
         );
+    }
+
+    #[test]
+    fn duplicate_loaded_setup_keeps_the_latest_offsets() {
+        let pair = setup_of(&[(A, laptop()), (B, laptop())]);
+        let first = Remembered {
+            setup: pair.clone(),
+            offsets: vec![(A, (0.0, 0.0)), (B, (1512.0, 0.0))],
+        };
+        let last = Remembered {
+            setup: pair.clone(),
+            offsets: vec![(A, (0.0, 0.0)), (B, (-1512.0, 0.0))],
+        };
+        let memory = Memory {
+            remembered: vec![first, last.clone()],
+        }
+        .validated();
+        assert_eq!(memory.remembered, vec![last]);
+        assert_eq!(memory.get(&pair).unwrap()[1].1, (-1512.0, 0.0));
     }
 
     #[test]
