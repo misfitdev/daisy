@@ -2,7 +2,8 @@
 //! split into parts, and how arriving parts are put back together. No macOS
 //! calls; `macos::pasteboard` reads and writes the real pasteboard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
 
@@ -19,6 +20,16 @@ pub const CHUNK_LEN: usize = 16_000;
 /// Chunks the sender may have unacknowledged. Bounds how much clipboard data
 /// can sit ahead of input and heartbeats: `WINDOW * CHUNK_LEN` bytes.
 pub const WINDOW: usize = 4;
+/// Recent copy identities retained to prevent an old copy circling back
+/// through another peer after this system has copied something newer.
+const SEEN_COPIES: usize = 4096;
+
+/// Copy identity survives a sharing-core restart while its group is running.
+#[derive(Default)]
+pub(crate) struct History {
+    received: Option<(CopyId, PublicKey, i64)>,
+    seen: VecDeque<CopyId>,
+}
 
 /// What a clipboard holds, in the forms Daisy carries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -244,9 +255,8 @@ pub struct Sharing<C> {
     /// A due snapshot is arriving from this peer; parts from any other are
     /// ignored until it is done.
     receiving: Option<PublicKey>,
-    /// With clipboard IDs: the copy on the pasteboard when it came from a
-    /// peer, its supplying peer, and the change count writing it produced.
-    received: Option<(CopyId, PublicKey, i64)>,
+    /// Copy identity retained across core restarts, including its source.
+    history: Arc<Mutex<History>>,
     /// The copy last offered to each peer; a request is answered only for it.
     offered: HashMap<PublicKey, CopyId>,
     /// The requested copy, sender, snapshot state, and clipboard count at request time.
@@ -256,6 +266,10 @@ pub struct Sharing<C> {
 
 impl<C: Clipboard> Sharing<C> {
     pub fn new(clipboard: C, enabled: watch::Receiver<bool>) -> Self {
+        Self::with_history(clipboard, enabled, Arc::default())
+    }
+
+    pub(crate) fn with_history(clipboard: C, enabled: watch::Receiver<bool>, history: Arc<Mutex<History>>) -> Self {
         Self {
             clipboard,
             enabled,
@@ -263,7 +277,7 @@ impl<C: Clipboard> Sharing<C> {
             inbox: Inbox::default(),
             expecting: None,
             receiving: None,
-            received: None,
+            history,
             offered: HashMap::new(),
             requested: None,
             requested_inbox: Inbox::default(),
@@ -307,7 +321,7 @@ impl<C: Clipboard> Sharing<C> {
     /// the pasteboard still holds it, otherwise a copy made here.
     pub fn current(&self, me: PublicKey) -> CopyId {
         let count = self.clipboard.change_count();
-        match self.received {
+        match self.history.lock().unwrap_or_else(|e| e.into_inner()).received {
             Some((copy, _, written)) if written == count => copy,
             _ => CopyId { origin: me, count },
         }
@@ -320,14 +334,29 @@ impl<C: Clipboard> Sharing<C> {
             return None;
         }
         if self
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .received
             .is_some_and(|(_, source, written)| source == peer && written == self.clipboard.change_count())
         {
             return None;
         }
         let copy = self.current(me);
+        self.remember(copy);
         self.offered.insert(peer, copy);
         Some(copy)
+    }
+
+    fn remember(&mut self, copy: CopyId) {
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        if history.seen.contains(&copy) {
+            return;
+        }
+        if history.seen.len() == SEEN_COPIES {
+            history.seen.pop_front();
+        }
+        history.seen.push_back(copy);
     }
 
     /// Whether to ask `from` for the copy it offered. Only an offer from the
@@ -344,6 +373,12 @@ impl<C: Clipboard> Sharing<C> {
             || !*self.enabled.borrow()
             || copy.origin == me
             || copy == self.current(me)
+            || self
+                .history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .seen
+                .contains(&copy)
         {
             return false;
         }
@@ -407,9 +442,12 @@ impl<C: Clipboard> Sharing<C> {
             }
             let count = self.clipboard.write(&content);
             self.outbox.wrote(from, count);
-            self.received = Some((copy, from, count));
+            self.history.lock().unwrap_or_else(|e| e.into_inner()).received = Some((copy, from, count));
             Some(copy)
         });
+        if written.is_some() {
+            self.remember(copy);
+        }
         if done {
             self.requested = None;
         }
@@ -1093,6 +1131,43 @@ mod tests {
             counts,
             "neither pasteboard is rewritten"
         );
+    }
+
+    #[test]
+    fn an_old_copy_on_another_peer_cannot_replace_a_new_local_copy() {
+        let mut origin = member(1, Some(text("old copy")));
+        let mut here = member(2, None);
+        let mut other = member(3, None);
+        assert!(hand(&mut origin, &mut here, false) > 0);
+        assert!(hand(&mut origin, &mut other, false) > 0);
+        for value in ["first new copy", "second new copy", "new local copy"] {
+            here.sharing.clipboard.copy(text(value));
+        }
+        assert_eq!(hand(&mut other, &mut here, false), 0);
+        assert_eq!(here.sharing.clipboard.content, Some(text("new local copy")));
+        assert!(hand(&mut here, &mut other, false) > 0);
+        assert_eq!(other.sharing.clipboard.content, Some(text("new local copy")));
+    }
+
+    #[test]
+    fn copy_identity_survives_a_sharing_core_restart() {
+        let history: Arc<Mutex<History>> = Arc::default();
+        let (on, enabled) = watch::channel(true);
+        let mut here = Member {
+            key: system(2),
+            sharing: Sharing::with_history(Fake::default(), enabled, history.clone()),
+            _on: on,
+        };
+        let mut origin = member(1, Some(text("old copy")));
+        let mut other = member(3, None);
+        assert!(hand(&mut origin, &mut here, false) > 0);
+        assert!(hand(&mut origin, &mut other, false) > 0);
+        let board = here.sharing.clipboard.clone();
+        here.sharing = Sharing::with_history(board, here._on.subscribe(), history.clone());
+        assert_eq!(here.sharing.current(here.key).origin, origin.key);
+        here.sharing.clipboard.copy(text("new local copy"));
+        assert_eq!(hand(&mut other, &mut here, false), 0);
+        assert_eq!(here.sharing.clipboard.content, Some(text("new local copy")));
     }
 
     #[test]

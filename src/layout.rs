@@ -445,8 +445,8 @@ impl<K: Copy + Ord> Placement<K> {
     }
 
     /// Every present member and its displays.
-    pub fn setup(&self) -> crate::recall::Setup<K> {
-        crate::recall::setup(self.displays.iter().map(|(key, displays)| (*key, displays.as_slice())))
+    pub fn setup(&self) -> crate::saved_layouts::Setup<K> {
+        crate::saved_layouts::setup(self.displays.iter().map(|(key, displays)| (*key, displays.as_slice())))
     }
 
     /// Where each present member with an agreed offset sits.

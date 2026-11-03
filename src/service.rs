@@ -1188,6 +1188,7 @@ pub struct Hub {
     signer: crate::device::Signer,
     peers: PeerStore,
     clipboard: watch::Receiver<bool>,
+    clipboard_history: std::sync::Arc<std::sync::Mutex<crate::clipboard::History>>,
     choices: watch::Receiver<Option<share::Choice>>,
     running: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<share::Membership<TcpStream>>>>>,
     reports: std::sync::Arc<watch::Sender<share::Reports>>,
@@ -1216,6 +1217,7 @@ impl Clone for Hub {
             signer: self.signer.clone(),
             peers: self.peers.clone(),
             clipboard: self.clipboard.clone(),
+            clipboard_history: self.clipboard_history.clone(),
             choices: self.choices.clone(),
             running: self.running.clone(),
             reports: self.reports.clone(),
@@ -1267,6 +1269,7 @@ impl Hub {
             signer: config.signer.clone(),
             peers: config.peers.clone(),
             clipboard: config.clipboard.clone(),
+            clipboard_history: std::sync::Arc::default(),
             choices: session_choices(config.arrangement),
             running: std::sync::Arc::default(),
             reports: std::sync::Arc::new(watch::Sender::new(share::Reports::new())),
@@ -1367,7 +1370,7 @@ async fn run_core_once(
     let displays = macos::displays()?;
     let control = std::sync::Arc::new(crate::control::SharedControl::new(me, me));
     let mut injector = Injector::new();
-    let mut sharing = Sharing::new(Pasteboard, clipboard.clone());
+    let mut sharing = Sharing::with_history(Pasteboard, clipboard.clone(), hub.clipboard_history.clone());
     let (messages, input) = mpsc::channel(INPUT_QUEUE_CAPACITY);
     let alone = crate::layout::Group::alone(me, displays.clone());
     let (mut capture, overflowed) = Capture::start(alone, me, messages, control.clone())?;
@@ -1435,14 +1438,14 @@ async fn run_core_once(
             }
         }
     });
-    let (save_layouts, mut layout_saving) = mpsc::unbounded_channel::<crate::recall::Memory<_>>();
+    let (save_layouts, mut layout_saving) = mpsc::unbounded_channel::<crate::saved_layouts::Memory<_>>();
     let layout_store = peers.clone();
     let layout_saving = tokio::spawn(async move {
         while let Some(layouts) = layout_saving.recv().await {
             if let Err(error) = layout_store.save_layouts(&layouts) {
                 tracing::warn!(
                     error = format!("{error:#}"),
-                    "the remembered screen arrangements could not be saved"
+                    "the explicitly saved screen arrangements could not be saved"
                 );
             }
         }

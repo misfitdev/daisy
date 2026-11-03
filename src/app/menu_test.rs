@@ -136,29 +136,11 @@ fn arrangement_confirmation(mtm: objc2_foundation::MainThreadMarker) {
     });
     assert!(views.unreachable.stringValue().to_string().contains("Studio"));
     assert!(views.window.isVisible(), "a changed group brings the map forward");
-    click(&views.window, "Looks Right");
-    wait_for("Looks Right to record and dismiss", || {
-        drain();
-        views.question.isHidden() && store.confirmation().is_some()
-    });
-    let confirmed = store.confirmation().unwrap();
     assert!(
-        !views.unreachable.isHidden() && views.unreachable.stringValue().to_string().contains("Studio"),
-        "confirming placement must not hide an unreachable peer"
+        !views.save_arrangement.isEnabled(),
+        "an unreachable layout cannot be saved"
     );
-    views.window.close();
-    let layout = target.ivars().arranged.borrow().as_ref().unwrap().layout.clone();
-    target.handle_event(Event::Arranged(crate::share::ArrangementView {
-        unreachable: layout.unreachable(me),
-        layout: layout.clone(),
-        check: None,
-        restored: false,
-    }));
-    assert!(
-        !views.window.isVisible(),
-        "an unchanged reconnect leaves the window alone"
-    );
-    // a drop out of reach lands within it, so it confirms without asking
+    // A drop out of reach lands within reach and confirms the group.
     target
         .ivars()
         .controller
@@ -166,9 +148,7 @@ fn arrangement_confirmation(mtm: objc2_foundation::MainThreadMarker) {
         .unwrap();
     wait_for("a drop out of reach to land within it", || {
         drain();
-        store
-            .confirmation()
-            .is_some_and(|saved| saved.version > confirmed.version)
+        store.confirmation().is_some()
             && target
                 .ivars()
                 .arranged
@@ -180,6 +160,30 @@ fn arrangement_confirmation(mtm: objc2_foundation::MainThreadMarker) {
     assert!(
         views.unreachable.isHidden(),
         "the warning clears when every peer is reachable"
+    );
+    assert!(views.save_arrangement.isEnabled());
+    click(&views.window, "Save arrangement");
+    wait_for("Save arrangement to persist the current setup", || {
+        drain();
+        let arranged = target.ivars().arranged.borrow();
+        let Some(view) = arranged.as_ref() else { return false };
+        let setup = view.snapshot.as_ref().unwrap().members.clone();
+        store.layouts().get(&setup).is_some()
+    });
+    assert!(views.apply_arrangement.isEnabled());
+    views.window.close();
+    let layout = target.ivars().arranged.borrow().as_ref().unwrap().layout.clone();
+    target.handle_event(Event::Arranged(crate::share::ArrangementView {
+        unreachable: layout.unreachable(me),
+        layout,
+        check: None,
+        snapshot: None,
+        saveable: true,
+        applicable: true,
+    }));
+    assert!(
+        !views.window.isVisible(),
+        "an unchanged reconnect leaves the window alone"
     );
     target.ivars().controller.shutdown().unwrap();
     views.window.close();

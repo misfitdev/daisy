@@ -93,7 +93,8 @@ pub struct MainViews {
     pub question: Retained<NSTextField>,
     pub unreachable: Retained<NSTextField>,
     has_unreachable: Cell<bool>,
-    pub looks_right: Retained<NSButton>,
+    pub save_arrangement: Retained<NSButton>,
+    pub apply_arrangement: Retained<NSButton>,
     pub window: Retained<NSWindow>,
     root: Retained<Panel>,
     pub arrange: Retained<ArrangeView>,
@@ -121,18 +122,15 @@ pub struct PeerRow {
     pub trust: String,
 }
 
-/// Reachability stays visible after placement is confirmed. Restoration
-/// and placement hints appear only when there is no reachability warning.
-pub fn caption(checking: bool, restored: bool, names: &[String]) -> Option<String> {
+/// Keep reachability visible while an arrangement needs attention.
+pub fn caption(checking: bool, names: &[String]) -> Option<String> {
     if !names.is_empty() {
         Some(format!(
             "Cannot reach: {}. Drag the screens closer together.",
             names.join(", ")
         ))
     } else if checking {
-        Some("Drag the screens to match your desk.".to_owned())
-    } else if restored {
-        Some("Restored the layout from last time these screens were together.".to_owned())
+        Some("Drag the screens to match your desk, then save the arrangement.".to_owned())
     } else {
         None
     }
@@ -164,8 +162,8 @@ impl MainViews {
             0.0,
         );
         root.addSubview(&hero);
-        let question = label("Is this where your screens are?", 13.0, true, mtm);
-        question.setFrame(rect(MARGIN, 14.0, GROUP_WIDTH - 126.0, 20.0));
+        let question = label("Arrangement", 13.0, true, mtm);
+        question.setFrame(rect(MARGIN, 14.0, 210.0, 20.0));
         hero.addSubview(&question);
         let unreachable = label("", 12.0, false, mtm);
         unreachable.setTextColor(Some(&NSColor::secondaryLabelColor()));
@@ -173,9 +171,12 @@ impl MainViews {
         unreachable.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
         unreachable.setMaximumNumberOfLines(0);
         hero.addSubview(&unreachable);
-        let looks_right = button("Looks Right", sel!(confirmArrangement:), target, mtm);
-        looks_right.setFrame(rect(WIDTH - MARGIN - 116.0, 10.0, 116.0, 28.0));
-        hero.addSubview(&looks_right);
+        let save_arrangement = button("Save arrangement", sel!(saveArrangement:), target, mtm);
+        save_arrangement.setFrame(rect(WIDTH - MARGIN - 285.0, 10.0, 140.0, 28.0));
+        hero.addSubview(&save_arrangement);
+        let apply_arrangement = button("Apply saved", sel!(applyArrangement:), target, mtm);
+        apply_arrangement.setFrame(rect(WIDTH - MARGIN - 140.0, 10.0, 140.0, 28.0));
+        hero.addSubview(&apply_arrangement);
         let arrange = ArrangeView::new(
             mtm,
             rect(MARGIN, 14.0, GROUP_WIDTH, HERO - 34.0),
@@ -225,7 +226,8 @@ impl MainViews {
             question,
             unreachable,
             has_unreachable: Cell::new(false),
-            looks_right,
+            save_arrangement,
+            apply_arrangement,
             window,
             root,
             arrange,
@@ -241,26 +243,23 @@ impl MainViews {
         };
         views.root.addSubview(&escape_key(sel!(closeKeyWindow:), target, mtm));
         views.show_peers(&[], target);
-        views.show_check(false, false, &[]);
+        views.show_check(false, false, false, &[]);
         views.show_status("Not Sharing", "");
         views.window.center();
         views
     }
 
-    pub fn show_check(&self, checking: bool, restored: bool, names: &[String]) {
-        let shown = caption(checking, restored, names);
+    pub fn show_check(&self, checking: bool, saveable: bool, applicable: bool, names: &[String]) {
+        let shown = caption(checking, names);
+        self.save_arrangement.setEnabled(saveable);
+        self.apply_arrangement.setEnabled(applicable);
         let caption = shown.clone().unwrap_or_default();
         let changed = self.unreachable.stringValue().to_string() != caption;
         let was_unreachable = self.has_unreachable.replace(!names.is_empty());
-        if self.question.isHidden() != checking
-            && self.unreachable.isHidden() == shown.is_none()
-            && self.unreachable.stringValue().to_string() == caption
-        {
-            return;
-        }
         self.question.setHidden(!checking);
         self.unreachable.setHidden(shown.is_none());
-        self.looks_right.setHidden(!checking);
+        self.save_arrangement.setHidden(!saveable && !applicable && !checking);
+        self.apply_arrangement.setHidden(!saveable && !applicable && !checking);
         // below the question while checking, or in its place
         self.unreachable
             .setFrameOrigin(NSPoint::new(MARGIN, if checking { 38.0 } else { 14.0 }));
@@ -301,7 +300,7 @@ impl MainViews {
     #[cfg(test)]
     pub(super) fn test_status_layout(&self) {
         for checking in [false, true] {
-            self.show_check(checking, false, &[]);
+            self.show_check(checking, false, false, &[]);
             for (title, detail) in [
                 ("Not Sharing", ""),
                 ("Connecting", "Finding peers"),
@@ -326,7 +325,7 @@ impl MainViews {
                 }
             }
         }
-        self.show_check(false, false, &[]);
+        self.show_check(false, false, false, &[]);
         self.show_status("Not Sharing", "");
     }
 
@@ -334,7 +333,9 @@ impl MainViews {
         let extra = if !self.question.isHidden() {
             46.0 + self.unreachable.frame().size.height
         } else if !self.unreachable.isHidden() {
-            8.0 + self.unreachable.frame().size.height
+            (if self.save_arrangement.isHidden() { 8.0 } else { 46.0 }) + self.unreachable.frame().size.height
+        } else if !self.save_arrangement.isHidden() {
+            32.0
         } else {
             0.0
         };
@@ -778,20 +779,16 @@ pub(super) fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_restored_layout_says_so_unless_it_is_being_checked() {
-        assert_eq!(super::caption(false, false, &[]), None);
-        assert_eq!(
-            super::caption(false, true, &[]).as_deref(),
-            Some("Restored the layout from last time these screens were together.")
-        );
+    fn arrangement_caption_keeps_unreachable_peers_visible() {
+        assert_eq!(super::caption(false, &[]), None);
         let names = ["Studio".to_owned()];
         assert_eq!(
-            super::caption(true, true, &names).as_deref(),
+            super::caption(true, &names).as_deref(),
             Some("Cannot reach: Studio. Drag the screens closer together.")
         );
         assert_eq!(
-            super::caption(true, false, &[]).as_deref(),
-            Some("Drag the screens to match your desk.")
+            super::caption(true, &[]).as_deref(),
+            Some("Drag the screens to match your desk, then save the arrangement.")
         );
     }
 }

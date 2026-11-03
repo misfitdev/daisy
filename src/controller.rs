@@ -134,7 +134,8 @@ pub enum Command {
     SetAlwaysDiscoverable(bool),
     /// Put a member's displays where a person dropped them in the group.
     Place(PublicKey, crate::layout::Offset),
-    ConfirmArrangement(crate::share::Confirmation),
+    SaveArrangement(crate::share::Confirmation),
+    ApplyArrangement(crate::share::Confirmation),
     Shutdown,
 }
 
@@ -333,9 +334,13 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
                     .then(|| crate::share::Confirmation::new(&layout, placement.version()));
                 let _ = events.send(Event::Arranged(crate::share::ArrangementView {
                     unreachable: layout.unreachable(me),
-                    layout,
                     check,
-                    restored: false,
+                    snapshot: Some(crate::share::Confirmation::new(&layout, placement.version())),
+                    saveable: layout.members.len() > 1
+                        && layout.unreachable(me).is_empty()
+                        && placement.placed().len() == layout.members.len(),
+                    applicable: store.layouts().get(&placement.setup()).is_some(),
+                    layout,
                 }));
                 let Some(command) = commands.blocking_recv() else {
                     break;
@@ -349,10 +354,30 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
                             confirmed = Some(crate::share::Confirmation::new(&layout, placement.version()));
                         }
                     }
-                    Command::ConfirmArrangement(check)
-                        if check == crate::share::Confirmation::new(&placement.group(), placement.version()) =>
+                    Command::SaveArrangement(snapshot)
+                        if snapshot == crate::share::Confirmation::new(&placement.group(), placement.version()) =>
                     {
-                        confirmed = Some(check);
+                        let layout = placement.group();
+                        if layout.members.len() > 1
+                            && layout.unreachable(me).is_empty()
+                            && placement.placed().len() == layout.members.len()
+                        {
+                            let mut layouts = store.layouts();
+                            if layouts.remember(placement.setup(), &placement.placed()) {
+                                let _ = store.save_layouts(&layouts);
+                            }
+                            confirmed = Some(snapshot);
+                        }
+                    }
+                    Command::ApplyArrangement(snapshot)
+                        if snapshot == crate::share::Confirmation::new(&placement.group(), placement.version()) =>
+                    {
+                        if let Some(offsets) = store.layouts().get(&placement.setup()) {
+                            if placement.restore(offsets, trust::now().saturating_mul(1000)) {
+                                let _ = store.save_arrangement(&placement.message());
+                            }
+                            confirmed = Some(crate::share::Confirmation::new(&placement.group(), placement.version()));
+                        }
                     }
                     _ => {}
                 }
@@ -630,8 +655,11 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     );
                 }
             }
-            Command::ConfirmArrangement(confirmation) => {
-                arrange.send_replace(Some(crate::share::Choice::Confirm(confirmation)));
+            Command::SaveArrangement(snapshot) => {
+                arrange.send_replace(Some(crate::share::Choice::Save(snapshot)));
+            }
+            Command::ApplyArrangement(snapshot) => {
+                arrange.send_replace(Some(crate::share::Choice::Apply(snapshot)));
             }
             Command::Place(key, offset) => {
                 arrange.send_replace(Some(crate::share::Choice::Move((key, offset))));

@@ -122,7 +122,7 @@ impl PeerStore {
             lock: home.join("peers.lock"),
             arrangement: home.join("arrangement.toml"),
             confirmation: home.join("arrangement-confirmation.toml"),
-            layouts: home.join("layouts.toml"),
+            layouts: home.join("saved-layouts.toml"),
             revocations: home.join("revocations.toml"),
         })
     }
@@ -304,18 +304,18 @@ impl PeerStore {
             .context("saving the checked screen arrangement")
     }
 
-    /// The arrangement remembered for each setup; none if they cannot be read.
-    pub fn layouts(&self) -> crate::recall::Memory<PublicKey> {
+    /// Arrangements explicitly saved on this system; none if they cannot be read.
+    pub fn layouts(&self) -> crate::saved_layouts::Memory<PublicKey> {
         fs::read_to_string(&self.layouts)
             .ok()
             .and_then(|text| toml::from_str(&text).ok())
-            .map(crate::recall::Memory::validated)
+            .map(crate::saved_layouts::Memory::validated)
             .unwrap_or_default()
     }
 
-    pub fn save_layouts(&self, layouts: &crate::recall::Memory<PublicKey>) -> Result<()> {
+    pub fn save_layouts(&self, layouts: &crate::saved_layouts::Memory<PublicKey>) -> Result<()> {
         crate::state_file::write(&self.layouts, toml::to_string(layouts)?.as_bytes())
-            .context("saving the remembered screen arrangements")
+            .context("saving the explicitly saved screen arrangements")
     }
 
     /// Keeps `arrangement` for the next time the group meets.
@@ -1348,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_confirmation_is_kept_separately_from_automatic_arrangements() {
+    fn screen_confirmation_is_kept_separately_from_current_arrangements() {
         let (store, dir) = store();
         assert!(store.confirmation().is_none());
         let checked = crate::setup::Confirmation::new(
@@ -1376,22 +1376,40 @@ mod tests {
     #[test]
     fn remembered_layouts_survive_reopening_and_a_damaged_file_is_forgotten() {
         let (store, dir) = store();
-        assert_eq!(store.layouts(), crate::recall::Memory::default());
+        assert_eq!(store.layouts(), crate::saved_layouts::Memory::default());
         let screen = |width| crate::input::Rect {
             x: 0.0,
             y: 0.0,
             width,
             height: 800.0,
         };
-        let mut layouts = crate::recall::Memory::default();
+        let mut layouts = crate::saved_layouts::Memory::default();
         layouts.remember(
-            crate::recall::setup([(key(1), &[screen(1000.0)][..]), (key(2), &[screen(1200.0)][..])]),
+            crate::saved_layouts::setup([(key(1), &[screen(1000.0)][..]), (key(2), &[screen(1200.0)][..])]),
             &[(key(1), (0.0, 0.0)), (key(2), (1000.0, 0.0))].into_iter().collect(),
         );
         store.save_layouts(&layouts).unwrap();
         assert_eq!(PeerStore::open(dir.path()).unwrap().layouts(), layouts);
-        fs::write(dir.path().join("trust-v5/layouts.toml"), "not toml [").unwrap();
-        assert_eq!(store.layouts(), crate::recall::Memory::default());
+        fs::write(dir.path().join("trust-v5/saved-layouts.toml"), "not toml [").unwrap();
+        assert_eq!(store.layouts(), crate::saved_layouts::Memory::default());
+    }
+
+    #[test]
+    fn old_automatic_layout_cache_is_not_treated_as_an_explicit_save() {
+        let (store, dir) = store();
+        let display = crate::input::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let mut old = crate::saved_layouts::Memory::default();
+        old.remember(
+            crate::saved_layouts::setup([(key(1), &[display][..]), (key(2), &[display][..])]),
+            &[(key(1), (0.0, 0.0)), (key(2), (100.0, 0.0))].into_iter().collect(),
+        );
+        fs::write(dir.path().join("trust-v5/layouts.toml"), toml::to_string(&old).unwrap()).unwrap();
+        assert_eq!(store.layouts(), crate::saved_layouts::Memory::default());
     }
 
     #[test]
@@ -1403,9 +1421,9 @@ mod tests {
             width: 100.0,
             height: 100.0,
         };
-        let mut memory = crate::recall::Memory::default();
+        let mut memory = crate::saved_layouts::Memory::default();
         memory.remember(
-            crate::recall::setup([(key(1), &[display][..]), (key(2), &[display][..])]),
+            crate::saved_layouts::setup([(key(1), &[display][..]), (key(2), &[display][..])]),
             &[(key(1), (0.0, 0.0)), (key(2), (100.0, 0.0))].into_iter().collect(),
         );
         let mut value = toml::Value::try_from(&memory).unwrap();
@@ -1414,11 +1432,11 @@ mod tests {
             .unwrap()
             .pop();
         fs::write(
-            dir.path().join("trust-v5/layouts.toml"),
+            dir.path().join("trust-v5/saved-layouts.toml"),
             toml::to_string(&value).unwrap(),
         )
         .unwrap();
-        assert_eq!(store.layouts(), crate::recall::Memory::default());
+        assert_eq!(store.layouts(), crate::saved_layouts::Memory::default());
     }
 
     #[test]

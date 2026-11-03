@@ -8,7 +8,7 @@ A group is up to eight systems, each holding one encrypted session with every ot
 
 Every member listens and advertises with Bonjour, and connects to each trusted member it finds; for each pair, the lower public key opens the connection. For pairing, a group member opens the connection to a system with no peers; between two systems with no peers, the one open to pairing longer opens, and random nonces break a tie. A direct address remains available.
 
-Each member shares its displays and one agreed arrangement: an offset per member that places its displays in a shared space, never overlapping another member's and never out of the pointer's reach of this system. A drop or display change that would strand a member searches for a clear, reachable edge placement; a drag keeps its current position if no such placement fits. A member already out of reach does not hold a drop back. The greatest `(version, author)` wins everywhere, so every member converges on the same arrangement whoever changes it. A member that joins without a position is placed on the side its pairing chose, clear of the rest. The arrangement is saved, so a member returns where it was placed. Each system also keeps the arrangement last confirmed for each set of members and displays, including ones other members confirmed. When a member joins or its displays change and the resulting set is one it kept, the group starts from that arrangement, counted as confirmed. Members whose displays match the set a person last confirmed stay where they are, and an arrangement that was itself recalled never holds back the next; if the kept arrangement would move them relative to each other, only the arriving member is placed, beside the member it was nearest. A member leaving never starts from a kept arrangement. No message carries kept arrangements: every member of a set was present when it was confirmed and kept it then.
+Each member shares its displays and one agreed arrangement: an offset per member that places its displays in a shared space, never overlapping another member's and never out of the pointer's reach of this system. A drop or display change that would strand a member searches for a clear, reachable edge placement; a drag keeps its current position if no such placement fits. A member already out of reach does not hold a drop back. The greatest `(version, author)` wins everywhere, so every member converges on the same arrangement whoever changes it. A member that joins without a position is placed on the side its pairing chose, clear of the rest. The arrangement is saved, so a member returns where it was placed. Each system can save an arrangement explicitly for an exact set of members and displays. It is applied only by an explicit command, then broadcast as the current arrangement. Automatic placement and repair still handle new members and display changes.
 
 ## Layers
 
@@ -26,7 +26,7 @@ Each member shares its displays and one agreed arrangement: an offset per member
 | Control | `control` | Group-wide ownership and simultaneous-use settling |
 | Layout | `layout` | Display geometry, the agreed arrangement, snapping, and where the pointer goes next |
 | Arrangement motion | `arrangement_motion` | Presentation-only springs, arrival and control emphasis, and rigid chain geometry; never changes routing or shared placement |
-| Recall | `recall` | The arrangement last confirmed for each set of members and displays, and when to start from it |
+| Saved arrangement | `saved_layouts` | Exact setup lookup for an arrangement explicitly saved and applied by a person |
 | Sharing | `share` | One input core for the group, with a link per member: claims, routing, arrangement, bounded queues, heartbeat and cleanup |
 | Developer diagnostics | `diagnostics`, `macos::diagnostics` | Dynamic trace requests, bounded event capture and encrypted streaming, local collector socket, foreground observations |
 | Latency | `latency` | Round trips per link from heartbeat pings and pongs: a recent average and percentiles |
@@ -128,8 +128,8 @@ The command-line `connect` command runs `service::connect` as a loop. Once a ses
 - `trust-v5/peers.toml`: one entry per trusted peer, including key, name, trust policy, pairing time, last-seen time, its signing key and independent admission time. The same atomic file stores shared retention choices, removal history and tombstones.
 - `trust-v5/revocations.toml`: the legacy signed removal journal; known removals are carried in shared membership records.
 - `trust-v5/arrangement.toml`: the newest group arrangement it saw.
-- `trust-v5/layouts.toml`: the arrangement last confirmed for each set of
-  members and displays, at most 32, the least recently used dropped first.
+- `trust-v5/saved-layouts.toml`: arrangements explicitly saved on this system for exact sets of
+  members and displays, at most 32, with the oldest saved setup dropped first.
 - `trust-v5/arrangement-confirmation.toml`: checked member display sets and
   their arrangement version, retained across reconnects and restarts.
 - `stats.toml`: each running link's round trips, for `daisy stats`.

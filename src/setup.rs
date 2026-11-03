@@ -18,7 +18,7 @@ pub struct Confirmation<K> {
 
 impl<K: Copy + Ord> Confirmation<K> {
     pub fn new(group: &crate::layout::Group<K>, (version, author): (u64, K)) -> Self {
-        let members = crate::recall::setup(group.members.iter().map(|m| (m.key, m.displays.as_slice())));
+        let members = crate::saved_layouts::setup(group.members.iter().map(|m| (m.key, m.displays.as_slice())));
         Self {
             version,
             author,
@@ -216,7 +216,7 @@ mod tests {
         let stranded_checked = Confirmation::new(&group, (2, 0));
         assert!(
             !check_arrangement(&group, 0, (2, 0), Some(&stranded_checked)),
-            "Looks Right is explicit"
+            "confirmation is explicit"
         );
         group.members[1].displays[0].width = 120.0;
         assert!(
