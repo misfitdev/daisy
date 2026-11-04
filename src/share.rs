@@ -87,6 +87,84 @@ fn queue_arrangement_write(
     }
 }
 
+struct ArrangementWriteState<'a> {
+    latest_write: &'a mut Option<(u64, (u64, PublicKey))>,
+    persisted_version: &'a mut Option<(u64, PublicKey)>,
+    confirmed: &'a mut Option<Confirmation>,
+    pending_local_confirmation: &'a mut Option<Confirmation>,
+    pending_confirmations: &'a mut VecDeque<Message>,
+    pending_apply: &'a mut Option<(u64, Confirmation)>,
+    apply_requires_write: &'a mut Option<Confirmation>,
+}
+
+fn finish_arrangement_write(
+    outcome: ArrangementWriteResult,
+    placement: &crate::layout::Placement<PublicKey>,
+    state: ArrangementWriteState<'_>,
+) -> bool {
+    let ArrangementWriteState {
+        latest_write,
+        persisted_version,
+        confirmed,
+        pending_local_confirmation,
+        pending_confirmations,
+        pending_apply,
+        apply_requires_write,
+    } = state;
+    let ArrangementWriteResult { id, version, result } = outcome;
+    let mut changed = false;
+    if *latest_write == Some((id, version)) && version == placement.version() {
+        *latest_write = None;
+        if result.is_ok() {
+            *persisted_version = Some(version);
+            let current = Confirmation::new(&placement.group(), placement.version());
+            if pending_local_confirmation
+                .as_ref()
+                .is_some_and(|saved| confirmation_covers_current(saved, &current))
+            {
+                *confirmed = pending_local_confirmation.take();
+                *apply_requires_write = None;
+            }
+        } else {
+            *persisted_version = None;
+            *confirmed = None;
+            *pending_local_confirmation = None;
+            pending_confirmations.clear();
+        }
+        changed = true;
+    }
+    if pending_apply.as_ref().is_some_and(|(pending, _)| *pending == id) {
+        if result.is_ok() {
+            let current = Confirmation::new(&placement.group(), placement.version());
+            if *persisted_version == Some(placement.version())
+                && pending_apply
+                    .as_ref()
+                    .is_some_and(|(_, snapshot)| confirmation_covers_current(snapshot, &current))
+            {
+                *confirmed = pending_apply.as_ref().map(|(_, snapshot)| snapshot.clone());
+                *apply_requires_write = None;
+            }
+        }
+        *pending_apply = None;
+        changed = true;
+    }
+    changed
+}
+
+fn confirmation_covers_current(saved: &Confirmation, current: &Confirmation) -> bool {
+    (saved.version, saved.author) == (current.version, current.author) && saved.covers(current)
+}
+
+fn saved_layout_matches(
+    layouts: &crate::saved_layouts::Memory<PublicKey>,
+    placement: &crate::layout::Placement<PublicKey>,
+) -> bool {
+    let placed = placement.placed();
+    layouts.get(&placement.setup()).is_some_and(|saved| {
+        saved.len() == placed.len() && saved.iter().all(|(key, offset)| placed.get(key) == Some(offset))
+    })
+}
+
 pub struct LoadLayouts {
     pub epoch: u64,
     pub apply: Option<Confirmation>,
@@ -479,6 +557,13 @@ where
             if latest_write.is_none()
                 && persisted_version == Some(placement.version())
                 && apply_requires_write.is_none()
+                && saved_layout_matches(&layouts, &placement)
+            {
+                confirmed = Some(current.clone());
+            }
+            if latest_write.is_none()
+                && persisted_version == Some(placement.version())
+                && apply_requires_write.is_none()
                 && pending_confirmations
                     .iter()
                     .any(|candidate| *candidate == confirmation_message(&current))
@@ -638,10 +723,10 @@ where
             }
             waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
             if waiting.is_empty() {
-                if !had_link && pending_saves == 0 {
+                if !had_link && pending_saves == 0 && latest_write.is_none() {
                     return Ok(());
                 }
-                if membership.is_closed() && pending_saves == 0 {
+                if membership.is_closed() && pending_saves == 0 && latest_write.is_none() {
                     return Ok(());
                 }
                 let since = *empty_since.get_or_insert_with(Instant::now);
@@ -655,7 +740,10 @@ where
                             Ok(committed) => {
                                 layouts = committed;
                                 layouts_epoch = layouts_epoch.saturating_add(1);
-                                if snapshot == Confirmation::new(&placement.group(), placement.version()) {
+                                if confirmation_covers_current(
+                                    &snapshot,
+                                    &Confirmation::new(&placement.group(), placement.version()),
+                                ) {
                                     if latest_write.is_none()
                                         && apply_requires_write.is_none()
                                         && persisted_version == Some(placement.version())
@@ -672,8 +760,23 @@ where
                         }
                         review_changed = true;
                     },
-                    // The writer owns the disk request after this core exits.
-                    // Its result is drained before another core starts.
+                    Some(outcome) = arrangement_results.recv() => {
+                        review_changed |= finish_arrangement_write(
+                            outcome,
+                            &placement,
+                            ArrangementWriteState {
+                                latest_write: &mut latest_write,
+                                persisted_version: &mut persisted_version,
+                                confirmed: &mut confirmed,
+                                pending_local_confirmation: &mut pending_local_confirmation,
+                                pending_confirmations: &mut pending_confirmations,
+                                pending_apply: &mut pending_apply,
+                                apply_requires_write: &mut apply_requires_write,
+                            },
+                        );
+                    },
+                    // A stalled disk write must not keep the input core alive.
+                    // A returning core can recognize a saved matching layout.
                     _ = tokio::time::sleep_until(since + EMPTY_GRACE) => return Ok(()),
                     error = &mut until => return Err(error),
                 }
@@ -1040,7 +1143,10 @@ where
                 Ok(committed) => {
                     layouts = committed;
                     layouts_epoch = layouts_epoch.saturating_add(1);
-                    if snapshot == Confirmation::new(&placement.group(), placement.version()) {
+                    if confirmation_covers_current(
+                        &snapshot,
+                        &Confirmation::new(&placement.group(), placement.version()),
+                    ) {
                         if latest_write.is_none()
                             && apply_requires_write.is_none()
                             && persisted_version == Some(placement.version())
@@ -1058,38 +1164,19 @@ where
             review_changed = true;
         }
         Some(outcome) = arrangement_results.recv() => {
-            let ArrangementWriteResult { id, version, result } = outcome;
-            if latest_write == Some((id, version)) && version == placement.version() {
-                latest_write = None;
-                if result.is_ok() {
-                    persisted_version = Some(version);
-                    let current = Confirmation::new(&placement.group(), placement.version());
-                    if pending_local_confirmation.as_ref() == Some(&current) {
-                        confirmed = Some(current);
-                        pending_local_confirmation = None;
-                        apply_requires_write = None;
-                    }
-                } else {
-                    persisted_version = None;
-                    confirmed = None;
-                    pending_local_confirmation = None;
-                    pending_confirmations.clear();
-                }
-                review_changed = true;
-            }
-            if pending_apply.as_ref().is_some_and(|(pending, _)| *pending == id) {
-                if result.is_ok() {
-                    let current = Confirmation::new(&placement.group(), placement.version());
-                    if persisted_version == Some(placement.version())
-                        && pending_apply.as_ref().is_some_and(|(_, snapshot)| snapshot == &current)
-                    {
-                        confirmed = Some(current);
-                        apply_requires_write = None;
-                    }
-                }
-                pending_apply = None;
-                review_changed = true;
-            }
+            review_changed |= finish_arrangement_write(
+                outcome,
+                &placement,
+                ArrangementWriteState {
+                    latest_write: &mut latest_write,
+                    persisted_version: &mut persisted_version,
+                    confirmed: &mut confirmed,
+                    pending_local_confirmation: &mut pending_local_confirmation,
+                    pending_confirmations: &mut pending_confirmations,
+                    pending_apply: &mut pending_apply,
+                    apply_requires_write: &mut apply_requires_write,
+                },
+            );
         }
         Some((epoch, apply, result)) = load_results.recv() => {
             if apply.is_none() {
@@ -3235,8 +3322,10 @@ mod tests {
         let (load, mut requests) = mpsc::unbounded_channel::<LoadLayouts>();
         local.load_layouts = Some(load);
         tokio::spawn(async move {
+            let mut removed = false;
             while let Some(request) = requests.recv().await {
-                let memory = if request.apply.is_some() {
+                removed |= request.apply.is_some();
+                let memory = if removed {
                     Default::default()
                 } else {
                     let mut memory = crate::saved_layouts::Memory::default();
@@ -3258,6 +3347,35 @@ mod tests {
         let shown = view_when(&mut view, |v| v.layout.members.len() == 2 && v.applicable).await;
         choose.send(Choice::Apply(shown.snapshot.unwrap())).unwrap();
         view_when(&mut view, |v| v.layout.members.len() == 2 && !v.applicable).await;
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_saved_matching_arrangement_recovers_confirmation_after_a_core_restart() {
+        let (control, _members, membership, mut far, _ended, keys) = group_of(1, None).await;
+        let me = me_of(&control);
+        let peer = keys[0];
+        let offsets = [(me, (0.0, 0.0)), (peer, (1000.0, 0.0))].into_iter().collect();
+        let mut local = group(&control);
+        local.saved = Some((10, me, vec![(me, (0.0, 0.0)), (peer, (1000.0, 0.0))]));
+        local.layouts.remember(
+            crate::saved_layouts::setup([(me, &[SCREEN][..]), (peer, &[SCREEN][..])]),
+            &offsets,
+        );
+        let (confirmation, mut persisted) = mpsc::unbounded_channel();
+        local.save_confirmation = confirmation;
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        let shown = view_when(&mut view, |v| v.layout.members.len() == 2 && v.check.is_none()).await;
+        let saved = tokio::time::timeout(Duration::from_secs(2), persisted.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Some(saved), shown.snapshot);
         task.abort();
     }
 
@@ -3578,6 +3696,114 @@ mod tests {
             .unwrap();
         view_when(&mut view, |v| v.layout.members.len() == 1 && v.save_error == 1).await;
         assert!(!task.is_finished());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_save_finishing_after_the_last_link_keeps_its_full_group_confirmation() {
+        let (control, members, membership, mut far, mut ended, keys) = group_of(1, None).await;
+        let me = me_of(&control);
+        let peer = keys[0];
+        let mut local = group(&control);
+        local.saved = Some((10, me, vec![(me, (0.0, 0.0)), (peer, (1000.0, 0.0))]));
+        let (choose, choices) = broadcast::channel(256);
+        local.choices = choices;
+        let (save, mut requests) = mpsc::unbounded_channel();
+        local.save_layouts = save;
+        let (confirmation, mut persisted) = mpsc::unbounded_channel();
+        local.save_confirmation = confirmation;
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        let shown = view_when(&mut view, |v| v.layout.members.len() == 2 && v.saveable).await;
+        choose.send(Choice::Save(shown.snapshot.clone().unwrap())).unwrap();
+        let pending = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        members.send(Membership::Drop(peer)).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), &mut ended[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        view_when(&mut view, |v| v.layout.members.len() == 1).await;
+        let mut memory = crate::saved_layouts::Memory::default();
+        memory.remember(pending.setup, &pending.offsets);
+        pending.done.send((pending.snapshot, Ok(memory))).unwrap();
+        let saved = tokio::time::timeout(Duration::from_secs(2), persisted.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Some(saved), shown.snapshot);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_apply_write_finishing_after_the_last_link_keeps_its_full_group_confirmation() {
+        let (control, members, membership, mut far, mut ended, keys) = group_of(1, None).await;
+        let me = me_of(&control);
+        let peer = keys[0];
+        let mut local = group(&control);
+        local.saved = Some((10, me, vec![(me, (0.0, 0.0)), (peer, (-1000.0, 0.0))]));
+        local.layouts.remember(
+            crate::saved_layouts::setup([(me, &[SCREEN][..]), (peer, &[SCREEN][..])]),
+            &[(me, (0.0, 0.0)), (peer, (1000.0, 0.0))].into_iter().collect(),
+        );
+        let (choose, choices) = broadcast::channel(256);
+        local.choices = choices;
+        let (save, mut writes) = mpsc::unbounded_channel();
+        local.save = save;
+        let (results, received) = mpsc::unbounded_channel();
+        local.save_results = received;
+        let (confirmation, mut persisted) = mpsc::unbounded_channel();
+        local.save_confirmation = confirmation;
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        let shown = view_when(&mut view, |v| v.layout.members.len() == 2 && v.applicable).await;
+        choose.send(Choice::Apply(shown.snapshot.unwrap())).unwrap();
+        let applied = view_when(&mut view, |v| {
+            v.layout
+                .members
+                .iter()
+                .any(|member| member.key == peer && member.offset == (1000.0, 0.0))
+        })
+        .await;
+        let write = loop {
+            let write = tokio::time::timeout(Duration::from_secs(2), writes.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if write.arrangement.0 == applied.snapshot.as_ref().unwrap().version {
+                break write;
+            }
+        };
+        members.send(Membership::Drop(peer)).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), &mut ended[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        view_when(&mut view, |v| v.layout.members.len() == 1).await;
+        results
+            .send(ArrangementWriteResult {
+                id: write.id,
+                version: (write.arrangement.0, write.arrangement.1),
+                result: Ok(()),
+            })
+            .unwrap();
+        let saved = tokio::time::timeout(Duration::from_secs(2), persisted.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Some(saved), applied.snapshot);
         task.abort();
     }
 

@@ -1512,9 +1512,11 @@ fn start_layout_writer(
     notices: Option<mpsc::UnboundedSender<share::ArrangementNotice>>,
 ) -> mpsc::UnboundedSender<share::SaveLayout> {
     let (sender, mut requests) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(request) = requests.recv().await {
-            save_layout_request(store.clone(), request, notices.as_ref()).await;
+    // Runtime shutdown waits for blocking tasks. Drain queued Saves even when
+    // the controller cancels its session and drops the async sharing core.
+    tokio::task::spawn_blocking(move || {
+        while let Some(request) = requests.blocking_recv() {
+            save_layout_request(store.clone(), request, notices.as_ref());
         }
     });
     sender
@@ -1543,13 +1545,12 @@ async fn write_arrangement(
     let _ = results.send(share::ArrangementWriteResult { id, version, result });
 }
 
-async fn save_layout_request(
+fn save_layout_request(
     store: PeerStore,
     request: share::SaveLayout,
     notices: Option<&mpsc::UnboundedSender<share::ArrangementNotice>>,
 ) {
-    let result = tokio::task::spawn_blocking(move || store.remember_layout(request.setup, &request.offsets)).await;
-    let result = result.unwrap_or_else(|error| Err(anyhow::anyhow!("saved-layout writer stopped: {error}")));
+    let result = store.remember_layout(request.setup, &request.offsets);
     if let Err(error) = &result {
         tracing::warn!(
             error = format!("{error:#}"),
@@ -1743,8 +1744,7 @@ mod tests {
                 done,
             },
             Some(&notices),
-        )
-        .await;
+        );
         assert_eq!(received.try_recv(), Ok(share::ArrangementNotice::SaveFailed));
         assert!(received.try_recv().is_err());
         assert!(result.try_recv().unwrap().1.is_err());
@@ -1826,6 +1826,43 @@ mod tests {
             store.layouts().unwrap().get(&setup).unwrap()[1],
             (second, (-1000.0, 0.0))
         );
+    }
+
+    #[test]
+    fn queued_layout_save_finishes_when_the_runtime_stops() {
+        let home = tempfile::tempdir().unwrap();
+        let store = PeerStore::open(home.path()).unwrap();
+        let key = PublicKey::from_bytes(&[1; 32]).unwrap();
+        let peer = PublicKey::from_bytes(&[2; 32]).unwrap();
+        let screen = crate::input::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        };
+        let setup = crate::saved_layouts::setup([(key, &[screen][..]), (peer, &[screen][..])]);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        {
+            let _entered = runtime.enter();
+            let writer = start_layout_writer(store.clone(), None);
+            writer
+                .send(share::SaveLayout {
+                    setup: setup.clone(),
+                    offsets: [(key, (0.0, 0.0)), (peer, (1000.0, 0.0))].into_iter().collect(),
+                    snapshot: share::Confirmation {
+                        version: 1,
+                        author: key,
+                        members: setup.clone(),
+                    },
+                    done: mpsc::unbounded_channel().0,
+                })
+                .unwrap();
+        }
+        drop(runtime);
+        assert!(store.layouts().unwrap().get(&setup).is_some());
     }
 
     #[tokio::test]

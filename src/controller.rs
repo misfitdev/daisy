@@ -873,7 +873,7 @@ fn arrangement_notice_event(notice: crate::share::ArrangementNotice) -> Event {
         ),
         crate::share::ArrangementNotice::ArrangementWriteFailed => (
             "Arrangement could not be kept",
-            "Check that Daisy can write its data folder, then try Apply saved again.",
+            "Check that Daisy can write its data folder, then move the screens again.",
         ),
     };
     Event::Notice {
