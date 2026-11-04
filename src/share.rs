@@ -54,7 +54,8 @@ pub enum Choice {
 pub struct SaveLayout {
     pub setup: crate::saved_layouts::Setup<PublicKey>,
     pub offsets: std::collections::BTreeMap<PublicKey, crate::layout::Offset>,
-    pub done: oneshot::Sender<anyhow::Result<crate::saved_layouts::Memory<PublicKey>>>,
+    pub snapshot: Confirmation,
+    pub done: mpsc::UnboundedSender<(Confirmation, anyhow::Result<crate::saved_layouts::Memory<PublicKey>>)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,7 +66,8 @@ pub struct ArrangementView {
     pub unreachable: Vec<PublicKey>,
     pub saveable: bool,
     pub applicable: bool,
-    pub save_error: bool,
+    /// Incremented for each failed save; zero after a successful save.
+    pub save_error: u64,
 }
 
 impl Default for ArrangementView {
@@ -77,7 +79,7 @@ impl Default for ArrangementView {
             unreachable: Vec::new(),
             saveable: false,
             applicable: false,
-            save_error: false,
+            save_error: 0,
         }
     }
 }
@@ -295,7 +297,8 @@ where
     let mut kept_confirmation = confirmed.clone();
     let mut pending_confirmations = VecDeque::new();
     let mut layouts = group.layouts;
-    let mut save_error = false;
+    let mut save_error = 0u64;
+    let (save_result_tx, mut save_results) = mpsc::unbounded_channel();
     // Members whose displays arrived or changed and already had a place.
     let mut arrived: Vec<(PublicKey, bool)> = Vec::new();
     let mut review_changed = true;
@@ -879,6 +882,19 @@ where
                 publish(&control, &links, &group.reports);
                 pace.handled(peer, kind, queued_before, handling.elapsed(), control.now());
             }
+        Some((snapshot, result)) = save_results.recv() => {
+            match result {
+                Ok(committed) => {
+                    layouts = committed;
+                    if snapshot == Confirmation::new(&placement.group(), placement.version()) {
+                        confirmed = Some(snapshot);
+                    }
+                    save_error = 0;
+                }
+                Err(_) => save_error = save_error.saturating_add(1),
+            }
+            review_changed = true;
+        }
         Ok(chosen) = choices.recv() => {
             match chosen {
                 Choice::Move((key, offset)) if placement.put(key, offset, now_ms()) => {
@@ -895,21 +911,14 @@ where
                     if layout.members.len() > 1 && layout.unreachable(me).is_empty()
                         && placement.unplaced().is_empty()
                     {
-                        let (done, saved) = oneshot::channel();
-                        let request = SaveLayout { setup: placement.setup(), offsets: placement.placed(), done };
-                        if group.save_layouts.send(request).is_ok() {
-                            match saved.await {
-                                Ok(Ok(committed)) => {
-                                    layouts = committed;
-                                    confirmed = Some(snapshot);
-                                    save_error = false;
-                                }
-                                _ => save_error = true,
-                            }
-                        } else {
-                            save_error = true;
+                        let request = SaveLayout {
+                            setup: placement.setup(), offsets: placement.placed(),
+                            snapshot, done: save_result_tx.clone(),
+                        };
+                        if group.save_layouts.send(request).is_err() {
+                            save_error = save_error.saturating_add(1);
+                            review_changed = true;
                         }
-                        review_changed = true;
                     }
                 }
                 Choice::Apply(snapshot) if snapshot == Confirmation::new(&placement.group(), placement.version()) => {
@@ -2878,7 +2887,7 @@ mod tests {
         assert_eq!(request.offsets.get(&peer), Some(&(1000.0, 250.0)));
         let mut updated = crate::saved_layouts::Memory::default();
         updated.remember(request.setup, &request.offsets);
-        request.done.send(Ok(updated)).unwrap();
+        request.done.send((request.snapshot, Ok(updated))).unwrap();
         while arrangements.try_recv().is_ok() {}
         choose.send(Choice::Move((peer, (1000.0, 300.0)))).unwrap();
         choose.send(Choice::Move((peer, (1000.0, 350.0)))).unwrap();
@@ -2920,8 +2929,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        first.done.send(Err(anyhow::anyhow!("disk unavailable"))).unwrap();
-        view_when(&mut view, |v| v.save_error && v.check.is_some()).await;
+        first
+            .done
+            .send((first.snapshot, Err(anyhow::anyhow!("disk unavailable"))))
+            .unwrap();
+        view_when(&mut view, |v| v.save_error > 0 && v.check.is_some()).await;
         choose.send(Choice::Save(snapshot)).unwrap();
         let second = tokio::time::timeout(Duration::from_secs(2), requests.recv())
             .await
@@ -2929,8 +2941,52 @@ mod tests {
             .unwrap();
         let mut memory = crate::saved_layouts::Memory::default();
         memory.remember(second.setup, &second.offsets);
-        second.done.send(Ok(memory)).unwrap();
-        view_when(&mut view, |v| !v.save_error && v.check.is_none()).await;
+        second.done.send((second.snapshot, Ok(memory))).unwrap();
+        view_when(&mut view, |v| v.save_error == 0 && v.check.is_none()).await;
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn pending_saved_layout_write_does_not_pause_heartbeats() {
+        let (control, _members, membership, mut far, _ended, _keys) = group_of(1, None).await;
+        let mut local = group(&control);
+        let (choose, choices) = broadcast::channel(256);
+        local.choices = choices;
+        let (save, mut requests) = mpsc::unbounded_channel();
+        local.save_layouts = save;
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        let shown = view_when(&mut view, |v| v.layout.members.len() == 2 && v.saveable).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(far[0].recv().await.unwrap(), Message::Ping { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        choose.send(Choice::Save(shown.snapshot.unwrap())).unwrap();
+        let pending = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(far[0].recv().await.unwrap(), Message::Ping { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("sharing must keep sending heartbeats while Save waits on disk");
+        let mut memory = crate::saved_layouts::Memory::default();
+        memory.remember(pending.setup, &pending.offsets);
+        pending.done.send((pending.snapshot, Ok(memory))).unwrap();
         task.abort();
     }
 
@@ -2954,7 +3010,7 @@ mod tests {
             while let Some(request) = layout_saving.recv().await {
                 let mut memory = crate::saved_layouts::Memory::default();
                 memory.remember(request.setup, &request.offsets);
-                let _ = request.done.send(Ok(memory));
+                let _ = request.done.send((request.snapshot, Ok(memory)));
             }
         });
         let remote_control = Arc::new(SharedControl::new(peer, me));

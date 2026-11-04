@@ -1442,14 +1442,17 @@ async fn run_core_once(
     let layout_store = peers.clone();
     let layout_saving = tokio::spawn(async move {
         while let Some(request) = layout_saving.recv().await {
-            let result = layout_store.remember_layout(request.setup, &request.offsets);
+            let store = layout_store.clone();
+            let result =
+                tokio::task::spawn_blocking(move || store.remember_layout(request.setup, &request.offsets)).await;
+            let result = result.unwrap_or_else(|error| Err(anyhow::anyhow!("saved-layout writer stopped: {error}")));
             if let Err(error) = &result {
                 tracing::warn!(
                     error = format!("{error:#}"),
                     "the explicitly saved screen arrangements could not be saved"
                 );
             }
-            let _ = request.done.send(result);
+            let _ = request.done.send((request.snapshot, result));
         }
     });
     let group = share::Group {
@@ -1461,7 +1464,7 @@ async fn run_core_once(
         saved: peers.arrangement(),
         saved_confirmation: peers.confirmation(),
         save_confirmation,
-        layouts: peers.layouts()?,
+        layouts: session_layouts(peers),
         save_layouts,
         save,
         reports: reports.clone(),
@@ -1488,6 +1491,18 @@ async fn run_core_once(
         }
     }
     result
+}
+
+/// A damaged preset must not stop input sharing. Explicit Save still fails
+/// until the file can be read and safely updated.
+fn session_layouts(peers: &PeerStore) -> crate::saved_layouts::Memory<PublicKey> {
+    peers.layouts().unwrap_or_else(|error| {
+        tracing::warn!(
+            error = format!("{error:#}"),
+            "saved screen arrangements could not be read"
+        );
+        Default::default()
+    })
 }
 
 /// What a member starting a link with `key` is told: every system this one
@@ -1593,6 +1608,15 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn damaged_saved_layouts_do_not_block_a_sharing_session() {
+        let home = tempfile::tempdir().unwrap();
+        let peers = PeerStore::open(home.path()).unwrap();
+        std::fs::write(home.path().join("trust-v5/saved-layouts.toml"), "not toml [").unwrap();
+        assert!(peers.layouts().is_err());
+        assert_eq!(session_layouts(&peers), crate::saved_layouts::Memory::default());
+    }
 
     #[tokio::test]
     async fn explicit_addresses_arrive_without_replacing_the_session() {

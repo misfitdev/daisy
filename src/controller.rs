@@ -328,10 +328,20 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
     thread::Builder::new()
         .name("daisy-arrangement-preview".to_owned())
         .spawn(move || {
+            let mut save_error = 0u64;
+            let mut layout_read_failed = false;
             loop {
                 let layout = placement.group();
                 let check = crate::setup::check_arrangement(&layout, me, placement.version(), confirmed.as_ref())
                     .then(|| crate::share::Confirmation::new(&layout, placement.version()));
+                let layouts = store.layouts();
+                if let Err(error) = &layouts && !layout_read_failed {
+                    let _ = events.send(Event::Notice {
+                        title: "Saved arrangements could not be loaded".to_owned(),
+                        detail: format!("Check the saved arrangements file, then try again. {error:#}"),
+                    });
+                }
+                layout_read_failed = layouts.is_err();
                 let _ = events.send(Event::Arranged(crate::share::ArrangementView {
                     unreachable: layout.unreachable(me),
                     check,
@@ -339,12 +349,12 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
                     saveable: layout.members.len() > 1
                         && layout.unreachable(me).is_empty()
                         && placement.unplaced().is_empty(),
-                    applicable: store
-                        .layouts()
+                    applicable: layouts
+                        .as_ref()
                         .ok()
                         .and_then(|layouts| layouts.get(&placement.setup()).map(|_| ()))
                         .is_some(),
-                    save_error: false,
+                    save_error,
                     layout,
                 }));
                 let Some(command) = commands.blocking_recv() else {
@@ -366,9 +376,20 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
                         if layout.members.len() > 1
                             && layout.unreachable(me).is_empty()
                             && placement.unplaced().is_empty()
-                            && store.remember_layout(placement.setup(), &placement.placed()).is_ok()
                         {
-                            confirmed = Some(snapshot);
+                            match store.remember_layout(placement.setup(), &placement.placed()) {
+                                Ok(_) => {
+                                    confirmed = Some(snapshot);
+                                    save_error = 0;
+                                }
+                                Err(error) => {
+                                    save_error = save_error.saturating_add(1);
+                                    let _ = events.send(Event::Notice {
+                                        title: "Arrangement could not be saved".to_owned(),
+                                        detail: format!("Check that Daisy can write its data folder, then try Save arrangement again. {error:#}"),
+                                    });
+                                }
+                            }
                         }
                     }
                     Command::ApplyArrangement(snapshot)
@@ -664,13 +685,13 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 }
             }
             Command::SaveArrangement(snapshot) => {
-                let _ = arrange.send(crate::share::Choice::Save(snapshot));
+                send_arrangement_choice(&arrange, &events, crate::share::Choice::Save(snapshot));
             }
             Command::ApplyArrangement(snapshot) => {
-                let _ = arrange.send(crate::share::Choice::Apply(snapshot));
+                send_arrangement_choice(&arrange, &events, crate::share::Choice::Apply(snapshot));
             }
             Command::Place(key, offset) => {
-                let _ = arrange.send(crate::share::Choice::Move((key, offset)));
+                send_arrangement_choice(&arrange, &events, crate::share::Choice::Move((key, offset)));
             }
             Command::Shutdown => {
                 if let Some(running) = session.take() {
@@ -680,6 +701,24 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 break;
             }
         }
+    }
+}
+
+fn send_arrangement_choice(
+    arrange: &broadcast::Sender<crate::share::Choice>,
+    events: &Sender<Event>,
+    choice: crate::share::Choice,
+) {
+    let (title, detail) = match &choice {
+        crate::share::Choice::Save(_) => ("Arrangement could not be saved", "Try Save arrangement again."),
+        crate::share::Choice::Apply(_) => ("Arrangement could not be applied", "Try Apply saved again."),
+        crate::share::Choice::Move(_) => ("Arrangement could not be changed", "Try moving the screens again."),
+    };
+    if arrange.send(choice).is_err() {
+        let _ = events.send(Event::Notice {
+            title: title.to_owned(),
+            detail: format!("Sharing is reconnecting. {detail}"),
+        });
     }
 }
 
@@ -760,6 +799,7 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
         let mut prompt = ControllerPrompt { events: events.clone() };
         let mut observer = ControllerObserver {
             told_version: None,
+            last_save_error: 0,
             events: events.clone(),
             home: home.clone(),
             waiting: None,
@@ -829,6 +869,7 @@ impl PairingPrompt for ControllerPrompt {
 struct ControllerObserver {
     /// The version mismatch last reported, so a retry does not repeat it.
     told_version: Option<(String, String)>,
+    last_save_error: u64,
     events: Sender<Event>,
     home: PathBuf,
     waiting: Option<(u16, bool)>,
@@ -929,13 +970,13 @@ impl ServiceObserver for ControllerObserver {
     }
 
     fn arranged(&mut self, layout: &crate::share::ArrangementView) {
-        if layout.save_error {
-            let _ = send_problem(
-                &self.events,
-                "Arrangement could not be saved",
-                "Check that Daisy can write its data folder, then try Save arrangement again.".to_owned(),
-            );
+        if layout.save_error != self.last_save_error && layout.save_error > 0 {
+            let _ = self.events.send(Event::Notice {
+                title: "Arrangement could not be saved".to_owned(),
+                detail: "Check that Daisy can write its data folder, then try Save arrangement again.".to_owned(),
+            });
         }
+        self.last_save_error = layout.save_error;
         let _ = self.events.send(Event::Arranged(layout.clone()));
     }
 
@@ -1134,6 +1175,105 @@ fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrangement_commands_report_when_no_core_is_listening() {
+        let key = PublicKey::from_bytes(&[1; 32]).unwrap();
+        let layout = crate::layout::Group::alone(
+            key,
+            vec![crate::input::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }],
+        );
+        let snapshot = crate::share::Confirmation::new(&layout, (1, key));
+        let (arrange, receiver) = broadcast::channel(16);
+        drop(receiver);
+        let (events, notices) = mpsc::channel();
+        send_arrangement_choice(&arrange, &events, crate::share::Choice::Save(snapshot.clone()));
+        send_arrangement_choice(&arrange, &events, crate::share::Choice::Apply(snapshot));
+        send_arrangement_choice(&arrange, &events, crate::share::Choice::Move((key, (0.0, 0.0))));
+        for expected in [
+            "Arrangement could not be saved",
+            "Arrangement could not be applied",
+            "Arrangement could not be changed",
+        ] {
+            assert!(matches!(notices.try_recv(), Ok(Event::Notice { title, .. }) if title == expected));
+        }
+        assert!(notices.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_failed_save_is_reported_once_per_attempt_without_changing_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let (events, received) = mpsc::channel();
+        let mut observer = ControllerObserver {
+            told_version: None,
+            last_save_error: 0,
+            events,
+            home: directory.path().to_owned(),
+            waiting: None,
+            stats: Default::default(),
+            linked: Vec::new(),
+            adding: false,
+        };
+        let mut view = crate::share::ArrangementView {
+            save_error: 1,
+            ..Default::default()
+        };
+        observer.arranged(&view);
+        assert!(matches!(received.try_recv(), Ok(Event::Notice { .. })));
+        assert!(matches!(received.try_recv(), Ok(Event::Arranged(_))));
+        observer.arranged(&view);
+        assert!(matches!(received.try_recv(), Ok(Event::Arranged(_))));
+        view.save_error = 2;
+        observer.arranged(&view);
+        assert!(matches!(received.try_recv(), Ok(Event::Notice { .. })));
+        assert!(matches!(received.try_recv(), Ok(Event::Arranged(_))));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn arrangement_preview_reports_damaged_saved_layouts_and_failed_save() {
+        let home = tempfile::tempdir().unwrap();
+        let store = PeerStore::open(home.path()).unwrap();
+        let me = PublicKey::from_bytes(&[1; 32]).unwrap();
+        let peer = PublicKey::from_bytes(&[2; 32]).unwrap();
+        store.pin(peer, "Studio", Policy::Forever, trust::now()).unwrap();
+        store
+            .save_arrangement(&(10, me, vec![(me, (0.0, 0.0)), (peer, (1512.0, 0.0))]))
+            .unwrap();
+        fs::write(home.path().join("trust-v5/saved-layouts.toml"), "not toml [").unwrap();
+        let handle = spawn_arrangement_preview(home.path().to_owned()).unwrap();
+        let mut load_notice = false;
+        let snapshot = loop {
+            match handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                Event::Notice { title, .. } if title == "Saved arrangements could not be loaded" => load_notice = true,
+                Event::Arranged(view) => {
+                    assert!(!view.applicable);
+                    assert!(view.saveable);
+                    break view.snapshot.unwrap();
+                }
+                Event::Status(Status::Problem { .. }) => panic!("a damaged preset must not change connection status"),
+                _ => {}
+            }
+        };
+        assert!(load_notice);
+        handle.send(Command::SaveArrangement(snapshot)).unwrap();
+        let mut save_notice = false;
+        loop {
+            match handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                Event::Notice { title, .. } if title == "Arrangement could not be saved" => save_notice = true,
+                Event::Arranged(view) if view.save_error > 0 => break,
+                Event::Status(Status::Problem { .. }) => panic!("a failed save must not change connection status"),
+                _ => {}
+            }
+        }
+        assert!(save_notice);
+        handle.shutdown().unwrap();
+    }
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -1191,6 +1331,7 @@ mod tests {
         let (events, received) = mpsc::channel();
         let mut observer = ControllerObserver {
             told_version: None,
+            last_save_error: 0,
             events,
             home: directory.path().to_owned(),
             waiting: Some((service::DEFAULT_PORT, false)),
@@ -1227,6 +1368,7 @@ mod tests {
         let (events, received) = mpsc::channel();
         let mut observer = ControllerObserver {
             told_version: None,
+            last_save_error: 0,
             events,
             home: directory.path().to_owned(),
             waiting: None,
@@ -1371,6 +1513,7 @@ mod tests {
             .public_key();
         let mut observer = ControllerObserver {
             told_version: None,
+            last_save_error: 0,
             events,
             home: directory.path().to_owned(),
             waiting: None,
@@ -1403,6 +1546,7 @@ mod tests {
         let (events, received) = mpsc::channel();
         let mut observer = ControllerObserver {
             told_version: None,
+            last_save_error: 0,
             events,
             home: directory.path().to_owned(),
             waiting: None,
@@ -1432,6 +1576,7 @@ mod tests {
         let (events, received) = mpsc::channel();
         let mut observer = ControllerObserver {
             told_version: None,
+            last_save_error: 0,
             events,
             home: directory.path().to_owned(),
             waiting: None,

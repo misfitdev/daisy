@@ -212,7 +212,7 @@ fn arrangement_confirmation(mtm: objc2_foundation::MainThreadMarker) {
     views.window.close();
     let layout = target.ivars().arranged.borrow().as_ref().unwrap().layout.clone();
     target.handle_event(Event::Arranged(crate::share::ArrangementView {
-        save_error: false,
+        save_error: 0,
         unreachable: layout.unreachable(me),
         layout,
         check: None,
