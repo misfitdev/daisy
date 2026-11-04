@@ -871,6 +871,10 @@ fn arrangement_notice_event(notice: crate::share::ArrangementNotice) -> Event {
             "Arrangement commands were missed",
             "Try Save arrangement, Apply saved, or moving the screens again.",
         ),
+        crate::share::ArrangementNotice::ArrangementWriteFailed => (
+            "Arrangement could not be kept",
+            "Check that Daisy can write its data folder, then try Apply saved again.",
+        ),
     };
     Event::Notice {
         title: title.to_owned(),
