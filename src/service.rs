@@ -1194,6 +1194,7 @@ pub struct Hub {
     choices: broadcast::Sender<share::Choice>,
     arrangement_notices: Option<mpsc::UnboundedSender<share::ArrangementNotice>>,
     layout_read_failed: std::sync::Arc<AtomicBool>,
+    save_layouts: mpsc::UnboundedSender<share::SaveLayout>,
     running: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<share::Membership<TcpStream>>>>>,
     reports: std::sync::Arc<watch::Sender<share::Reports>>,
     arranged: std::sync::Arc<watch::Sender<share::ArrangementView>>,
@@ -1225,6 +1226,7 @@ impl Clone for Hub {
             choices: self.choices.clone(),
             arrangement_notices: self.arrangement_notices.clone(),
             layout_read_failed: self.layout_read_failed.clone(),
+            save_layouts: self.save_layouts.clone(),
             running: self.running.clone(),
             reports: self.reports.clone(),
             arranged: self.arranged.clone(),
@@ -1245,6 +1247,7 @@ impl Drop for Member {
 impl Hub {
     pub fn new(config: &SessionConfig<'_>) -> Self {
         let tasks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let save_layouts = start_layout_writer(config.peers.clone(), config.arrangement_notices.cloned());
         let files = if crate::file_transfer::supported() {
             match crate::file_transfer::Hub::start(
                 config.identity.clone(),
@@ -1279,6 +1282,7 @@ impl Hub {
             choices: session_choices(config.arrangement),
             arrangement_notices: config.arrangement_notices.cloned(),
             layout_read_failed: std::sync::Arc::default(),
+            save_layouts,
             running: std::sync::Arc::default(),
             reports: std::sync::Arc::new(watch::Sender::new(share::Reports::new())),
             arranged: std::sync::Arc::new(watch::Sender::new(share::ArrangementView::default())),
@@ -1425,7 +1429,7 @@ async fn run_core_once(
     let (trusted, received) = mpsc::unbounded_channel();
     let _trust = AbortOnDrop(tokio::spawn(handle_trust(hub.clone(), received)));
     let _revocations = AbortOnDrop(tokio::spawn(send_group_trust(hub.clone())));
-    let (save, mut saving) = mpsc::unbounded_channel::<crate::peers::Arrangement>();
+    let (save, mut saving) = mpsc::unbounded_channel::<share::ArrangementWrite>();
     let (save_result_tx, save_results) = mpsc::unbounded_channel();
     let store = peers.clone();
     let save_notices = hub.arrangement_notices.clone();
@@ -1443,14 +1447,6 @@ async fn run_core_once(
             }
         }
     });
-    let (save_layouts, mut layout_saving) = mpsc::unbounded_channel::<share::SaveLayout>();
-    let layout_store = peers.clone();
-    let layout_notices = hub.arrangement_notices.clone();
-    let layout_saving = tokio::spawn(async move {
-        while let Some(request) = layout_saving.recv().await {
-            save_layout_request(layout_store.clone(), request, layout_notices.as_ref()).await;
-        }
-    });
     let (load_layouts, mut load_requests) = mpsc::unbounded_channel::<share::LoadLayouts>();
     let load_store = peers.clone();
     let load_notices = hub.arrangement_notices.clone();
@@ -1462,7 +1458,7 @@ async fn run_core_once(
                 .await
                 .unwrap_or_else(|error| Err(anyhow::anyhow!("saved-layout reader stopped: {error}")));
             let result = report_layout_read(result, load_notices.as_ref(), &load_failed);
-            let _ = request.done.send((request.apply, result));
+            let _ = request.done.send((request.epoch, request.apply, result));
         }
     });
     let group = share::Group {
@@ -1477,7 +1473,7 @@ async fn run_core_once(
         save_confirmation,
         layouts: session_layouts(peers, hub.arrangement_notices.as_ref(), &hub.layout_read_failed),
         load_layouts: Some(load_layouts),
-        save_layouts,
+        save_layouts: hub.save_layouts.clone(),
         notices: hub.arrangement_notices.clone(),
         save,
         reports: reports.clone(),
@@ -1497,19 +1493,12 @@ async fn run_core_once(
     let result = run.await;
     drop(capture);
     layout_loading.abort();
-    finish_core_writers(saver, confirmation_saving, layout_saving).await;
+    finish_core_writers(saver, confirmation_saving).await;
     result
 }
 
-async fn finish_core_writers(
-    saver: tokio::task::JoinHandle<()>,
-    confirmation_saving: tokio::task::JoinHandle<()>,
-    layout_saving: tokio::task::JoinHandle<()>,
-) {
-    // A pending explicit Save finishes in its writer task while the next core
-    // can accept a returning peer. The writer reports failures directly.
-    drop(layout_saving);
-    // Other state writes complete before the next core reads them.
+async fn finish_core_writers(saver: tokio::task::JoinHandle<()>, confirmation_saving: tokio::task::JoinHandle<()>) {
+    // Arrangement state writes complete before the next core reads them.
     let (arrangement, confirmation) = tokio::join!(saver, confirmation_saving);
     for write in [arrangement, confirmation] {
         if let Err(error) = write {
@@ -1518,14 +1507,28 @@ async fn finish_core_writers(
     }
 }
 
+fn start_layout_writer(
+    store: PeerStore,
+    notices: Option<mpsc::UnboundedSender<share::ArrangementNotice>>,
+) -> mpsc::UnboundedSender<share::SaveLayout> {
+    let (sender, mut requests) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            save_layout_request(store.clone(), request, notices.as_ref()).await;
+        }
+    });
+    sender
+}
+
 async fn write_arrangement(
     store: PeerStore,
-    arrangement: crate::peers::Arrangement,
-    results: &mpsc::UnboundedSender<(u64, Result<()>)>,
+    write: share::ArrangementWrite,
+    results: &mpsc::UnboundedSender<share::ArrangementWriteResult>,
     notices: Option<&mpsc::UnboundedSender<share::ArrangementNotice>>,
 ) {
-    let version = arrangement.0;
-    let result = tokio::task::spawn_blocking(move || store.save_arrangement(&arrangement))
+    let id = write.id;
+    let version = (write.arrangement.0, write.arrangement.1);
+    let result = tokio::task::spawn_blocking(move || store.save_arrangement(&write.arrangement))
         .await
         .unwrap_or_else(|error| Err(anyhow::anyhow!("arrangement writer stopped: {error}")));
     if let Err(error) = &result {
@@ -1537,7 +1540,7 @@ async fn write_arrangement(
             let _ = notices.send(share::ArrangementNotice::ArrangementWriteFailed);
         }
     }
-    let _ = results.send((version, result));
+    let _ = results.send(share::ArrangementWriteResult { id, version, result });
 }
 
 async fn save_layout_request(
@@ -1756,7 +1759,16 @@ mod tests {
         let (results, receiver) = mpsc::unbounded_channel();
         drop(receiver);
         let (notices, mut received) = mpsc::unbounded_channel();
-        write_arrangement(store, (1, key, vec![(key, (0.0, 0.0))]), &results, Some(&notices)).await;
+        write_arrangement(
+            store,
+            share::ArrangementWrite {
+                id: 1,
+                arrangement: (1, key, vec![(key, (0.0, 0.0))]),
+            },
+            &results,
+            Some(&notices),
+        )
+        .await;
         assert_eq!(
             received.try_recv(),
             Ok(share::ArrangementNotice::ArrangementWriteFailed)
@@ -1765,18 +1777,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pending_layout_writer_does_not_delay_the_next_core() {
-        let (release, held) = tokio::sync::oneshot::channel::<()>();
-        let layout_saving = tokio::spawn(async move {
-            let _ = held.await;
-        });
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            finish_core_writers(tokio::spawn(async {}), tokio::spawn(async {}), layout_saving),
-        )
-        .await
-        .expect("a stalled explicit Save must not delay a reconnect");
-        let _ = release.send(());
+    async fn saved_layout_writer_keeps_order_after_an_old_core_exits() {
+        let home = tempfile::tempdir().unwrap();
+        let store = PeerStore::open(home.path()).unwrap();
+        let writer = start_layout_writer(store.clone(), None);
+        let first = PublicKey::from_bytes(&[1; 32]).unwrap();
+        let second = PublicKey::from_bytes(&[2; 32]).unwrap();
+        let screen = crate::input::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1000.0,
+            height: 800.0,
+        };
+        let setup = crate::saved_layouts::setup([(first, &[screen][..]), (second, &[screen][..])]);
+        let (old_done, old_result) = mpsc::unbounded_channel();
+        drop(old_result);
+        writer
+            .send(share::SaveLayout {
+                setup: setup.clone(),
+                offsets: [(first, (0.0, 0.0)), (second, (1000.0, 0.0))].into_iter().collect(),
+                snapshot: share::Confirmation {
+                    version: 1,
+                    author: first,
+                    members: setup.clone(),
+                },
+                done: old_done,
+            })
+            .unwrap();
+        let (new_done, mut new_result) = mpsc::unbounded_channel();
+        writer
+            .send(share::SaveLayout {
+                setup: setup.clone(),
+                offsets: [(first, (0.0, 0.0)), (second, (-1000.0, 0.0))].into_iter().collect(),
+                snapshot: share::Confirmation {
+                    version: 2,
+                    author: first,
+                    members: setup.clone(),
+                },
+                done: new_done,
+            })
+            .unwrap();
+        let (_, result) = tokio::time::timeout(Duration::from_secs(2), new_result.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(
+            store.layouts().unwrap().get(&setup).unwrap()[1],
+            (second, (-1000.0, 0.0))
+        );
     }
 
     #[tokio::test]
