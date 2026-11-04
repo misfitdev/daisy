@@ -58,6 +58,12 @@ pub struct SaveLayout {
     pub done: mpsc::UnboundedSender<(Confirmation, anyhow::Result<crate::saved_layouts::Memory<PublicKey>>)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrangementNotice {
+    SavedLayoutsUnreadable,
+    SaveFailed,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArrangementView {
     pub layout: Layout,
@@ -134,6 +140,7 @@ pub struct Group {
     /// Arrangements explicitly saved on this system, and where to keep them.
     pub layouts: crate::saved_layouts::Memory<PublicKey>,
     pub save_layouts: mpsc::UnboundedSender<SaveLayout>,
+    pub notices: Option<mpsc::UnboundedSender<ArrangementNotice>>,
     /// Each link as a person sees it.
     pub reports: std::sync::Arc<tokio::sync::watch::Sender<Reports>>,
     /// Whether this system's screen is locked, as it changes.
@@ -202,6 +209,7 @@ where
         save_confirmation: mpsc::unbounded_channel().0,
         layouts: crate::saved_layouts::Memory::default(),
         save_layouts: mpsc::unbounded_channel().0,
+        notices: None,
         reports: std::sync::Arc::new(tokio::sync::watch::Sender::new(Reports::new())),
         locked: tokio::sync::watch::channel(false).1,
         trust: mpsc::unbounded_channel().0,
@@ -299,6 +307,7 @@ where
     let mut layouts = group.layouts;
     let mut save_error = 0u64;
     let (save_result_tx, mut save_results) = mpsc::unbounded_channel();
+    let mut pending_saves = 0usize;
     // Members whose displays arrived or changed and already had a place.
     let mut arrived: Vec<(PublicKey, bool)> = Vec::new();
     let mut review_changed = true;
@@ -513,16 +522,32 @@ where
             }
             waiting.extend(std::iter::from_fn(|| membership.try_recv().ok()));
             if waiting.is_empty() {
-                if !had_link {
+                if !had_link && pending_saves == 0 {
+                    return Ok(());
+                }
+                if membership.is_closed() && pending_saves == 0 {
                     return Ok(());
                 }
                 let since = *empty_since.get_or_insert_with(Instant::now);
                 tokio::select! {
-                    change = membership.recv() => match change {
-                        Some(change) => waiting.push_back(change),
-                        None => return Ok(()),
+                    change = membership.recv(), if !membership.is_closed() => {
+                        if let Some(change) = change { waiting.push_back(change); }
                     },
-                    _ = tokio::time::sleep_until(since + EMPTY_GRACE) => return Ok(()),
+                    Some((snapshot, result)) = save_results.recv(), if pending_saves > 0 => {
+                        pending_saves -= 1;
+                        match result {
+                            Ok(committed) => {
+                                layouts = committed;
+                                if snapshot == Confirmation::new(&placement.group(), placement.version()) {
+                                    confirmed = Some(snapshot);
+                                }
+                                save_error = 0;
+                            }
+                            Err(_) => save_error = save_error.saturating_add(1),
+                        }
+                        review_changed = true;
+                    },
+                    _ = tokio::time::sleep_until(since + EMPTY_GRACE), if pending_saves == 0 => return Ok(()),
                     error = &mut until => return Err(error),
                 }
             }
@@ -883,6 +908,7 @@ where
                 pace.handled(peer, kind, queued_before, handling.elapsed(), control.now());
             }
         Some((snapshot, result)) = save_results.recv() => {
+            pending_saves -= 1;
             match result {
                 Ok(committed) => {
                     layouts = committed;
@@ -917,7 +943,12 @@ where
                         };
                         if group.save_layouts.send(request).is_err() {
                             save_error = save_error.saturating_add(1);
+                            if let Some(notices) = &group.notices {
+                                let _ = notices.send(ArrangementNotice::SaveFailed);
+                            }
                             review_changed = true;
+                        } else {
+                            pending_saves += 1;
                         }
                     }
                 }
@@ -2525,6 +2556,7 @@ mod tests {
             save_confirmation: mpsc::unbounded_channel().0,
             layouts: crate::saved_layouts::Memory::default(),
             save_layouts: mpsc::unbounded_channel().0,
+            notices: None,
             reports: Arc::new(watch::Sender::new(Reports::new())),
             locked: watch::channel(false).1,
             trust: mpsc::unbounded_channel().0,
@@ -2943,6 +2975,42 @@ mod tests {
         memory.remember(second.setup, &second.offsets);
         second.done.send((second.snapshot, Ok(memory))).unwrap();
         view_when(&mut view, |v| v.save_error == 0 && v.check.is_none()).await;
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_save_result_is_drained_after_the_last_link_ends() {
+        let (control, members, membership, mut far, mut ended, keys) = group_of(1, None).await;
+        let mut local = group(&control);
+        let (choose, choices) = broadcast::channel(256);
+        local.choices = choices;
+        let (save, mut requests) = mpsc::unbounded_channel();
+        local.save_layouts = save;
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        let shown = view_when(&mut view, |v| v.layout.members.len() == 2 && v.saveable).await;
+        choose.send(Choice::Save(shown.snapshot.unwrap())).unwrap();
+        let pending = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        members.send(Membership::Drop(keys[0])).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), &mut ended[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        view_when(&mut view, |v| v.layout.members.len() == 1).await;
+        pending
+            .done
+            .send((pending.snapshot, Err(anyhow::anyhow!("disk unavailable"))))
+            .unwrap();
+        view_when(&mut view, |v| v.layout.members.len() == 1 && v.save_error == 1).await;
+        assert!(!task.is_finished());
         task.abort();
     }
 
