@@ -1193,6 +1193,7 @@ pub struct Hub {
     clipboard_history: std::sync::Arc<std::sync::Mutex<crate::clipboard::History>>,
     choices: broadcast::Sender<share::Choice>,
     arrangement_notices: Option<mpsc::UnboundedSender<share::ArrangementNotice>>,
+    layout_read_failed: std::sync::Arc<AtomicBool>,
     running: std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<share::Membership<TcpStream>>>>>,
     reports: std::sync::Arc<watch::Sender<share::Reports>>,
     arranged: std::sync::Arc<watch::Sender<share::ArrangementView>>,
@@ -1223,6 +1224,7 @@ impl Clone for Hub {
             clipboard_history: self.clipboard_history.clone(),
             choices: self.choices.clone(),
             arrangement_notices: self.arrangement_notices.clone(),
+            layout_read_failed: self.layout_read_failed.clone(),
             running: self.running.clone(),
             reports: self.reports.clone(),
             arranged: self.arranged.clone(),
@@ -1276,6 +1278,7 @@ impl Hub {
             clipboard_history: std::sync::Arc::default(),
             choices: session_choices(config.arrangement),
             arrangement_notices: config.arrangement_notices.cloned(),
+            layout_read_failed: std::sync::Arc::default(),
             running: std::sync::Arc::default(),
             reports: std::sync::Arc::new(watch::Sender::new(share::Reports::new())),
             arranged: std::sync::Arc::new(watch::Sender::new(share::ArrangementView::default())),
@@ -1460,7 +1463,8 @@ async fn run_core_once(
         saved: peers.arrangement(),
         saved_confirmation: peers.confirmation(),
         save_confirmation,
-        layouts: session_layouts(peers, hub.arrangement_notices.as_ref()),
+        layouts: session_layouts(peers, hub.arrangement_notices.as_ref(), &hub.layout_read_failed),
+        layout_store: Some(peers.clone()),
         save_layouts,
         notices: hub.arrangement_notices.clone(),
         save,
@@ -1479,6 +1483,7 @@ async fn run_core_once(
         until,
     );
     let result = run.await;
+    drop(capture);
     // The core drops its senders on exit. Drain the queued state writes before
     // the next core reads them, including after a connection failure.
     let (arrangement, confirmation, layouts) = tokio::join!(saver, confirmation_saving, layout_saving);
@@ -1514,17 +1519,26 @@ async fn save_layout_request(
 fn session_layouts(
     peers: &PeerStore,
     notices: Option<&mpsc::UnboundedSender<share::ArrangementNotice>>,
+    read_failed: &AtomicBool,
 ) -> crate::saved_layouts::Memory<PublicKey> {
-    peers.layouts().unwrap_or_else(|error| {
-        tracing::warn!(
-            error = format!("{error:#}"),
-            "saved screen arrangements could not be read"
-        );
-        if let Some(notices) = notices {
-            let _ = notices.send(share::ArrangementNotice::SavedLayoutsUnreadable);
+    match peers.layouts() {
+        Ok(layouts) => {
+            read_failed.store(false, Ordering::Release);
+            layouts
         }
-        Default::default()
-    })
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "saved screen arrangements could not be read"
+            );
+            if !read_failed.swap(true, Ordering::AcqRel)
+                && let Some(notices) = notices
+            {
+                let _ = notices.send(share::ArrangementNotice::SavedLayoutsUnreadable);
+            }
+            Default::default()
+        }
+    }
 }
 
 /// What a member starting a link with `key` is told: every system this one
@@ -1638,8 +1652,9 @@ mod tests {
         std::fs::write(home.path().join("trust-v5/saved-layouts.toml"), "not toml [").unwrap();
         assert!(peers.layouts().is_err());
         let (notices, mut received) = mpsc::unbounded_channel();
+        let read_failed = AtomicBool::new(false);
         assert_eq!(
-            session_layouts(&peers, Some(&notices)),
+            session_layouts(&peers, Some(&notices), &read_failed),
             crate::saved_layouts::Memory::default()
         );
         assert_eq!(
@@ -1647,6 +1662,11 @@ mod tests {
             Ok(share::ArrangementNotice::SavedLayoutsUnreadable)
         );
         assert!(received.try_recv().is_err());
+        session_layouts(&peers, Some(&notices), &read_failed);
+        assert!(received.try_recv().is_err(), "a second core must not repeat the alert");
+        std::fs::remove_file(home.path().join("trust-v5/saved-layouts.toml")).unwrap();
+        session_layouts(&peers, Some(&notices), &read_failed);
+        assert!(!read_failed.load(Ordering::Acquire));
     }
 
     #[tokio::test]

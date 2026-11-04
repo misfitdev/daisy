@@ -400,24 +400,21 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
                             .ok()
                             .and_then(|layouts| layouts.get(&placement.setup()).map(|offsets| offsets.to_vec()))
                         {
-                            let persisted = if placement.restore(&offsets, trust::now().saturating_mul(1000)) {
+                            if placement.restore(&offsets, trust::now().saturating_mul(1000)) {
                                 placement.repair(trust::now().saturating_mul(1000));
-                                match store.save_arrangement(&placement.message()) {
-                                    Ok(()) => true,
-                                    Err(error) => {
-                                        save_error = save_error.saturating_add(1);
-                                        let _ = events.send(Event::Notice {
-                                            title: "Arrangement could not be saved".to_owned(),
-                                            detail: format!("Check that Daisy can write its data folder, then try Apply saved again. {error:#}"),
-                                        });
-                                        false
-                                    }
+                            }
+                            match store.save_arrangement(&placement.message()) {
+                                Ok(()) => {
+                                    save_error = 0;
+                                    confirmed = Some(crate::share::Confirmation::new(&placement.group(), placement.version()));
                                 }
-                            } else {
-                                true
-                            };
-                            if persisted {
-                                confirmed = Some(crate::share::Confirmation::new(&placement.group(), placement.version()));
+                                Err(error) => {
+                                    save_error = save_error.saturating_add(1);
+                                    let _ = events.send(Event::Notice {
+                                        title: "Arrangement could not be saved".to_owned(),
+                                        detail: format!("Check that Daisy can write its data folder, then try Apply saved again. {error:#}"),
+                                    });
+                                }
                             }
                         }
                     }
@@ -870,6 +867,10 @@ fn arrangement_notice_event(notice: crate::share::ArrangementNotice) -> Event {
             "Arrangement could not be saved",
             "Check that Daisy can write its data folder, then try Save arrangement again.",
         ),
+        crate::share::ArrangementNotice::ChoicesSkipped => (
+            "Arrangement commands were missed",
+            "Try Save arrangement, Apply saved, or moving the screens again.",
+        ),
     };
     Event::Notice {
         title: title.to_owned(),
@@ -1307,16 +1308,38 @@ mod tests {
         fs::create_dir(&arrangement).unwrap();
         handle.send(Command::ApplyArrangement(snapshot)).unwrap();
         let mut notified = false;
-        loop {
+        let retry = loop {
             match handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
                 Event::Notice { title, .. } if title == "Arrangement could not be saved" => notified = true,
                 Event::Arranged(view) if view.save_error > 0 => {
                     assert!(notified);
                     assert!(view.check.is_some(), "failed Apply must remain unconfirmed");
-                    break;
+                    break view.snapshot.unwrap();
                 }
                 Event::Status(Status::Problem { .. }) => panic!("a failed Apply must not change connection status"),
                 _ => {}
+            }
+        };
+        handle.send(Command::ApplyArrangement(retry)).unwrap();
+        let mut retry_notified = false;
+        let retry = loop {
+            match handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                Event::Notice { title, .. } if title == "Arrangement could not be saved" => retry_notified = true,
+                Event::Arranged(view) if view.save_error > 1 => {
+                    assert!(retry_notified, "retry must attempt the write again");
+                    assert!(view.check.is_some());
+                    break view.snapshot.unwrap();
+                }
+                _ => {}
+            }
+        };
+        fs::remove_dir(&arrangement).unwrap();
+        handle.send(Command::ApplyArrangement(retry)).unwrap();
+        loop {
+            if let Event::Arranged(view) = handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                assert_eq!(view.save_error, 0);
+                assert!(view.check.is_none());
+                break;
             }
         }
         handle.shutdown().unwrap();

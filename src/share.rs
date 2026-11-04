@@ -62,6 +62,7 @@ pub struct SaveLayout {
 pub enum ArrangementNotice {
     SavedLayoutsUnreadable,
     SaveFailed,
+    ChoicesSkipped,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,6 +140,7 @@ pub struct Group {
     pub save_confirmation: mpsc::UnboundedSender<Confirmation>,
     /// Arrangements explicitly saved on this system, and where to keep them.
     pub layouts: crate::saved_layouts::Memory<PublicKey>,
+    pub layout_store: Option<crate::peers::PeerStore>,
     pub save_layouts: mpsc::UnboundedSender<SaveLayout>,
     pub notices: Option<mpsc::UnboundedSender<ArrangementNotice>>,
     /// Each link as a person sees it.
@@ -208,6 +210,7 @@ where
         saved_confirmation: None,
         save_confirmation: mpsc::unbounded_channel().0,
         layouts: crate::saved_layouts::Memory::default(),
+        layout_store: None,
         save_layouts: mpsc::unbounded_channel().0,
         notices: None,
         reports: std::sync::Arc::new(tokio::sync::watch::Sender::new(Reports::new())),
@@ -293,6 +296,7 @@ where
         receiver: Some(files.take_messages()),
     });
     let mut choices = group.choices;
+    let mut choices_open = true;
     let mut displays = group.displays;
     let mut locked = group.locked;
     let me = control.state.lock().unwrap_or_else(|e| e.into_inner()).me();
@@ -547,7 +551,9 @@ where
                         }
                         review_changed = true;
                     },
-                    _ = tokio::time::sleep_until(since + EMPTY_GRACE), if pending_saves == 0 => return Ok(()),
+                    // The writer owns the disk request after this core exits.
+                    // Its result is drained before another core starts.
+                    _ = tokio::time::sleep_until(since + EMPTY_GRACE) => return Ok(()),
                     error = &mut until => return Err(error),
                 }
             }
@@ -921,8 +927,16 @@ where
             }
             review_changed = true;
         }
-        Ok(chosen) = choices.recv() => {
-            match chosen {
+        choice = choices.recv(), if choices_open => {
+            match choice {
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if let Some(notices) = &group.notices {
+                        let _ = notices.send(ArrangementNotice::ChoicesSkipped);
+                    }
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => choices_open = false,
+                Ok(chosen) => match chosen {
                 Choice::Move((key, offset)) if placement.put(key, offset, now_ms()) => {
                     review_changed = true;
                     broadcast(&links, arrangement(&placement), &mut ended);
@@ -953,6 +967,18 @@ where
                     }
                 }
                 Choice::Apply(snapshot) if snapshot == Confirmation::new(&placement.group(), placement.version()) => {
+                    if let Some(store) = &group.layout_store {
+                        match store.layouts() {
+                            Ok(current) => layouts = current,
+                            Err(error) => {
+                                tracing::warn!(error = format!("{error:#}"), "saved screen arrangements could not be read for Apply");
+                                if let Some(notices) = &group.notices {
+                                    let _ = notices.send(ArrangementNotice::SavedLayoutsUnreadable);
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     if let Some(saved) = layouts.get(&placement.setup()) {
                         if placement.restore(saved, now_ms()) {
                             placement.repair(now_ms());
@@ -964,8 +990,9 @@ where
                     }
                 }
                 _ => {}
+                },
             }
-            }
+        }
             Ok(()) = locked.changed() => {
                 let now = *locked.borrow_and_update();
                 broadcast(&links, Message::Locked { locked: now }, &mut ended);
@@ -2555,6 +2582,7 @@ mod tests {
             saved_confirmation: None,
             save_confirmation: mpsc::unbounded_channel().0,
             layouts: crate::saved_layouts::Memory::default(),
+            layout_store: None,
             save_layouts: mpsc::unbounded_channel().0,
             notices: None,
             reports: Arc::new(watch::Sender::new(Reports::new())),
@@ -2867,11 +2895,14 @@ mod tests {
         let (control, _members, membership, mut far, _ended, keys) = group_of(1, None).await;
         let me = me_of(&control);
         let peer = keys[0];
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::peers::PeerStore::open(home.path()).unwrap();
         let mut local = group(&control);
         local.layouts.remember(
             crate::saved_layouts::setup([(me, &[SCREEN][..]), (peer, &[SCREEN][..])]),
             &[(me, (0.0, 0.0)), (peer, (500.0, 0.0))].into_iter().collect(),
         );
+        local.layout_store = Some(store.clone());
         let (choose, choices) = broadcast::channel(256);
         local.choices = choices;
         let (save, mut saved) = mpsc::unbounded_channel();
@@ -2891,14 +2922,30 @@ mod tests {
             (-1000.0, 0.0)
         );
         assert!(saved.try_recv().is_err());
+        store
+            .remember_layout(
+                crate::saved_layouts::setup([(me, &[SCREEN][..]), (peer, &[SCREEN][..])]),
+                &[(me, (0.0, 0.0)), (peer, (1000.0, 0.0))].into_iter().collect(),
+            )
+            .unwrap();
         choose.send(Choice::Apply(shown.snapshot.unwrap())).unwrap();
-        view_when(&mut view, |v| {
+        let applied = view_when(&mut view, |v| {
             v.layout
                 .members
                 .iter()
                 .any(|m| m.key == peer && m.offset != (-1000.0, 0.0) && !v.layout.overlaps(peer, m.offset))
         })
         .await;
+        assert_eq!(
+            applied
+                .layout
+                .members
+                .iter()
+                .find(|member| member.key == peer)
+                .unwrap()
+                .offset,
+            (1000.0, 0.0)
+        );
         assert!(saved.try_recv().is_err());
         choose.send(Choice::Move((peer, (1000.0, 250.0)))).unwrap();
         let moved = view_when(&mut view, |v| {
@@ -3011,6 +3058,58 @@ mod tests {
             .unwrap();
         view_when(&mut view, |v| v.layout.members.len() == 1 && v.save_error == 1).await;
         assert!(!task.is_finished());
+        task.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stalled_save_does_not_keep_the_empty_input_core_alive() {
+        let (control, members, membership, mut far, mut ended, keys) = group_of(1, None).await;
+        let mut local = group(&control);
+        let (choose, choices) = broadcast::channel(256);
+        local.choices = choices;
+        let (save, mut requests) = mpsc::unbounded_channel();
+        local.save_layouts = save;
+        let mut view = local.arranged.subscribe();
+        let task = start_arrangement_session(local, membership);
+        far[0]
+            .send(&Message::Displays { displays: vec![SCREEN] })
+            .await
+            .unwrap();
+        let shown = view_when(&mut view, |v| v.layout.members.len() == 2 && v.saveable).await;
+        choose.send(Choice::Save(shown.snapshot.unwrap())).unwrap();
+        let _pending = requests.recv().await.unwrap();
+        members.send(Membership::Drop(keys[0])).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), &mut ended[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        view_when(&mut view, |v| v.layout.members.len() == 1).await;
+        tokio::time::pause();
+        tokio::time::advance(EMPTY_GRACE + Duration::from_secs(1)).await;
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lagged_arrangement_choices_report_the_loss() {
+        let (control, _members, membership, _far, _ended, keys) = group_of(1, None).await;
+        let mut local = group(&control);
+        let (choose, choices) = broadcast::channel(1);
+        local.choices = choices;
+        let (notices, mut received) = mpsc::unbounded_channel();
+        local.notices = Some(notices);
+        choose.send(Choice::Move((keys[0], (1000.0, 0.0)))).unwrap();
+        choose.send(Choice::Move((keys[0], (1100.0, 0.0)))).unwrap();
+        let task = start_arrangement_session(local, membership);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), received.recv())
+                .await
+                .unwrap(),
+            Some(ArrangementNotice::ChoicesSkipped)
+        );
         task.abort();
     }
 
