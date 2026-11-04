@@ -592,11 +592,23 @@ define_class!(
             }
         }
 
-    #[unsafe(method(confirmArrangement:))]
-    fn confirm_arrangement(&self, _sender: Option<&AnyObject>) {
-        let check = self.ivars().arranged.borrow().as_ref().and_then(|view| view.check.clone());
-        if let Some(confirmation) = check {
-            let _ = self.ivars().controller.send(Command::ConfirmArrangement(confirmation));
+    #[unsafe(method(saveArrangement:))]
+    fn save_arrangement(&self, _sender: Option<&AnyObject>) {
+        if let Some(view) = self.ivars().arranged.borrow().as_ref()
+            && view.saveable
+            && let Some(snapshot) = view.snapshot.clone()
+        {
+            let _ = self.ivars().controller.send(Command::SaveArrangement(snapshot));
+        }
+    }
+
+    #[unsafe(method(applyArrangement:))]
+    fn apply_arrangement(&self, _sender: Option<&AnyObject>) {
+        if let Some(view) = self.ivars().arranged.borrow().as_ref()
+            && view.applicable
+            && let Some(snapshot) = view.snapshot.clone()
+        {
+            let _ = self.ivars().controller.send(Command::ApplyArrangement(snapshot));
         }
     }
     #[unsafe(method(arrangePeer:))]
@@ -1071,7 +1083,8 @@ impl AppDelegate {
                 .collect();
             views.show_check(
                 arranged.as_ref().is_some_and(|view| view.check.is_some()),
-                arranged.as_ref().is_some_and(|view| view.restored),
+                arranged.as_ref().is_some_and(|view| view.saveable),
+                arranged.as_ref().is_some_and(|view| view.applicable),
                 &unreachable,
             );
             views.show_status(if copy.connected { "" } else { &copy.title }, &copy.detail);

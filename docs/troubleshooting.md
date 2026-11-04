@@ -48,9 +48,11 @@ Daisy ends a silent connection after three seconds to release remote input. Repe
 
 ## Screens moved when a system joined
 
-1. **Check:** The arrangement says **Restored the layout from last time these screens were together.** Daisy started from the arrangement last confirmed for these systems and displays.
-2. **Try:** Drag the screens to match your desk.
-3. **Expect:** The new arrangement is remembered for this combination and used the next time it comes back.
+1. **Check:** The arrangement for the connected systems and displays.
+2. **Try:** Drag the screens to match your desk, or choose **Apply saved** if
+   you saved an arrangement for this exact combination.
+3. **Expect:** Daisy uses the saved arrangement only when you choose **Apply saved**.
+   Choose **Save arrangement** after adjusting the screens to replace it.
 
 ## Repeated “Pasting from…” banners
 

@@ -160,16 +160,17 @@ Displays are sorted by x, y, width and height; negative zero is normalized
 to zero. The arrangement's `(version, author)` must also match. Confirmation
 is separate from automatic placement and overlap repair.
 
-**Looks Right** confirms the shown group. A user drag that connects the whole
-group also confirms it. A receiver waits until its arrangement and display
+A user drag that connects the whole group confirms it. **Save arrangement**
+also confirms and stores the shown group on this system. **Apply saved** restores
+its positions as a new group arrangement and confirms them. A receiver waits until its arrangement and display
 sets match before recording or relaying a confirmation. Pending confirmations
 are bounded to eight records. Confirmation travels only on negotiated links;
 older peers continue sharing with their existing arrangement behavior.
 
 Each system saves the checked member display sets beside its arrangement.
 A reconnect with unchanged displays, including an unchanged subset of the
-checked group, keeps confirmation. New members or changed displays ask again;
-an unreachable member asks unless this exact arrangement was confirmed.
+checked group, keeps confirmation. New members or changed displays can prompt
+for attention; an unreachable member remains visible until it is within reach.
 
 ## A group
 

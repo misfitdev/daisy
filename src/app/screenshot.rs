@@ -32,6 +32,7 @@ pub fn save(path: &Path) -> Result<()> {
 
     views.arrange.show(sample_scene());
     views.show_status("", "");
+    views.show_check(false, true, true, &[]);
     views.show_peers(
         &[
             PeerRow {

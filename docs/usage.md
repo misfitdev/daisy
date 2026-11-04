@@ -39,16 +39,17 @@ live connections; remembered offline peers have gray flowers and no links.
 Changes apply across the group and are saved. If two systems change the arrangement, the later change wins. Adding, removing or rearranging a display updates the layout and moves any system that would overlap or be left out of reach.
 
 When a new member joins, displays change, or a member cannot be reached,
-Daisy opens the arrangement and asks **Is this where your screens are?**
-It names any unreachable members. Drag the screens to match your desk;
-a drag that connects the whole group dismisses the question. Choose
-**Looks Right** to keep the arrangement as shown. Confirmation is shared
-with peers that support it and saved across restarts. Reconnecting with
-unchanged displays does not ask again after confirmation.
-The warning naming unreachable peers stays above the arrangement until they are
-within reach, even after **Looks Right** confirms their placement.
+Daisy shows the arrangement. Drag the screens to match your desk. The warning
+naming unreachable peers remains visible until they are within reach.
 
-Daisy remembers the arrangement you confirmed for each combination of systems and displays. When that combination comes back, such as a monitor moving from one system to another or the same peers meeting again, the group starts from that arrangement without asking, and the arrangement says it was restored. A restored arrangement never undoes what you have arranged since: if the systems already here sit differently than they did then, they stay put and only the newcomer returns, beside the system it was nearest. A member leaving never rearranges the rest.
+Choose **Save arrangement** when the group is connected and every screen is
+within reach. Daisy saves one arrangement for this exact combination of systems
+and displays on this system. Saving again replaces it. Choose **Apply saved**
+to restore it whenever that combination is connected. Daisy never applies a
+saved arrangement automatically; a peer joining or a display changing does
+not overwrite what you have arranged. **Apply saved** is unavailable until
+there is a saved arrangement for the current combination. Existing layouts are not imported as saved arrangements; save any layout
+you want to reuse.
 
 [Move control](#move-control) across any nearby edge or corner; the arrangement is not a single chain.
 

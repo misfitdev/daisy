@@ -14,7 +14,7 @@ use std::thread;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc as tokio_mpsc, oneshot, watch};
 
 use crate::identity::{Identity, PublicKey};
 use crate::input::Side;
@@ -134,7 +134,8 @@ pub enum Command {
     SetAlwaysDiscoverable(bool),
     /// Put a member's displays where a person dropped them in the group.
     Place(PublicKey, crate::layout::Offset),
-    ConfirmArrangement(crate::share::Confirmation),
+    SaveArrangement(crate::share::Confirmation),
+    ApplyArrangement(crate::share::Confirmation),
     Shutdown,
 }
 
@@ -327,15 +328,34 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
     thread::Builder::new()
         .name("daisy-arrangement-preview".to_owned())
         .spawn(move || {
+            let mut save_error = 0u64;
+            let mut layout_read_failed = false;
             loop {
                 let layout = placement.group();
                 let check = crate::setup::check_arrangement(&layout, me, placement.version(), confirmed.as_ref())
                     .then(|| crate::share::Confirmation::new(&layout, placement.version()));
+                let layouts = store.layouts();
+                if let Err(error) = &layouts && !layout_read_failed {
+                    let _ = events.send(Event::Notice {
+                        title: "Saved arrangements could not be loaded".to_owned(),
+                        detail: format!("Check the saved arrangements file, then try again. {error:#}"),
+                    });
+                }
+                layout_read_failed = layouts.is_err();
                 let _ = events.send(Event::Arranged(crate::share::ArrangementView {
                     unreachable: layout.unreachable(me),
-                    layout,
                     check,
-                    restored: false,
+                    snapshot: Some(crate::share::Confirmation::new(&layout, placement.version())),
+                    saveable: layout.members.len() > 1
+                        && layout.unreachable(me).is_empty()
+                        && placement.unplaced().is_empty(),
+                    applicable: layouts
+                        .as_ref()
+                        .ok()
+                        .and_then(|layouts| layouts.get(&placement.setup()).map(|_| ()))
+                        .is_some(),
+                    save_error,
+                    layout,
                 }));
                 let Some(command) = commands.blocking_recv() else {
                     break;
@@ -349,10 +369,54 @@ pub fn spawn_arrangement_preview(home: PathBuf) -> Result<Handle> {
                             confirmed = Some(crate::share::Confirmation::new(&layout, placement.version()));
                         }
                     }
-                    Command::ConfirmArrangement(check)
-                        if check == crate::share::Confirmation::new(&placement.group(), placement.version()) =>
+                    Command::SaveArrangement(snapshot)
+                        if snapshot == crate::share::Confirmation::new(&placement.group(), placement.version()) =>
                     {
-                        confirmed = Some(check);
+                        let layout = placement.group();
+                        if layout.members.len() > 1
+                            && layout.unreachable(me).is_empty()
+                            && placement.unplaced().is_empty()
+                        {
+                            match store.remember_layout(placement.setup(), &placement.placed()) {
+                                Ok(_) => {
+                                    confirmed = Some(snapshot);
+                                    save_error = 0;
+                                }
+                                Err(error) => {
+                                    save_error = save_error.saturating_add(1);
+                                    let _ = events.send(Event::Notice {
+                                        title: "Arrangement could not be saved".to_owned(),
+                                        detail: format!("Check that Daisy can write its data folder, then try Save arrangement again. {error:#}"),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    Command::ApplyArrangement(snapshot)
+                        if snapshot == crate::share::Confirmation::new(&placement.group(), placement.version()) =>
+                    {
+                        if let Some(offsets) = store
+                            .layouts()
+                            .ok()
+                            .and_then(|layouts| layouts.get(&placement.setup()).map(|offsets| offsets.to_vec()))
+                        {
+                            if placement.restore(&offsets, trust::now().saturating_mul(1000)) {
+                                placement.repair(trust::now().saturating_mul(1000));
+                            }
+                            match store.save_arrangement(&placement.message()) {
+                                Ok(()) => {
+                                    save_error = 0;
+                                    confirmed = Some(crate::share::Confirmation::new(&placement.group(), placement.version()));
+                                }
+                                Err(error) => {
+                                    save_error = save_error.saturating_add(1);
+                                    let _ = events.send(Event::Notice {
+                                        title: "Arrangement could not be saved".to_owned(),
+                                        detail: format!("Check that Daisy can write its data folder, then try Apply saved again. {error:#}"),
+                                    });
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -402,7 +466,8 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let (share_clipboard, clipboard) = watch::channel(stored.share_clipboard);
     // always advertised while sharing; the advertisement names no one
     let (_discoverable, discoverable) = watch::channel(true);
-    let (arrange, arrangement) = watch::channel(None);
+    let (arrange, _) = broadcast::channel(256);
+    let arrangement = arrange.clone();
     let base_listening = |stored: &AppSettings| {
         listening(
             stored.always_discoverable,
@@ -630,11 +695,14 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     );
                 }
             }
-            Command::ConfirmArrangement(confirmation) => {
-                arrange.send_replace(Some(crate::share::Choice::Confirm(confirmation)));
+            Command::SaveArrangement(snapshot) => {
+                send_arrangement_choice(&arrange, &events, crate::share::Choice::Save(snapshot));
+            }
+            Command::ApplyArrangement(snapshot) => {
+                send_arrangement_choice(&arrange, &events, crate::share::Choice::Apply(snapshot));
             }
             Command::Place(key, offset) => {
-                arrange.send_replace(Some(crate::share::Choice::Move((key, offset))));
+                send_arrangement_choice(&arrange, &events, crate::share::Choice::Move((key, offset)));
             }
             Command::Shutdown => {
                 if let Some(running) = session.take() {
@@ -644,6 +712,24 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 break;
             }
         }
+    }
+}
+
+fn send_arrangement_choice(
+    arrange: &broadcast::Sender<crate::share::Choice>,
+    events: &Sender<Event>,
+    choice: crate::share::Choice,
+) {
+    let (title, detail) = match &choice {
+        crate::share::Choice::Save(_) => ("Arrangement could not be saved", "Try Save arrangement again."),
+        crate::share::Choice::Apply(_) => ("Arrangement could not be applied", "Try Apply saved again."),
+        crate::share::Choice::Move(_) => ("Arrangement could not be changed", "Try moving the screens again."),
+    };
+    if arrange.send(choice).is_err() {
+        let _ = events.send(Event::Notice {
+            title: title.to_owned(),
+            detail: format!("Sharing is reconnecting. {detail}"),
+        });
     }
 }
 
@@ -702,7 +788,7 @@ struct Live {
     addresses: tokio_mpsc::UnboundedReceiver<(String, Option<PublicKey>)>,
     clipboard: watch::Receiver<bool>,
     discoverable: watch::Receiver<bool>,
-    arrangement: watch::Receiver<Option<crate::share::Choice>>,
+    arrangement: broadcast::Sender<crate::share::Choice>,
     listening: watch::Receiver<Listening>,
 }
 
@@ -714,8 +800,14 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
         arrangement,
         mut listening,
     } = live;
-    // the session starts from the current choice; only later ones are news
     listening.mark_unchanged();
+    let (notice_tx, mut notice_rx) = tokio_mpsc::unbounded_channel();
+    let notice_events = events.clone();
+    tokio::spawn(async move {
+        while let Some(notice) = notice_rx.recv().await {
+            let _ = notice_events.send(arrangement_notice_event(notice));
+        }
+    });
     let Start { settings, side_chosen } = start;
     let result = async {
         let identity = Identity::load_or_create(&home.join("identity"))?;
@@ -743,6 +835,7 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
             clipboard: &clipboard,
             discoverable: &discoverable,
             arrangement: Some(&arrangement),
+            arrangement_notices: Some(&notice_tx),
             listening: Some(&listening),
             signer: &signer,
         };
@@ -761,6 +854,31 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
                 None => send_problem(&events, "Connection stopped", recovery_for(&error)),
             };
         }
+    }
+}
+
+fn arrangement_notice_event(notice: crate::share::ArrangementNotice) -> Event {
+    let (title, detail) = match notice {
+        crate::share::ArrangementNotice::SavedLayoutsUnreadable => (
+            "Saved arrangements could not be loaded",
+            "Check the saved arrangements file, then try again.",
+        ),
+        crate::share::ArrangementNotice::SaveFailed => (
+            "Arrangement could not be saved",
+            "Check that Daisy can write its data folder, then try Save arrangement again.",
+        ),
+        crate::share::ArrangementNotice::ChoicesSkipped => (
+            "Arrangement commands were missed",
+            "Try Save arrangement, Apply saved, or moving the screens again.",
+        ),
+        crate::share::ArrangementNotice::ArrangementWriteFailed => (
+            "Arrangement could not be kept",
+            "Check that Daisy can write its data folder, then move the screens again.",
+        ),
+    };
+    Event::Notice {
+        title: title.to_owned(),
+        detail: detail.to_owned(),
     }
 }
 
@@ -1092,6 +1210,144 @@ fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrangement_commands_report_when_no_core_is_listening() {
+        let key = PublicKey::from_bytes(&[1; 32]).unwrap();
+        let layout = crate::layout::Group::alone(
+            key,
+            vec![crate::input::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }],
+        );
+        let snapshot = crate::share::Confirmation::new(&layout, (1, key));
+        let (arrange, receiver) = broadcast::channel(16);
+        drop(receiver);
+        let (events, notices) = mpsc::channel();
+        send_arrangement_choice(&arrange, &events, crate::share::Choice::Save(snapshot.clone()));
+        send_arrangement_choice(&arrange, &events, crate::share::Choice::Apply(snapshot));
+        send_arrangement_choice(&arrange, &events, crate::share::Choice::Move((key, (0.0, 0.0))));
+        for expected in [
+            "Arrangement could not be saved",
+            "Arrangement could not be applied",
+            "Arrangement could not be changed",
+        ] {
+            assert!(matches!(notices.try_recv(), Ok(Event::Notice { title, .. }) if title == expected));
+        }
+        assert!(notices.try_recv().is_err());
+    }
+
+    #[test]
+    fn arrangement_preview_reports_damaged_saved_layouts_and_failed_save() {
+        let home = tempfile::tempdir().unwrap();
+        let store = PeerStore::open(home.path()).unwrap();
+        let me = PublicKey::from_bytes(&[1; 32]).unwrap();
+        let peer = PublicKey::from_bytes(&[2; 32]).unwrap();
+        store.pin(peer, "Studio", Policy::Forever, trust::now()).unwrap();
+        store
+            .save_arrangement(&(10, me, vec![(me, (0.0, 0.0)), (peer, (1512.0, 0.0))]))
+            .unwrap();
+        fs::write(home.path().join("trust-v5/saved-layouts.toml"), "not toml [").unwrap();
+        let handle = spawn_arrangement_preview(home.path().to_owned()).unwrap();
+        let mut load_notice = false;
+        let snapshot = loop {
+            match handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                Event::Notice { title, .. } if title == "Saved arrangements could not be loaded" => load_notice = true,
+                Event::Arranged(view) => {
+                    assert!(!view.applicable);
+                    assert!(view.saveable);
+                    break view.snapshot.unwrap();
+                }
+                Event::Status(Status::Problem { .. }) => panic!("a damaged preset must not change connection status"),
+                _ => {}
+            }
+        };
+        assert!(load_notice);
+        handle.send(Command::SaveArrangement(snapshot)).unwrap();
+        let mut save_notice = false;
+        loop {
+            match handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                Event::Notice { title, .. } if title == "Arrangement could not be saved" => save_notice = true,
+                Event::Arranged(view) if view.save_error > 0 => break,
+                Event::Status(Status::Problem { .. }) => panic!("a failed save must not change connection status"),
+                _ => {}
+            }
+        }
+        assert!(save_notice);
+        handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn arrangement_preview_reports_failed_apply_without_confirming_it() {
+        let home = tempfile::tempdir().unwrap();
+        let store = PeerStore::open(home.path()).unwrap();
+        let me = PublicKey::from_bytes(&[1; 32]).unwrap();
+        let peer = PublicKey::from_bytes(&[2; 32]).unwrap();
+        let screen = crate::input::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1512.0,
+            height: 982.0,
+        };
+        store.pin(peer, "Studio", Policy::Forever, trust::now()).unwrap();
+        store
+            .save_arrangement(&(10, me, vec![(me, (0.0, 0.0)), (peer, (1512.0, 0.0))]))
+            .unwrap();
+        let setup = crate::saved_layouts::setup([(me, &[screen][..]), (peer, &[screen][..])]);
+        store
+            .remember_layout(setup, &[(me, (0.0, 0.0)), (peer, (-1512.0, 0.0))].into_iter().collect())
+            .unwrap();
+        let handle = spawn_arrangement_preview(home.path().to_owned()).unwrap();
+        let snapshot = loop {
+            if let Event::Arranged(view) = handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                assert!(view.applicable);
+                break view.snapshot.unwrap();
+            }
+        };
+        let arrangement = home.path().join("trust-v5/arrangement.toml");
+        fs::remove_file(&arrangement).unwrap();
+        fs::create_dir(&arrangement).unwrap();
+        handle.send(Command::ApplyArrangement(snapshot)).unwrap();
+        let mut notified = false;
+        let retry = loop {
+            match handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                Event::Notice { title, .. } if title == "Arrangement could not be saved" => notified = true,
+                Event::Arranged(view) if view.save_error > 0 => {
+                    assert!(notified);
+                    assert!(view.check.is_some(), "failed Apply must remain unconfirmed");
+                    break view.snapshot.unwrap();
+                }
+                Event::Status(Status::Problem { .. }) => panic!("a failed Apply must not change connection status"),
+                _ => {}
+            }
+        };
+        handle.send(Command::ApplyArrangement(retry)).unwrap();
+        let mut retry_notified = false;
+        let retry = loop {
+            match handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                Event::Notice { title, .. } if title == "Arrangement could not be saved" => retry_notified = true,
+                Event::Arranged(view) if view.save_error > 1 => {
+                    assert!(retry_notified, "retry must attempt the write again");
+                    assert!(view.check.is_some());
+                    break view.snapshot.unwrap();
+                }
+                _ => {}
+            }
+        };
+        fs::remove_dir(&arrangement).unwrap();
+        handle.send(Command::ApplyArrangement(retry)).unwrap();
+        loop {
+            if let Event::Arranged(view) = handle.events.recv_timeout(std::time::Duration::from_secs(2)).unwrap() {
+                assert_eq!(view.save_error, 0);
+                assert!(view.check.is_none());
+                break;
+            }
+        }
+        handle.shutdown().unwrap();
+    }
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
