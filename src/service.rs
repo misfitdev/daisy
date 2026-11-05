@@ -2050,8 +2050,8 @@ mod tests {
     struct NoCodes;
 
     impl PairingPrompt for NoCodes {
-        fn show_code(&mut self, _code: &crate::pairing::PairingCode, _peer: &str) {}
-        async fn ask_code(&mut self, _peer: &str) -> Result<crate::pairing::PairingCode> {
+        fn show_code(&mut self, _code: &crate::pairing::PairingCode, _peer: &str, _key: PublicKey) {}
+        async fn ask_code(&mut self, _peer: &str, _key: PublicKey) -> Result<crate::pairing::PairingCode> {
             anyhow::bail!("no code")
         }
     }

@@ -4,6 +4,8 @@
 mod map;
 #[path = "app/menu.rs"]
 mod menu;
+#[path = "app/notification.rs"]
+mod notification;
 #[path = "app/panel.rs"]
 mod panel;
 #[path = "app/screenshot.rs"]
@@ -46,6 +48,7 @@ use objc2_foundation::{
     MainThreadMarker, NSData, NSDate, NSDateFormatter, NSDictionary, NSNotification, NSObject, NSObjectProtocol,
     NSPoint, NSRect, NSSize, NSString, NSTimer, NSURL,
 };
+use objc2_quartz_core::CALayer;
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
 use crate::control::Link;
@@ -83,9 +86,16 @@ struct AppDelegateIvars {
     /// This system's name, as the arrangement shows it.
     local_name: RefCell<String>,
     status_item: OnceCell<Retained<NSStatusItem>>,
+    /// A color exception over the system-tinted menu-bar flower.
+    status_dot: OnceCell<Retained<CALayer>>,
     menu_start_stop: OnceCell<Retained<NSMenuItem>>,
     menu_add: OnceCell<Retained<NSMenuItem>>,
     pairing: OnceCell<panel::Panel>,
+    /// The request waiting for a response, even when its panel is hidden.
+    pending_peer: RefCell<Option<(crate::identity::PublicKey, String)>>,
+    /// A dismissed peer stays quiet until a different peer asks or Add is used.
+    dismissed_peer: RefCell<Option<crate::identity::PublicKey>>,
+    notified_peer: RefCell<Option<crate::identity::PublicKey>>,
     /// Where a typed code goes, while one is asked for.
     code_reply: RefCell<Option<tokio::sync::oneshot::Sender<String>>>,
     /// When the Connected panel appeared, to close it on its own.
@@ -131,6 +141,18 @@ define_class!(
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, notification: &NSNotification) {
             let closing = notification.object().map(|object| Retained::as_ptr(&object).cast::<NSWindow>());
+            if let Some(main) = self.ivars().main.get()
+                && closing == Some(Retained::as_ptr(&main.window))
+                && let Some((key, peer)) = self.ivars().pending_peer.borrow().clone()
+            {
+                if let Some(panel) = self.ivars().pairing.get() {
+                    panel.panel.orderOut(None);
+                }
+                if *self.ivars().notified_peer.borrow() != Some(key) {
+                    notification::pairing_request(&peer);
+                    *self.ivars().notified_peer.borrow_mut() = Some(key);
+                }
+            }
             let others_open = self
                 .windows()
                 .iter()
@@ -340,9 +362,14 @@ define_class!(
                         let _ = reply.send(String::new());
                     }
                     let _ = self.ivars().controller.send(Command::CancelAdding);
+                    *self.ivars().dismissed_peer.borrow_mut() = self.ivars().pending_peer.borrow().as_ref().map(|(key, _)| *key);
+                }
+                Some(panel::State::ShowCode { .. }) => {
+                    *self.ivars().dismissed_peer.borrow_mut() = self.ivars().pending_peer.borrow().as_ref().map(|(key, _)| *key);
                 }
                 _ => {}
             }
+            self.clear_pending_peer();
             panel.close();
         }
 
@@ -639,6 +666,12 @@ define_class!(
             let Some(window) = NSApplication::sharedApplication(self.mtm()).keyWindow() else {
                 return;
             };
+            if let Some(panel) = self.ivars().pairing.get()
+                && Retained::as_ptr(&window) == Retained::as_ptr(&panel.panel).cast::<NSWindow>()
+            {
+                self.pairing_secondary(sel!(pairingSecondary:), None);
+                return;
+            }
             match window.sheetParent() {
                 Some(parent) => parent.endSheet(&window),
                 None => window.performClose(None),
@@ -680,9 +713,13 @@ impl AppDelegate {
             adding: Cell::new(false),
             local_name: RefCell::new(controller::computer_name()),
             status_item: OnceCell::new(),
+            status_dot: OnceCell::new(),
             menu_start_stop: OnceCell::new(),
             menu_add: OnceCell::new(),
             pairing: OnceCell::new(),
+            pending_peer: RefCell::new(None),
+            dismissed_peer: RefCell::new(None),
+            notified_peer: RefCell::new(None),
             code_reply: RefCell::new(None),
             connected_at: Cell::new(None),
             owner_confirmed: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -724,6 +761,16 @@ impl AppDelegate {
         status_item.setMenu(Some(&menu));
 
         if let Some(button) = status_item.button(mtm) {
+            button.setWantsLayer(true);
+            if let Some(layer) = button.layer() {
+                let dot = CALayer::layer();
+                let salmon = NSColor::colorWithRed_green_blue_alpha(1.0, 139.0 / 255.0, 121.0 / 255.0, 1.0);
+                dot.setBackgroundColor(Some(&salmon.CGColor()));
+                dot.setCornerRadius(2.1);
+                dot.setHidden(true);
+                layer.addSublayer(&dot);
+                self.ivars().status_dot.set(dot).ok();
+            }
             self.set_status_image(&button, false);
         }
 
@@ -978,34 +1025,59 @@ impl AppDelegate {
                 self.rebuild_peers_list();
                 self.update_action_buttons();
             }
-            Event::ShowPairingCode { peer, code } => {
-                if let Some(panel) = self.ivars().pairing.get() {
-                    panel.show(panel::State::ShowCode { peer, code }, false);
-                }
+            Event::ShowPairingCode { peer, key, code } => {
+                self.show_incoming_pairing(
+                    &peer,
+                    key,
+                    panel::State::ShowCode {
+                        peer: peer.clone(),
+                        code,
+                    },
+                    false,
+                );
             }
-            Event::AskPairingCode { peer, reply } => {
+            Event::AskPairingCode { peer, key, reply } => {
+                if *self.ivars().dismissed_peer.borrow() == Some(key) {
+                    let _ = reply.send(String::new());
+                    return;
+                }
                 *self.ivars().code_reply.borrow_mut() = Some(reply);
                 if let Some(panel) = self.ivars().pairing.get() {
                     // only take the keyboard when this system asked to add one
                     let asked = matches!(panel.state(), Some(panel::State::Waiting { .. }))
                         || NSApplication::sharedApplication(self.mtm()).isActive();
-                    panel.show(panel::State::EnterCode { peer, problem: None }, asked);
+                    self.show_incoming_pairing(
+                        &peer,
+                        key,
+                        panel::State::EnterCode {
+                            peer: peer.clone(),
+                            problem: None,
+                        },
+                        asked,
+                    );
                 }
             }
-            Event::Paired { peer, key: _ } => {
+            Event::Paired { peer, key } => {
+                let dismissed = *self.ivars().dismissed_peer.borrow() == Some(key);
+                let show_panel = !dismissed
+                    && (self.ivars().main.get().is_some_and(|views| views.window.isVisible())
+                        || self.ivars().pairing.get().is_some_and(|panel| panel.panel.isVisible()));
+                self.clear_pending_peer();
                 if let Some(panel) = self.ivars().pairing.get() {
-                    panel.show(panel::State::Connected { peer }, false);
+                    panel.show_with_visibility(panel::State::Connected { peer }, false, show_panel);
                     self.ivars().connected_at.set(Some(std::time::Instant::now()));
                 }
             }
             Event::CodeMismatch => {
+                let show_panel = self.ivars().pairing.get().is_some_and(|panel| panel.panel.isVisible());
+                self.clear_pending_peer();
                 if let Some(panel) = self.ivars().pairing.get()
                     && matches!(
                         panel.state(),
                         Some(panel::State::ShowCode { .. } | panel::State::Checking { .. })
                     )
                 {
-                    panel.show(panel::State::Mismatch, false);
+                    panel.show_with_visibility(panel::State::Mismatch, false, show_panel);
                 }
             }
             Event::Notice { title, detail } => {
@@ -1097,6 +1169,43 @@ impl AppDelegate {
         }
     }
 
+    fn show_incoming_pairing(
+        &self,
+        peer: &str,
+        key: crate::identity::PublicKey,
+        state: panel::State,
+        asked_here: bool,
+    ) {
+        if *self.ivars().dismissed_peer.borrow() == Some(key) {
+            return;
+        }
+        if self.ivars().pending_peer.borrow().as_ref().map(|(pending, _)| *pending) != Some(key) {
+            *self.ivars().dismissed_peer.borrow_mut() = None;
+            *self.ivars().notified_peer.borrow_mut() = None;
+        }
+        *self.ivars().pending_peer.borrow_mut() = Some((key, peer.to_owned()));
+        let main_open = self.ivars().main.get().is_some_and(|views| views.window.isVisible());
+        let panel = self
+            .ivars()
+            .pairing
+            .get()
+            .expect("pairing panel is built before controller events");
+        let user_started = matches!(panel.state(), Some(panel::State::Waiting { .. }));
+        let show_panel = main_open || user_started;
+        panel.show_with_visibility(state, asked_here && show_panel, show_panel);
+        if !show_panel && *self.ivars().notified_peer.borrow() != Some(key) {
+            notification::pairing_request(peer);
+            *self.ivars().notified_peer.borrow_mut() = Some(key);
+        }
+        self.render_status();
+    }
+
+    fn clear_pending_peer(&self) {
+        if self.ivars().pending_peer.borrow_mut().take().is_some() {
+            self.render_status();
+        }
+    }
+
     /// Opens this group to a new system for a short while, from the menu.
     fn add_a_system(&self) -> bool {
         let always = self.ivars().settings.borrow().always_discoverable && self.ivars().always_allowed.get();
@@ -1108,6 +1217,8 @@ impl AppDelegate {
             return false;
         }
         let _ = self.ivars().controller.send(Command::AddSystem);
+        *self.ivars().dismissed_peer.borrow_mut() = None;
+        *self.ivars().notified_peer.borrow_mut() = None;
         if let Some(panel) = self.ivars().pairing.get() {
             let until = std::time::Instant::now() + controller::ADD_SYSTEM_WINDOW;
             panel.show(panel::State::Waiting { until }, true);
@@ -1135,6 +1246,7 @@ impl AppDelegate {
         };
         if stale {
             panel.close();
+            self.clear_pending_peer();
         }
         let shown_for = self.ivars().connected_at.get().map(|at| at.elapsed());
         if shown_for.is_some_and(|shown| shown >= CONNECTED_SHOWN) {
@@ -1470,6 +1582,12 @@ impl AppDelegate {
         // to people not using the keyboard; Tab still reaches it
         window.makeFirstResponder(None);
         app.activate();
+        if self.ivars().pending_peer.borrow().is_some()
+            && let Some(panel) = self.ivars().pairing.get()
+            && let Some(state) = panel.state()
+        {
+            panel.show(state, true);
+        }
     }
 
     fn show_alert(&self, title: &str, detail: &str, style: NSAlertStyle) {
@@ -1482,14 +1600,27 @@ impl AppDelegate {
     }
 
     fn set_status_image(&self, button: &NSButton, connected: bool) {
-        if let Some(image) = flower_image(connected, 18.0) {
+        let pending = self.ivars().pending_peer.borrow().is_some();
+        if let Some(image) = status_flower_image(connected, 18.0) {
             button.setImage(Some(&image));
             button.setTitle(&NSString::from_str(""));
         } else {
             button.setImage(None);
             button.setTitle(&NSString::from_str("Daisy"));
         }
-        button.setToolTip(Some(&NSString::from_str(if connected {
+        if let Some(dot) = self.ivars().status_dot.get() {
+            let bounds = button.bounds();
+            dot.setFrame(frame(
+                (bounds.size.width - 4.2) / 2.0,
+                (bounds.size.height - 4.2) / 2.0,
+                4.2,
+                4.2,
+            ));
+            dot.setHidden(!pending);
+        }
+        button.setToolTip(Some(&NSString::from_str(if pending {
+            "Daisy — Pairing request waiting"
+        } else if connected {
             "Daisy — Connected"
         } else {
             "Daisy — Disconnected"
@@ -1740,6 +1871,28 @@ fn flower_image(connected: bool, size: f64) -> Option<Retained<NSImage>> {
     let image = NSImage::initWithData(NSImage::alloc(), &data)?;
     image.setSize(NSSize::new(size, size));
     image.setTemplate(false);
+    Some(image)
+}
+
+fn status_flower_image(connected: bool, size: f64) -> Option<Retained<NSImage>> {
+    let mut petals = String::new();
+    for angle in (0..360).step_by(45) {
+        petals.push_str(&format!(
+            "<ellipse cx='12' cy='5' rx='2.1' ry='4' transform='rotate({angle} 12 12)'/>"
+        ));
+    }
+    let center = if connected {
+        "<circle cx='12' cy='12' r='2.7' opacity='0.5'/>"
+    } else {
+        "<circle cx='12' cy='12' r='2.1' fill='none' stroke='black' stroke-width='1.2' opacity='0.5'/>"
+    };
+    let svg = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='black'><g>{petals}</g>{center}</svg>"
+    );
+    let data = unsafe { NSData::dataWithBytes_length(svg.as_ptr().cast::<c_void>(), svg.len()) };
+    let image = NSImage::initWithData(NSImage::alloc(), &data)?;
+    image.setSize(NSSize::new(size, size));
+    image.setTemplate(true);
     Some(image)
 }
 

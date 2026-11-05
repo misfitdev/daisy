@@ -24,6 +24,7 @@ use spake2::{Ed25519Group, Identity as SpakeIdentity, Password, Spake2};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::identity::PublicKey;
 use crate::peers::PeerStore;
 use crate::protocol::{CONFIRMATION_LEN, Message};
 use crate::session::{Channel, Role};
@@ -85,10 +86,10 @@ impl fmt::Debug for PairingCode {
 /// How the person at this system takes part in pairing.
 pub trait PairingPrompt {
     /// Show `code` so it can be typed on `peer`.
-    fn show_code(&mut self, code: &PairingCode, peer: &str);
+    fn show_code(&mut self, code: &PairingCode, peer: &str, key: PublicKey);
 
     /// Ask for the code shown on `peer`.
-    fn ask_code(&mut self, peer: &str) -> impl Future<Output = Result<PairingCode>> + Send;
+    fn ask_code(&mut self, peer: &str, key: PublicKey) -> impl Future<Output = Result<PairingCode>> + Send;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,10 +158,10 @@ where
     let code = match channel.role() {
         Role::Responder => {
             let code = PairingCode::random();
-            prompt.show_code(&code, &peer_name);
+            prompt.show_code(&code, &peer_name, remote_key);
             code
         }
-        Role::Initiator => prompt.ask_code(&peer_name).await?,
+        Role::Initiator => prompt.ask_code(&peer_name, remote_key).await?,
     };
 
     let key = exchange_pairing_key(channel, &code).await?;
@@ -243,11 +244,11 @@ fn confirmation_tag(key: &[u8], role: Role, handshake_hash: &[u8]) -> [u8; CONFI
 pub struct TerminalPrompt;
 
 impl PairingPrompt for TerminalPrompt {
-    fn show_code(&mut self, code: &PairingCode, peer: &str) {
+    fn show_code(&mut self, code: &PairingCode, peer: &str, _key: PublicKey) {
         println!("\nPairing with {peer}. Type this code on {peer}:\n\n    {code}\n");
     }
 
-    fn ask_code(&mut self, peer: &str) -> impl Future<Output = Result<PairingCode>> + Send {
+    fn ask_code(&mut self, peer: &str, _key: PublicKey) -> impl Future<Output = Result<PairingCode>> + Send {
         let peer = peer.to_owned();
         async move {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -299,14 +300,14 @@ mod tests {
     }
 
     impl PairingPrompt for TestPrompt {
-        fn show_code(&mut self, code: &PairingCode, _peer: &str) {
+        fn show_code(&mut self, code: &PairingCode, _peer: &str, _key: PublicKey) {
             self.calls += 1;
             if let Some(reveal) = self.reveal.take() {
                 let _ = reveal.send(*code);
             }
         }
 
-        fn ask_code(&mut self, _peer: &str) -> impl Future<Output = Result<PairingCode>> + Send {
+        fn ask_code(&mut self, _peer: &str, _key: PublicKey) -> impl Future<Output = Result<PairingCode>> + Send {
             self.calls += 1;
             let answer = self.answer.take();
             async move {

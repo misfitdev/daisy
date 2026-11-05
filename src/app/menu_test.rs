@@ -62,12 +62,47 @@ pub(super) fn run() {
     unsafe { app.endModalSession(session) };
 
     peer_row_dialogs_are_sheets(mtm, &target, home.path());
+    incoming_pairing_dismissal(&target);
     update_controls_report_and_follow_the_switch(mtm, &target);
     an_update_relaunch_closes_the_advanced_sheet(mtm, &target);
     arrangement_confirmation(mtm);
     super::map::native_presentation(mtm, &target);
     form_sheets_wrap_and_grow(mtm, &target);
     retention_edits_keep_deadlines_explicit(mtm, &target);
+}
+
+fn incoming_pairing_dismissal(target: &super::AppDelegate) {
+    use objc2::DefinedClass;
+
+    let main = &target.ivars().main.get().unwrap().window;
+    let panel = target.ivars().pairing.get().unwrap();
+    main.orderFrontRegardless();
+    let code = crate::pairing::PairingCode::parse("482913").unwrap();
+    let first = crate::identity::PublicKey::from_bytes(&[3; 32]).unwrap();
+    let second = crate::identity::PublicKey::from_bytes(&[4; 32]).unwrap();
+    let request = |peer: &str, key| crate::controller::Event::ShowPairingCode {
+        peer: peer.to_owned(),
+        key,
+        code,
+    };
+    target.handle_event(request("Studio", first));
+    assert!(panel.panel.isVisible(), "the first request should be shown");
+    click(&panel.panel, "Cancel");
+    assert!(!panel.panel.isVisible());
+    target.handle_event(request("Studio", first));
+    assert!(!panel.panel.isVisible(), "a dismissed peer must not reopen the panel");
+    target.handle_event(request("Studio", second));
+    assert!(
+        panel.panel.isVisible(),
+        "a different peer with the same name can ask to pair"
+    );
+    assert!(target.ivars().dismissed_peer.borrow().is_none());
+    click(&panel.panel, "Cancel");
+    target.add_a_system();
+    assert!(matches!(panel.state(), Some(super::panel::State::Waiting { .. })));
+    assert!(target.ivars().dismissed_peer.borrow().is_none());
+    panel.close();
+    main.orderOut(None);
 }
 
 /// macOS refuses to quit an app with a sheet open, so an update's relaunch

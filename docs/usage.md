@@ -97,7 +97,7 @@ It is on by default. Turn it off with **Share clipboard when control moves** und
 
 The new system joins every member without another code. A group supports up to eight systems. Sharing continues during pairing, including connections made by address.
 
-The invitation lasts 30 seconds. Use **Cancel** to close it or **Try Again** if no system joins. After a failed or cancelled code prompt, Daisy waits 15 seconds before asking again.
+The invitation lasts 30 seconds. Use **Cancel** to close it or **Try Again** if no system joins. Dismissing a peer's code prompt keeps that peer quiet until a different peer asks or you choose **Add a System**. When Daisy's window is closed, an incoming request appears in macOS Notification Center; the menu-bar flower has a salmon center while it waits. Open Daisy to respond. Notification delivery follows your macOS notification settings.
 
 To accept new systems whenever sharing is on, enable **Always discoverable** under **Advanced…**. Turning it on requires confirmation and Touch ID or the login password. While enabled, **Add a System** is unavailable. Each system keeps its own setting; an organization can [disable it](administration.md).
 

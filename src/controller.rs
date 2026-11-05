@@ -185,10 +185,12 @@ pub enum Event {
     Peers(Vec<Peer>),
     ShowPairingCode {
         peer: String,
+        key: PublicKey,
         code: PairingCode,
     },
     AskPairingCode {
         peer: String,
+        key: PublicKey,
         reply: oneshot::Sender<String>,
     },
     /// A new peer was paired and trusted with the saved default.
@@ -888,17 +890,23 @@ struct ControllerPrompt {
 }
 
 impl PairingPrompt for ControllerPrompt {
-    fn show_code(&mut self, code: &PairingCode, peer: &str) {
+    fn show_code(&mut self, code: &PairingCode, peer: &str, key: PublicKey) {
         let _ = self.events.send(Event::ShowPairingCode {
             peer: peer.to_owned(),
+            key,
             code: *code,
         });
     }
 
-    fn ask_code(&mut self, peer: &str) -> impl std::future::Future<Output = Result<PairingCode>> + Send {
+    fn ask_code(
+        &mut self,
+        peer: &str,
+        key: PublicKey,
+    ) -> impl std::future::Future<Output = Result<PairingCode>> + Send {
         let (reply, answer) = oneshot::channel();
         let sent = self.events.send(Event::AskPairingCode {
             peer: peer.to_owned(),
+            key,
             reply,
         });
         async move {
@@ -1566,8 +1574,9 @@ mod tests {
     async fn closing_pairing_prompt_cancels_pairing() {
         let (events, received) = mpsc::channel();
         let mut prompt = ControllerPrompt { events };
-        let answer = prompt.ask_code("Studio");
-        let Event::AskPairingCode { peer, reply } = received.recv().unwrap() else {
+        let key = PublicKey::from_bytes(&[3; 32]).unwrap();
+        let answer = prompt.ask_code("Studio", key);
+        let Event::AskPairingCode { peer, reply, .. } = received.recv().unwrap() else {
             panic!("expected a pairing-code request");
         };
         assert_eq!(peer, "Studio");
