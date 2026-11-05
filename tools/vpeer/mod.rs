@@ -42,13 +42,17 @@ struct CodePrompt {
 }
 
 impl PairingPrompt for CodePrompt {
-    fn show_code(&mut self, code: &PairingCode, _peer: &str) {
+    fn show_code(&mut self, code: &PairingCode, _peer: &str, _key: crate::identity::PublicKey) {
         if let Some(shown) = &self.shown {
             shown.send_replace(Some(*code));
         }
     }
 
-    fn ask_code(&mut self, _peer: &str) -> impl Future<Output = Result<PairingCode>> + Send {
+    fn ask_code(
+        &mut self,
+        _peer: &str,
+        _key: crate::identity::PublicKey,
+    ) -> impl Future<Output = Result<PairingCode>> + Send {
         let mut received = self.received.clone();
         async move {
             loop {

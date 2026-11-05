@@ -5,6 +5,7 @@ pub mod capture;
 pub mod device;
 pub mod diagnostics;
 mod ffi;
+mod file_notification;
 pub mod file_pasteboard;
 pub mod inject;
 pub mod install;

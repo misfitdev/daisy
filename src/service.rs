@@ -988,11 +988,37 @@ where
     O: ServiceObserver + Send,
 {
     let policy = pairing.unwrap_or_default();
-    let (peer, trust) = establish_trust(channel, peers, name, pairing.is_some(), policy, prompt).await?;
+    let (peer, trust) = establish_trust(channel, peers, name, pairing.is_some(), policy, prompt)
+        .await
+        .map_err(|source| anyhow::Error::new(PairingFailure::new(channel.remote_key(), source)))?;
     if trust == Trust::NewlyPaired {
         observer.paired(&peer, channel.remote_key(), policy);
     }
     Ok((peer, trust))
+}
+
+#[derive(Debug)]
+pub struct PairingFailure {
+    pub key: PublicKey,
+    source: anyhow::Error,
+}
+
+impl PairingFailure {
+    pub fn new(key: PublicKey, source: anyhow::Error) -> Self {
+        Self { key, source }
+    }
+}
+
+impl std::fmt::Display for PairingFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Pairing failed")
+    }
+}
+
+impl std::error::Error for PairingFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 async fn run_session<O>(
@@ -2050,8 +2076,8 @@ mod tests {
     struct NoCodes;
 
     impl PairingPrompt for NoCodes {
-        fn show_code(&mut self, _code: &crate::pairing::PairingCode, _peer: &str) {}
-        async fn ask_code(&mut self, _peer: &str) -> Result<crate::pairing::PairingCode> {
+        fn show_code(&mut self, _code: &crate::pairing::PairingCode, _peer: &str, _key: PublicKey) {}
+        async fn ask_code(&mut self, _peer: &str, _key: PublicKey) -> Result<crate::pairing::PairingCode> {
             anyhow::bail!("no code")
         }
     }

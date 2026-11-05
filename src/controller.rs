@@ -185,10 +185,12 @@ pub enum Event {
     Peers(Vec<Peer>),
     ShowPairingCode {
         peer: String,
+        key: PublicKey,
         code: PairingCode,
     },
     AskPairingCode {
         peer: String,
+        key: PublicKey,
         reply: oneshot::Sender<String>,
     },
     /// A new peer was paired and trusted with the saved default.
@@ -197,7 +199,12 @@ pub enum Event {
         key: PublicKey,
     },
     /// A pairing ended because the code typed did not match.
-    CodeMismatch,
+    CodeMismatch {
+        key: PublicKey,
+    },
+    PairingEnded {
+        key: PublicKey,
+    },
     Notice {
         title: String,
         detail: String,
@@ -888,17 +895,23 @@ struct ControllerPrompt {
 }
 
 impl PairingPrompt for ControllerPrompt {
-    fn show_code(&mut self, code: &PairingCode, peer: &str) {
+    fn show_code(&mut self, code: &PairingCode, peer: &str, key: PublicKey) {
         let _ = self.events.send(Event::ShowPairingCode {
             peer: peer.to_owned(),
+            key,
             code: *code,
         });
     }
 
-    fn ask_code(&mut self, peer: &str) -> impl std::future::Future<Output = Result<PairingCode>> + Send {
+    fn ask_code(
+        &mut self,
+        peer: &str,
+        key: PublicKey,
+    ) -> impl std::future::Future<Output = Result<PairingCode>> + Send {
         let (reply, answer) = oneshot::channel();
         let sent = self.events.send(Event::AskPairingCode {
             peer: peer.to_owned(),
+            key,
             reply,
         });
         async move {
@@ -1072,8 +1085,13 @@ impl ServiceObserver for ControllerObserver {
         }
         // anything else is retried, and the status already says so; an
         // alert here would come back on every retry
-        if error.chain().any(|cause| cause.is::<crate::pairing::CodeMismatch>()) {
-            let _ = self.events.send(Event::CodeMismatch);
+        if let Some(failed) = error.downcast_ref::<crate::service::PairingFailure>() {
+            let event = if error.chain().any(|cause| cause.is::<crate::pairing::CodeMismatch>()) {
+                Event::CodeMismatch { key: failed.key }
+            } else {
+                Event::PairingEnded { key: failed.key }
+            };
+            let _ = self.events.send(event);
         }
     }
 }
@@ -1566,8 +1584,9 @@ mod tests {
     async fn closing_pairing_prompt_cancels_pairing() {
         let (events, received) = mpsc::channel();
         let mut prompt = ControllerPrompt { events };
-        let answer = prompt.ask_code("Studio");
-        let Event::AskPairingCode { peer, reply } = received.recv().unwrap() else {
+        let key = PublicKey::from_bytes(&[3; 32]).unwrap();
+        let answer = prompt.ask_code("Studio", key);
+        let Event::AskPairingCode { peer, reply, .. } = received.recv().unwrap() else {
             panic!("expected a pairing-code request");
         };
         assert_eq!(peer, "Studio");
@@ -1657,7 +1676,14 @@ mod tests {
             observer.connection_failed("192.168.1.20:24850", &anyhow::anyhow!("connection refused"));
         }
         assert!(received.try_recv().is_err());
-        observer.connection_failed("192.168.1.20:24850", &crate::pairing::CodeMismatch.into());
-        assert!(matches!(received.try_recv(), Ok(Event::CodeMismatch)));
+        let key = PublicKey::from_bytes(&[7; 32]).unwrap();
+        let error = anyhow::Error::new(crate::service::PairingFailure::new(
+            key,
+            anyhow::Error::new(crate::pairing::CodeMismatch),
+        ));
+        assert!(error.chain().any(|cause| cause.is::<crate::pairing::CodeMismatch>()));
+        assert!(error.downcast_ref::<crate::service::PairingFailure>().is_some());
+        observer.connection_failed("192.168.1.20:24850", &error);
+        assert!(matches!(received.try_recv(), Ok(Event::CodeMismatch { key: failed }) if failed == key));
     }
 }

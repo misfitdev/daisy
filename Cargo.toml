@@ -53,7 +53,9 @@ objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-local-authentication = "0.3.2"
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["CALayer", "objc2-core-foundation", "objc2-core-graphics"] }
 objc2-service-management = "0.3.2"
+objc2-user-notifications = "0.3.2"
 
 [dev-dependencies]
 tokio = { version = "1.53.3", features = ["test-util"] }

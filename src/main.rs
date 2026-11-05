@@ -183,6 +183,20 @@ fn main() -> Result<()> {
     match cli.command {
         None => daisy::app::run(home, name),
         Some(Command::PreviewArrangement) => daisy::app::run_preview(home, name),
+        Some(command @ (Command::Listen { .. } | Command::Connect { .. })) => {
+            let worker = std::thread::spawn(move || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .context("starting the async runtime")?
+                    .block_on(run_cli(command, home, name))
+            });
+            while !worker.is_finished() {
+                objc2_foundation::NSRunLoop::mainRunLoop()
+                    .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05));
+            }
+            worker.join().expect("CLI worker panicked")
+        }
         Some(command) => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

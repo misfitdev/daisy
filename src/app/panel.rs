@@ -149,6 +149,12 @@ impl Panel {
 
     /// Shows `state`. The panel takes the keyboard only when `focus`.
     pub fn show(&self, state: State, focus: bool) {
+        self.show_with_visibility(state, focus, true);
+    }
+
+    /// Keeps a request ready to show when Daisy opens, without floating over
+    /// another app while Daisy's main window is closed.
+    pub fn show_with_visibility(&self, state: State, focus: bool, visible: bool) {
         let (title, detail, primary, secondary): (String, String, Option<&str>, Option<&str>) = match &state {
             State::Waiting { until } => (
                 "Waiting for a new system".to_owned(),
@@ -218,7 +224,9 @@ impl Panel {
         if !self.panel.isVisible() {
             self.panel.center();
         }
-        if focus {
+        if !visible {
+            self.panel.orderOut(None);
+        } else if focus {
             self.panel.makeKeyAndOrderFront(None);
             if entering {
                 self.panel.makeFirstResponder(Some(&self.field));

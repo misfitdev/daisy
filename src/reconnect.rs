@@ -47,16 +47,18 @@ pub struct Unreachable {
 /// A local failure, such as the peer file failing to save, stops like any
 /// trust, key, permission or setup failure, even though it is also I/O.
 pub fn retryable(error: &anyhow::Error) -> bool {
-    if error.downcast_ref::<KeyChanged>().is_some() {
+    if error.chain().any(|cause| cause.is::<KeyChanged>()) {
         return false;
     }
-    error.downcast_ref::<Unreachable>().is_some()
-        || error.downcast_ref::<Silent>().is_some()
-        || error.downcast_ref::<tokio::time::error::Elapsed>().is_some()
-        || matches!(
-            error.downcast_ref::<SessionError>(),
-            Some(SessionError::Io(_) | SessionError::Closed)
-        )
+    error.chain().any(|cause| {
+        cause.is::<Unreachable>()
+            || cause.is::<Silent>()
+            || cause.is::<tokio::time::error::Elapsed>()
+            || matches!(
+                cause.downcast_ref::<SessionError>(),
+                Some(SessionError::Io(_) | SessionError::Closed)
+            )
+    })
 }
 
 #[cfg(test)]
@@ -85,6 +87,13 @@ mod tests {
         assert!(retryable(&anyhow::Error::from(SessionError::Closed)));
         let reset = SessionError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
         assert!(retryable(&anyhow::Error::from(reset)));
+        let key = crate::identity::PublicKey::from_bytes(&[7; 32]).unwrap();
+        let wrapped = anyhow::Error::new(crate::service::PairingFailure::new(
+            key,
+            anyhow::Error::from(SessionError::Closed),
+        ));
+        assert!(retryable(&wrapped));
+        assert_eq!(format!("{wrapped:#}"), "Pairing failed: connection closed by peer");
     }
 
     #[tokio::test(start_paused = true)]
