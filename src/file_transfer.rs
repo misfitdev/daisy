@@ -96,6 +96,7 @@ pub struct Progress {
 struct OfferRetryGuard {
     failed_clipboard: Option<i64>,
     offered_clipboard: Option<i64>,
+    offered_id: Option<OfferId>,
     received_clipboard: Option<i64>,
 }
 
@@ -104,6 +105,7 @@ impl OfferRetryGuard {
         if clipboard_changed {
             self.failed_clipboard = None;
             self.offered_clipboard = None;
+            self.offered_id = None;
             if self.received_clipboard != Some(current) {
                 self.received_clipboard = None;
             }
@@ -118,8 +120,13 @@ impl OfferRetryGuard {
         self.failed_clipboard = Some(current);
     }
 
-    fn offered(&mut self, current: i64) {
+    fn offered(&mut self, current: i64, id: OfferId) {
         self.offered_clipboard = Some(current);
+        self.offered_id = Some(id);
+    }
+
+    fn peer_left(&mut self) {
+        self.offered_clipboard = None;
     }
 
     fn received(&mut self, current: i64) {
@@ -303,23 +310,38 @@ impl Hub {
                     lock(&self.local).take();
                 }
                 if crossing && *self.enabled.borrow() && should_attempt {
-                    match crate::macos::file_pasteboard::copied_paths().and_then(|paths| {
+                    let (read_count, paths) = crate::macos::file_pasteboard::copied_paths_with_count();
+                    if read_count != current {
+                        *count = Some(read_count);
+                        lock(&self.offer_retry).should_attempt(true, false, read_count);
+                    }
+                    match paths.and_then(|paths| {
                         if paths.is_empty() {
                             return Ok(false);
                         }
-                        self.offer(paths)?;
-                        Ok(true)
+                        if lock(&self.active).is_empty() {
+                            return Ok(false);
+                        }
+                        self.offer_with_id(paths, lock(&self.offer_retry).offered_id)
                     }) {
-                        Ok(true) => lock(&self.offer_retry).offered(current),
-                        Ok(false) => {}
+                        Ok(true) => {
+                            if let Some(id) = lock(&self.local).as_ref().map(|local| local.snapshot.offer.id) {
+                                lock(&self.offer_retry).offered(read_count, id);
+                            }
+                        }
+                        Ok(false) => {
+                            if lock(&self.active).is_empty() {
+                                self.crossing.store(true, Ordering::Release);
+                            }
+                        }
                         Err(error) if error.is::<OfferQueueFull>() => {
                             self.crossing.store(true, Ordering::Release);
                             tracing::debug!("copied-file offer deferred until its queue has room");
                         }
                         Err(error) => {
-                            lock(&self.offer_retry).failed(current);
+                            lock(&self.offer_retry).failed(read_count);
                             tracing::warn!(error = ?error, "copied files could not be offered");
-                            crate::macos::file_pasteboard::offer_failed(current);
+                            crate::macos::file_pasteboard::offer_failed(read_count);
                         }
                     }
                 }
@@ -332,15 +354,19 @@ impl Hub {
         }
     }
 
-    pub fn offer(&self, paths: Vec<PathBuf>) -> Result<()> {
+    pub fn offer(&self, paths: Vec<PathBuf>) -> Result<bool> {
+        self.offer_with_id(paths, None)
+    }
+
+    fn offer_with_id(&self, paths: Vec<PathBuf>, id: Option<OfferId>) -> Result<bool> {
         if paths.is_empty() || lock(&self.active).is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let queued = self.messages.try_reserve().map_err(|error| match error {
             mpsc::error::TrySendError::Full(()) => anyhow::Error::new(OfferQueueFull),
             mpsc::error::TrySendError::Closed(()) => anyhow::anyhow!("file-offer queue is closed"),
         })?;
-        let snapshot = Arc::new(snapshot(paths, self.port)?);
+        let snapshot = Arc::new(snapshot(paths, self.port, id)?);
         let offer = snapshot.offer.clone();
         let peers = lock(&self.active).keys().copied().collect::<Vec<_>>();
         *lock(&self.local) = Some(Local {
@@ -348,7 +374,7 @@ impl Hub {
             snapshot,
         });
         queued.send(Message::FilesOffer { offer });
-        Ok(())
+        Ok(true)
     }
 
     pub fn release(&self, peer: PublicKey, offer: OfferId) {
@@ -584,7 +610,11 @@ impl Drop for ActivePeer {
             return;
         }
         active.remove(&self.1);
+        let last_peer_left = active.is_empty();
         drop(active);
+        if last_peer_left {
+            lock(&self.0.offer_retry).peer_left();
+        }
         if let Some(local) = lock(&self.0.local).as_mut() {
             local.leases.release(self.1);
         }
@@ -601,10 +631,14 @@ fn open_root(path: &Path) -> Result<File> {
         .open(path)?)
 }
 
-fn snapshot(paths: Vec<PathBuf>, port: u16) -> Result<Snapshot> {
+fn snapshot(paths: Vec<PathBuf>, port: u16, previous_id: Option<OfferId>) -> Result<Snapshot> {
     ensure!(paths.len() <= files::MAX_ITEMS, "too many copied files");
     let mut id = [0; 16];
-    getrandom::fill(&mut id)?;
+    if let Some(previous_id) = previous_id {
+        id = previous_id;
+    } else {
+        getrandom::fill(&mut id)?;
+    }
     let mut roots = Vec::new();
     let mut items = Vec::new();
     let mut total = 0;
@@ -1356,10 +1390,29 @@ mod tests {
     fn successful_offer_is_not_repeated_until_the_clipboard_changes() {
         let mut retry = OfferRetryGuard::default();
         assert!(retry.should_attempt(true, true, 17));
-        retry.offered(17);
+        retry.offered(17, [7; 16]);
         assert!(!retry.should_attempt(false, true, 17));
         assert!(!retry.should_attempt(false, true, 17));
         assert!(retry.should_attempt(true, true, 18));
+    }
+
+    #[test]
+    fn a_peer_leaving_allows_the_same_entry_to_be_offered_again() {
+        let mut retry = OfferRetryGuard::default();
+        retry.offered(17, [7; 16]);
+        assert!(!retry.should_attempt(false, true, 17));
+        retry.peer_left();
+        assert!(retry.should_attempt(false, true, 17));
+        assert_eq!(retry.offered_id, Some([7; 16]));
+    }
+
+    #[test]
+    fn retry_keeps_the_offer_identity_for_one_clipboard_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("copy.txt");
+        fs::write(&file, b"same entry").unwrap();
+        let snapshot = snapshot(vec![file], 1234, Some([7; 16])).unwrap();
+        assert_eq!(snapshot.offer.id, [7; 16]);
     }
 
     #[test]
@@ -1672,7 +1725,9 @@ mod tests {
                     .unwrap()
                     .leases
                     .expire(Instant::now() + files::TTL * 2),
-                3 => pair.source.offer(vec![file]).unwrap(),
+                3 => {
+                    pair.source.offer(vec![file]).unwrap();
+                }
                 _ => {
                     let remote = Arc::get_mut(&mut remote).unwrap();
                     remote.offer.items.push(remote.offer.items[0].clone());
@@ -1808,7 +1863,7 @@ mod tests {
         fs::create_dir(&folder).unwrap();
         fs::create_dir(folder.join("nested")).unwrap();
         fs::write(folder.join("nested/file"), b"offered").unwrap();
-        let snapshot = snapshot(vec![folder.clone()], 1234).unwrap();
+        let snapshot = snapshot(vec![folder.clone()], 1234, None).unwrap();
         let entry = snapshot.roots[0]
             .entries
             .iter()
@@ -1820,7 +1875,7 @@ mod tests {
         assert!(opened(&snapshot.roots[0].file, entry).is_err());
         let file = source.path().join("plain");
         fs::write(&file, b"short").unwrap();
-        let snapshot = super::snapshot(vec![file.clone()], 1234).unwrap();
+        let snapshot = super::snapshot(vec![file.clone()], 1234, None).unwrap();
         fs::write(file, b"longer than offered").unwrap();
         assert!(opened(&snapshot.roots[0].file, &snapshot.roots[0].entries[0]).is_err());
     }
@@ -1897,7 +1952,7 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(".", source.path().join("a")).unwrap();
         std::os::unix::fs::symlink("a/..", source.path().join("b")).unwrap();
-        assert!(snapshot(vec![source.path().to_owned()], 1234).is_err());
+        assert!(snapshot(vec![source.path().to_owned()], 1234, None).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

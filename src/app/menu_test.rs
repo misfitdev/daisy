@@ -96,13 +96,51 @@ fn incoming_pairing_dismissal(target: &super::AppDelegate) {
         panel.panel.isVisible(),
         "a different peer with the same name can ask to pair"
     );
+    target.handle_event(crate::controller::Event::Paired {
+        peer: "Studio".to_owned(),
+        key: first,
+    });
+    target.handle_event(crate::controller::Event::CodeMismatch { key: first });
+    target.handle_event(crate::controller::Event::PairingEnded { key: first });
+    assert_eq!(
+        target.ivars().pending_peer.borrow().as_ref().map(|(key, _)| *key),
+        Some(second)
+    );
+    assert!(matches!(panel.state(), Some(super::panel::State::ShowCode { .. })));
     assert!(target.ivars().dismissed_peer.borrow().is_none());
     click(&panel.panel, "Cancel");
+    let (reply, mut answer) = tokio::sync::oneshot::channel();
+    target.handle_event(crate::controller::Event::AskPairingCode {
+        peer: "Studio".to_owned(),
+        key: second,
+        reply,
+    });
+    assert_eq!(answer.try_recv(), Ok(String::new()));
+    assert!(!panel.panel.isVisible());
     target.add_a_system();
     assert!(matches!(panel.state(), Some(super::panel::State::Waiting { .. })));
     assert!(target.ivars().dismissed_peer.borrow().is_none());
-    panel.close();
     main.orderOut(None);
+    target.handle_event(request("Studio", first));
+    target.handle_event(crate::controller::Event::CodeMismatch { key: first });
+    panel.close();
+    target.handle_event(request("Studio", first));
+    assert!(
+        panel.panel.isVisible(),
+        "a user-started retry stays visible after a mismatch"
+    );
+    target.handle_event(crate::controller::Event::PairingEnded { key: first });
+    assert!(
+        target.ivars().pending_peer.borrow().is_none(),
+        "a finished exchange clears its pending request"
+    );
+    target.handle_event(request("Studio", first));
+    target.handle_event(crate::controller::Event::Status(crate::controller::Status::Idle));
+    assert!(
+        target.ivars().pending_peer.borrow().is_none(),
+        "stopping clears the pending request"
+    );
+    panel.close();
 }
 
 /// macOS refuses to quit an app with a sheet open, so an update's relaunch

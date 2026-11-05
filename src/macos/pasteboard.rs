@@ -13,6 +13,7 @@ use crate::clipboard::{Clipboard, Content, MAX_IMAGE};
 
 const CONCEALED_TYPE: &str = "org.nspasteboard.ConcealedType";
 const TRANSIENT_TYPE: &str = "org.nspasteboard.TransientType";
+const MAX_TIFF_INPUT: usize = 64 << 20;
 
 struct Work(std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>);
 define_class!(
@@ -121,7 +122,7 @@ fn read_native() -> Option<(Content, Option<Vec<u8>>)> {
     let tiff = if png.is_none() {
         board
             .dataForType(tiff)
-            .filter(|d| d.length() <= MAX_IMAGE)
+            .filter(|d| d.length() <= MAX_TIFF_INPUT)
             .map(|d| d.to_vec())
     } else {
         None
@@ -138,7 +139,7 @@ fn read_native() -> Option<(Content, Option<Vec<u8>>)> {
 fn finish_read(snapshot: Option<(Content, Option<Vec<u8>>)>) -> Option<Content> {
     let (mut content, tiff) = snapshot?;
     if let Some(tiff) = tiff {
-        content.png = tiff_to_png(&NSData::with_bytes(&tiff));
+        content.png = tiff_to_png(&NSData::with_bytes(&tiff)).filter(|png| png.len() <= MAX_IMAGE);
     }
     (!content.is_empty()).then_some(content)
 }

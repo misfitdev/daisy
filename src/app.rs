@@ -96,6 +96,7 @@ struct AppDelegateIvars {
     /// A dismissed peer stays quiet until a different peer asks or Add is used.
     dismissed_peer: RefCell<Option<crate::identity::PublicKey>>,
     notified_peer: RefCell<Option<crate::identity::PublicKey>>,
+    pairing_user_started_until: Cell<Option<std::time::Instant>>,
     /// Where a typed code goes, while one is asked for.
     code_reply: RefCell<Option<tokio::sync::oneshot::Sender<String>>>,
     /// When the Connected panel appeared, to close it on its own.
@@ -370,6 +371,7 @@ define_class!(
                 _ => {}
             }
             self.clear_pending_peer();
+            self.ivars().pairing_user_started_until.set(None);
             panel.close();
         }
 
@@ -720,6 +722,7 @@ impl AppDelegate {
             pending_peer: RefCell::new(None),
             dismissed_peer: RefCell::new(None),
             notified_peer: RefCell::new(None),
+            pairing_user_started_until: Cell::new(None),
             code_reply: RefCell::new(None),
             connected_at: Cell::new(None),
             owner_confirmed: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -1016,6 +1019,7 @@ impl AppDelegate {
                     && matches!(panel.state(), Some(panel::State::Waiting { .. }))
                 {
                     panel.show(panel::State::NoneJoined, false);
+                    self.clear_pending_peer();
                 }
                 self.render_status();
                 self.update_action_buttons();
@@ -1058,17 +1062,43 @@ impl AppDelegate {
                 }
             }
             Event::Paired { peer, key } => {
+                if self
+                    .ivars()
+                    .pending_peer
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(pending, _)| *pending != key)
+                {
+                    return;
+                }
                 let dismissed = *self.ivars().dismissed_peer.borrow() == Some(key);
                 let show_panel = !dismissed
                     && (self.ivars().main.get().is_some_and(|views| views.window.isVisible())
                         || self.ivars().pairing.get().is_some_and(|panel| panel.panel.isVisible()));
-                self.clear_pending_peer();
+                if self
+                    .ivars()
+                    .pending_peer
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(pending, _)| *pending == key)
+                {
+                    self.clear_pending_peer();
+                }
                 if let Some(panel) = self.ivars().pairing.get() {
                     panel.show_with_visibility(panel::State::Connected { peer }, false, show_panel);
                     self.ivars().connected_at.set(Some(std::time::Instant::now()));
                 }
             }
-            Event::CodeMismatch => {
+            Event::CodeMismatch { key } => {
+                if self
+                    .ivars()
+                    .pending_peer
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|(pending, _)| *pending != key)
+                {
+                    return;
+                }
                 let show_panel = self.ivars().pairing.get().is_some_and(|panel| panel.panel.isVisible());
                 self.clear_pending_peer();
                 if let Some(panel) = self.ivars().pairing.get()
@@ -1080,6 +1110,29 @@ impl AppDelegate {
                     panel.show_with_visibility(panel::State::Mismatch, false, show_panel);
                 }
             }
+            Event::PairingEnded { key } => {
+                if self
+                    .ivars()
+                    .pending_peer
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|(pending, _)| *pending == key)
+                {
+                    self.clear_pending_peer();
+                    if let Some(panel) = self.ivars().pairing.get()
+                        && matches!(
+                            panel.state(),
+                            Some(
+                                panel::State::ShowCode { .. }
+                                    | panel::State::EnterCode { .. }
+                                    | panel::State::Checking { .. }
+                            )
+                        )
+                    {
+                        panel.close();
+                    }
+                }
+            }
             Event::Notice { title, detail } => {
                 self.show_alert(&title, &detail, NSAlertStyle::Informational);
             }
@@ -1087,6 +1140,15 @@ impl AppDelegate {
     }
 
     fn apply_status(&self, status: Status) {
+        if matches!(
+            status,
+            Status::Idle | Status::Problem { .. } | Status::Waiting { pairing: false, .. }
+        ) {
+            self.clear_pending_peer();
+        }
+        if matches!(status, Status::Idle | Status::Problem { .. }) {
+            self.ivars().pairing_user_started_until.set(None);
+        }
         let problem = matches!(status, Status::Problem { .. });
         match &status {
             Status::Connected { peers } => self
@@ -1182,6 +1244,7 @@ impl AppDelegate {
         if self.ivars().pending_peer.borrow().as_ref().map(|(pending, _)| *pending) != Some(key) {
             *self.ivars().dismissed_peer.borrow_mut() = None;
             *self.ivars().notified_peer.borrow_mut() = None;
+            notification::clear();
         }
         *self.ivars().pending_peer.borrow_mut() = Some((key, peer.to_owned()));
         let main_open = self.ivars().main.get().is_some_and(|views| views.window.isVisible());
@@ -1190,7 +1253,12 @@ impl AppDelegate {
             .pairing
             .get()
             .expect("pairing panel is built before controller events");
-        let user_started = matches!(panel.state(), Some(panel::State::Waiting { .. }));
+        let user_started = self
+            .ivars()
+            .pairing_user_started_until
+            .get()
+            .is_some_and(|until| until > std::time::Instant::now())
+            || matches!(panel.state(), Some(panel::State::Waiting { .. }));
         let show_panel = main_open || user_started;
         panel.show_with_visibility(state, asked_here && show_panel, show_panel);
         if !show_panel && *self.ivars().notified_peer.borrow() != Some(key) {
@@ -1202,6 +1270,7 @@ impl AppDelegate {
 
     fn clear_pending_peer(&self) {
         if self.ivars().pending_peer.borrow_mut().take().is_some() {
+            notification::clear();
             self.render_status();
         }
     }
@@ -1219,8 +1288,9 @@ impl AppDelegate {
         let _ = self.ivars().controller.send(Command::AddSystem);
         *self.ivars().dismissed_peer.borrow_mut() = None;
         *self.ivars().notified_peer.borrow_mut() = None;
+        let until = std::time::Instant::now() + controller::ADD_SYSTEM_WINDOW;
+        self.ivars().pairing_user_started_until.set(Some(until + WAITING_GRACE));
         if let Some(panel) = self.ivars().pairing.get() {
-            let until = std::time::Instant::now() + controller::ADD_SYSTEM_WINDOW;
             panel.show(panel::State::Waiting { until }, true);
         }
         true
@@ -1238,6 +1308,8 @@ impl AppDelegate {
             // no session reports the window closing for a typed address
             Some(panel::State::Waiting { until }) if std::time::Instant::now() >= until + WAITING_GRACE => {
                 panel.show(panel::State::NoneJoined, false);
+                self.clear_pending_peer();
+                self.ivars().pairing_user_started_until.set(None);
                 false
             }
             Some(panel::State::Checking { .. }) => panel.age() >= CHECKING_SHOWN,
@@ -1353,6 +1425,8 @@ impl AppDelegate {
     }
 
     fn connect_address(&self, settings: SessionSettings) {
+        *self.ivars().dismissed_peer.borrow_mut() = None;
+        *self.ivars().notified_peer.borrow_mut() = None;
         self.apply_settings(&settings);
         let _ = self.ivars().controller.send(Command::ConnectByAddress(settings));
     }

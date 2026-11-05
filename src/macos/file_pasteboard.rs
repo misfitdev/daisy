@@ -173,7 +173,14 @@ define_class!(
                 }
                 Err(error) => {
                     tracing::warn!(error, "copied-file transfer failed");
-                    super::file_notification::show(&id, "Couldn’t receive copied files", "Copy the files again to retry.");
+                    if owns_clipboard(job) {
+                        let recovery = if error.contains("clipboard file cache is full") {
+                            "Restart this system to clear cached files, then copy again."
+                        } else {
+                            "Copy the files again to retry."
+                        };
+                        super::file_notification::show(&id, "Couldn’t receive copied files", recovery);
+                    }
                 }
             }
         }
@@ -223,6 +230,12 @@ fn publish_urls(job: &Arc<Job>, folder: &std::path::Path) -> Result<bool> {
     Ok(true)
 }
 
+fn owns_clipboard(job: &Arc<Job>) -> bool {
+    lock(clipboard())
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(&current.job, job) && current.count == count())
+}
+
 fn notification_id(id: OfferId) -> String {
     let mut result = String::from("daisy-file-");
     for byte in id {
@@ -234,6 +247,9 @@ fn notification_id(id: OfferId) -> String {
 
 pub fn offer_failed(count: i64) {
     super::pasteboard::on_main(move || {
+        if NSPasteboard::generalPasteboard().changeCount() as i64 != count {
+            return;
+        }
         super::file_notification::show(
             &format!("daisy-file-offer-{count}"),
             "Couldn’t share copied files",
@@ -276,8 +292,11 @@ fn clear_native(id: OfferId) {
         current.take();
     }
 }
-pub fn copied_paths() -> Result<Vec<PathBuf>> {
-    super::pasteboard::on_main(copied_paths_native)
+pub fn copied_paths_with_count() -> (i64, Result<Vec<PathBuf>>) {
+    super::pasteboard::on_main(|| {
+        let board = NSPasteboard::generalPasteboard();
+        (board.changeCount() as i64, copied_paths_native())
+    })
 }
 fn copied_paths_native() -> Result<Vec<PathBuf>> {
     let board = NSPasteboard::generalPasteboard();

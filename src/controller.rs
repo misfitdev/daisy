@@ -199,7 +199,12 @@ pub enum Event {
         key: PublicKey,
     },
     /// A pairing ended because the code typed did not match.
-    CodeMismatch,
+    CodeMismatch {
+        key: PublicKey,
+    },
+    PairingEnded {
+        key: PublicKey,
+    },
     Notice {
         title: String,
         detail: String,
@@ -1080,8 +1085,13 @@ impl ServiceObserver for ControllerObserver {
         }
         // anything else is retried, and the status already says so; an
         // alert here would come back on every retry
-        if error.chain().any(|cause| cause.is::<crate::pairing::CodeMismatch>()) {
-            let _ = self.events.send(Event::CodeMismatch);
+        if let Some(failed) = error.downcast_ref::<crate::service::PairingFailure>() {
+            let event = if error.chain().any(|cause| cause.is::<crate::pairing::CodeMismatch>()) {
+                Event::CodeMismatch { key: failed.key }
+            } else {
+                Event::PairingEnded { key: failed.key }
+            };
+            let _ = self.events.send(event);
         }
     }
 }
@@ -1666,7 +1676,14 @@ mod tests {
             observer.connection_failed("192.168.1.20:24850", &anyhow::anyhow!("connection refused"));
         }
         assert!(received.try_recv().is_err());
-        observer.connection_failed("192.168.1.20:24850", &crate::pairing::CodeMismatch.into());
-        assert!(matches!(received.try_recv(), Ok(Event::CodeMismatch)));
+        let key = PublicKey::from_bytes(&[7; 32]).unwrap();
+        let error = anyhow::Error::new(crate::service::PairingFailure::new(
+            key,
+            anyhow::Error::new(crate::pairing::CodeMismatch),
+        ));
+        assert!(error.chain().any(|cause| cause.is::<crate::pairing::CodeMismatch>()));
+        assert!(error.downcast_ref::<crate::service::PairingFailure>().is_some());
+        observer.connection_failed("192.168.1.20:24850", &error);
+        assert!(matches!(received.try_recv(), Ok(Event::CodeMismatch { key: failed }) if failed == key));
     }
 }
