@@ -95,18 +95,35 @@ pub struct Progress {
 #[derive(Default)]
 struct OfferRetryGuard {
     failed_clipboard: Option<i64>,
+    offered_clipboard: Option<i64>,
+    received_clipboard: Option<i64>,
 }
 
 impl OfferRetryGuard {
     fn should_attempt(&mut self, clipboard_changed: bool, crossing: bool, current: i64) -> bool {
         if clipboard_changed {
             self.failed_clipboard = None;
+            self.offered_clipboard = None;
+            if self.received_clipboard != Some(current) {
+                self.received_clipboard = None;
+            }
         }
-        crossing && self.failed_clipboard != Some(current)
+        crossing
+            && self.failed_clipboard != Some(current)
+            && self.offered_clipboard != Some(current)
+            && self.received_clipboard != Some(current)
     }
 
     fn failed(&mut self, current: i64) {
         self.failed_clipboard = Some(current);
+    }
+
+    fn offered(&mut self, current: i64) {
+        self.offered_clipboard = Some(current);
+    }
+
+    fn received(&mut self, current: i64) {
+        self.received_clipboard = Some(current);
     }
 }
 
@@ -135,7 +152,6 @@ pub struct Hub {
     receiver: Mutex<Option<mpsc::Receiver<Message>>>,
     pub runtime: tokio::runtime::Handle,
     crossing: AtomicBool,
-    #[cfg(all(target_os = "macos", not(test)))]
     offer_retry: Mutex<OfferRetryGuard>,
 }
 
@@ -189,7 +205,6 @@ impl Hub {
             receiver: Mutex::new(Some(receiver)),
             runtime: tokio::runtime::Handle::current(),
             crossing: AtomicBool::new(false),
-            #[cfg(all(target_os = "macos", not(test)))]
             offer_retry: Mutex::default(),
         });
         let running = hub.clone();
@@ -235,6 +250,10 @@ impl Hub {
 
     pub fn crossing(&self) {
         self.crossing.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn received_clipboard(&self, count: i64) {
+        lock(&self.offer_retry).received(count);
     }
 
     pub fn offered_to(&self, peer: PublicKey, id: OfferId) -> bool {
@@ -284,8 +303,15 @@ impl Hub {
                     lock(&self.local).take();
                 }
                 if crossing && *self.enabled.borrow() && should_attempt {
-                    match crate::macos::file_pasteboard::copied_paths().and_then(|paths| self.offer(paths)) {
-                        Ok(()) => {}
+                    match crate::macos::file_pasteboard::copied_paths().and_then(|paths| {
+                        if paths.is_empty() {
+                            return Ok(false);
+                        }
+                        self.offer(paths)?;
+                        Ok(true)
+                    }) {
+                        Ok(true) => lock(&self.offer_retry).offered(current),
+                        Ok(false) => {}
                         Err(error) if error.is::<OfferQueueFull>() => {
                             self.crossing.store(true, Ordering::Release);
                             tracing::debug!("copied-file offer deferred until its queue has room");
@@ -293,7 +319,7 @@ impl Hub {
                         Err(error) => {
                             lock(&self.offer_retry).failed(current);
                             tracing::warn!(error = ?error, "copied files could not be offered");
-                            crate::macos::file_pasteboard::offer_failed(format!("{error:#}"));
+                            crate::macos::file_pasteboard::offer_failed(current);
                         }
                     }
                 }
@@ -1324,6 +1350,25 @@ mod tests {
         assert!(!retry.should_attempt(false, true, 17));
         assert!(!retry.should_attempt(false, false, 18));
         assert!(retry.should_attempt(true, true, 18));
+    }
+
+    #[test]
+    fn successful_offer_is_not_repeated_until_the_clipboard_changes() {
+        let mut retry = OfferRetryGuard::default();
+        assert!(retry.should_attempt(true, true, 17));
+        retry.offered(17);
+        assert!(!retry.should_attempt(false, true, 17));
+        assert!(!retry.should_attempt(false, true, 17));
+        assert!(retry.should_attempt(true, true, 18));
+    }
+
+    #[test]
+    fn received_file_urls_are_not_offered_back_on_a_crossing() {
+        let mut retry = OfferRetryGuard::default();
+        retry.received(23);
+        assert!(!retry.should_attempt(true, true, 23));
+        assert!(!retry.should_attempt(false, true, 23));
+        assert!(retry.should_attempt(true, true, 24));
     }
 
     struct Pair {

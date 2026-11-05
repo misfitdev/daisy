@@ -54,6 +54,7 @@ objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-local-authentication = "0.3.2"
 objc2-service-management = "0.3.2"
+objc2-user-notifications = "0.3.2"
 
 [dev-dependencies]
 tokio = { version = "1.53.3", features = ["test-util"] }

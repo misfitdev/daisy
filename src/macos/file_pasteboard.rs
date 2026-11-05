@@ -2,8 +2,6 @@
 //! Materialization runs on a worker; a pending provider returns immediately.
 //! Completed file URLs are republished only while Daisy still owns the clipboard. Completed staging survives clipboard replacement for this boot.
 
-use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -11,14 +9,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::{Context, Result, ensure};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSBackingStoreType, NSButton, NSPanel, NSPasteboard, NSPasteboardItem, NSPasteboardItemDataProvider,
-    NSPasteboardTypeFileURL, NSPasteboardWriting, NSProgressIndicator, NSTextField, NSWindowStyleMask,
+    NSPasteboard, NSPasteboardItem, NSPasteboardItemDataProvider, NSPasteboardTypeFileURL, NSPasteboardWriting,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSObject, NSObjectNSThreadPerformAdditions, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    NSString, NSURL,
+    MainThreadMarker, NSArray, NSObject, NSObjectNSThreadPerformAdditions, NSObjectProtocol, NSString, NSURL,
 };
 
 use crate::file_cache::Cache;
@@ -49,9 +45,8 @@ struct Job {
     remote: Arc<Remote>,
     progress: Arc<Progress>,
     state: Mutex<State>,
-    ui_tick: Mutex<std::time::Instant>,
-    finished_ui: std::sync::atomic::AtomicBool,
-    ui_queued: std::sync::atomic::AtomicBool,
+    finished_notice: std::sync::atomic::AtomicBool,
+    notice_queued: std::sync::atomic::AtomicBool,
     installed: std::sync::atomic::AtomicBool,
 }
 impl Job {
@@ -62,7 +57,6 @@ impl Job {
         }
         *state = State::Running;
         drop(state);
-        self.signal();
         let job = self.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("clipboard-files".into())
@@ -91,16 +85,7 @@ impl Job {
                 index as u16,
                 &folder.join(&item.name),
                 &self.progress,
-                |done| {
-                    self.progress.done.store(done, Ordering::Relaxed);
-                    let mut tick = lock(&self.ui_tick);
-                    if tick.elapsed() >= std::time::Duration::from_millis(100) {
-                        *tick = std::time::Instant::now();
-                        drop(tick);
-                        self.signal();
-                    }
-                    self.progress.cancelled.load(Ordering::Acquire)
-                },
+                |_| self.progress.cancelled.load(Ordering::Acquire),
             )?;
         }
         ensure!(
@@ -155,46 +140,53 @@ define_class!(
     #[unsafe(super = NSObject)]
     #[thread_kind = AnyThread]
     #[ivars = JobIvars]
-    struct ProgressNotice;
-    unsafe impl NSObjectProtocol for ProgressNotice {}
-    impl ProgressNotice {
+    struct CompletionNotice;
+    unsafe impl NSObjectProtocol for CompletionNotice {}
+    impl CompletionNotice {
         #[unsafe(method(refreshFileTransfer))]
         fn refresh(&self) {
-            let Some(mtm) = MainThreadMarker::new() else { return; };
+            let Some(_) = MainThreadMarker::new() else { return; };
             let job = &self.ivars().job;
-            job.ui_queued.store(false, Ordering::Release);
-            let ready = match &*lock(&job.state) { State::Ready(result) => Some(result.clone()), _ => None };
-            PANELS.with(|panels| {
-                let mut panels = panels.borrow_mut();
-                if let Some(result) = ready {
-                    if !job.installed.load(Ordering::Acquire) { return; }
-                    if job.finished_ui.swap(true, Ordering::AcqRel) { return; }
-                    let result = result.and_then(|folder| publish_urls(job, &folder).map_err(|e| format!("{e:#}")));
-                    match result {
-                        Ok(()) => { if let Some(panel) = panels.remove(&job.remote.offer.id) { panel.window.orderOut(None); } },
-                        Err(_) if job.progress.cancelled.load(Ordering::Acquire) => {
-                            if let Some(panel) = panels.remove(&job.remote.offer.id) { panel.window.orderOut(None); }
-                        },
-                        Err(error) => {
-                            let panel = panels.entry(job.remote.offer.id).or_insert_with(|| Panel::new(mtm,job.clone()));
-                            panel.failure(&error);
-                        },
-                    }
-                } else if !job.progress.cancelled.load(Ordering::Acquire) {
-                    panels.entry(job.remote.offer.id).or_insert_with(|| Panel::new(mtm,job.clone())).update();
+            job.notice_queued.store(false, Ordering::Release);
+            let ready = match &*lock(&job.state) {
+                State::Ready(result) => Some(result.clone()),
+                _ => None,
+            };
+            let Some(result) = ready else { return; };
+            if !job.installed.load(Ordering::Acquire) || job.finished_notice.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            let id = notification_id(job.remote.offer.id);
+            match result.and_then(|folder| publish_urls(job, &folder).map_err(|e| format!("{e:#}"))) {
+                Ok(true) => {
+                    let items = job.remote.offer.items.len();
+                    let body = if items == 1 {
+                        "One copied item is ready to paste in Finder.".to_owned()
+                    } else {
+                        format!("{items} copied items are ready to paste in Finder.")
+                    };
+                    super::file_notification::show(&id, "Copied files ready", &body);
                 }
-            });
+                Ok(false) => {}
+                Err(error) if job.progress.cancelled.load(Ordering::Acquire) => {
+                    tracing::info!(error, "copied-file transfer cancelled");
+                }
+                Err(error) => {
+                    tracing::warn!(error, "copied-file transfer failed");
+                    super::file_notification::show(&id, "Couldn’t receive copied files", "Copy the files again to retry.");
+                }
+            }
         }
     }
 );
 impl Job {
     fn signal(self: &Arc<Self>) {
-        if self.ui_queued.swap(true, Ordering::AcqRel) {
+        if self.notice_queued.swap(true, Ordering::AcqRel) {
             return;
         }
-        let allocated = ProgressNotice::alloc().set_ivars(JobIvars { job: self.clone() });
+        let allocated = CompletionNotice::alloc().set_ivars(JobIvars { job: self.clone() });
         // SAFETY: NSObject's initializer completes the immutable subclass.
-        let notice: Retained<ProgressNotice> = unsafe { msg_send![super(allocated), init] };
+        let notice: Retained<CompletionNotice> = unsafe { msg_send![super(allocated), init] };
         // SAFETY: the selector takes no argument; Foundation retains its target
         // until this queued main-thread invocation completes.
         unsafe {
@@ -202,7 +194,7 @@ impl Job {
         }
     }
 }
-fn publish_urls(job: &Arc<Job>, folder: &std::path::Path) -> Result<()> {
+fn publish_urls(job: &Arc<Job>, folder: &std::path::Path) -> Result<bool> {
     ensure!(
         !job.progress.cancelled.load(Ordering::Acquire),
         "file transfer cancelled"
@@ -212,7 +204,7 @@ fn publish_urls(job: &Arc<Job>, folder: &std::path::Path) -> Result<()> {
         .as_ref()
         .filter(|current| Arc::ptr_eq(&current.job, job) && current.count == count())
     else {
-        return Ok(());
+        return Ok(false);
     };
     let mut urls = Vec::<Retained<ProtocolObject<dyn NSPasteboardWriting>>>::new();
     for (index, item) in job.remote.offer.items.iter().enumerate() {
@@ -226,187 +218,29 @@ fn publish_urls(job: &Arc<Job>, folder: &std::path::Path) -> Result<()> {
         board.writeObjects(&NSArray::from_retained_slice(&urls)),
         "received files could not be put on the clipboard"
     );
+    job.hub.received_clipboard(board.changeCount() as i64);
     slot.take();
-    Ok(())
+    Ok(true)
 }
-struct PanelIvars {
-    progress: Arc<Progress>,
-    id: OfferId,
-    window: Retained<NSPanel>,
-}
-define_class!(
-    // SAFETY: AppKit UI and its actions are confined to the main thread.
-    #[unsafe(super = NSObject)]
-    #[thread_kind = MainThreadOnly]
-    #[ivars = PanelIvars]
-    struct PanelActions;
-    unsafe impl NSObjectProtocol for PanelActions {}
-    impl PanelActions {
-        #[unsafe(method(cancel:))]
-        fn cancel(&self, _sender: Option<&NSObject>) {
-            let _keep_alive = self.retain();
-            self.ivars().progress.cancelled.store(true, Ordering::Release);
-            self.ivars().window.orderOut(None);
-            clear(self.ivars().id);
-            PANELS.with(|panels| { panels.borrow_mut().remove(&self.ivars().id); });
-        }
+
+fn notification_id(id: OfferId) -> String {
+    let mut result = String::from("daisy-file-");
+    for byte in id {
+        use std::fmt::Write;
+        let _ = write!(result, "{byte:02x}");
     }
-);
-struct Panel {
-    progress: Arc<Progress>,
-    total: u64,
-    window: Retained<NSPanel>,
-    title: Retained<NSTextField>,
-    status: Retained<NSTextField>,
-    bar: Retained<NSProgressIndicator>,
-    button: Retained<NSButton>,
-    _actions: Retained<PanelActions>,
+    result
 }
-impl Panel {
-    fn new(mtm: MainThreadMarker, job: Arc<Job>) -> Self {
-        let total = job.remote.offer.items.iter().map(|i| i.bytes).sum();
-        Self::with_progress(mtm, job.progress.clone(), job.remote.offer.id, total)
-    }
-    fn with_progress(mtm: MainThreadMarker, progress: Arc<Progress>, id: OfferId, total: u64) -> Self {
-        let window = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(mtm),
-            rect(0., 0., 480., 200.),
-            NSWindowStyleMask::Titled | NSWindowStyleMask::NonactivatingPanel,
-            NSBackingStoreType::Buffered,
-            false,
+
+pub fn offer_failed(count: i64) {
+    super::pasteboard::on_main(move || {
+        super::file_notification::show(
+            &format!("daisy-file-offer-{count}"),
+            "Couldn’t share copied files",
+            "Copy the files again to retry.",
         );
-        window.setTitle(&NSString::from_str("Daisy"));
-        window.setFloatingPanel(true);
-        window.setBecomesKeyOnlyIfNeeded(true);
-        window.setHidesOnDeactivate(false);
-        // SAFETY: Rust owns the panel's retain; closing must not release it.
-        unsafe {
-            window.setReleasedWhenClosed(false);
-        }
-        let allocated = PanelActions::alloc(mtm).set_ivars(PanelIvars {
-            progress: progress.clone(),
-            id,
-            window: window.clone(),
-        });
-        // SAFETY: NSObject's initializer completes the allocated subclass.
-        let actions: Retained<PanelActions> = unsafe { msg_send![super(allocated), init] };
-        let title = NSTextField::labelWithString(&NSString::from_str("Receiving copied files"), mtm);
-        title.setFrame(rect(20., 150., 440., 26.));
-        let status = NSTextField::wrappingLabelWithString(&NSString::from_str("Preparing files for Paste…"), mtm);
-        status.setFrame(rect(20., 78., 440., 60.));
-        let bar = NSProgressIndicator::initWithFrame(NSProgressIndicator::alloc(mtm), rect(20., 56., 440., 16.));
-        bar.setMinValue(0.);
-        bar.setMaxValue(1.);
-        bar.setIndeterminate(false);
-        // SAFETY: the target is retained by Panel and the action has the required ABI.
-        let button = unsafe {
-            NSButton::buttonWithTitle_target_action(
-                &NSString::from_str("Cancel"),
-                Some(&*actions),
-                Some(sel!(cancel:)),
-                mtm,
-            )
-        };
-        button.setFrame(rect(360., 16., 100., 28.));
-        if let Some(view) = window.contentView() {
-            view.addSubview(&title);
-            view.addSubview(&status);
-            view.addSubview(&bar);
-            view.addSubview(&button);
-        }
-        window.center();
-        window.orderFrontRegardless();
-        Self {
-            progress,
-            total,
-            window,
-            title,
-            status,
-            bar,
-            button,
-            _actions: actions,
-        }
-    }
-    fn update(&self) {
-        let bytes = self.total;
-        let done = self.progress.done.load(Ordering::Relaxed);
-        self.bar.setDoubleValue(done as f64 / bytes.max(1) as f64);
-        self.status.setStringValue(&NSString::from_str(&format!(
-            "{} of {} received",
-            size(done),
-            size(bytes)
-        )));
-    }
-    fn failure(&self, error: &str) {
-        self.title.setStringValue(&NSString::from_str(
-            if self.progress.cancelled.load(Ordering::Acquire) {
-                "Transfer cancelled"
-            } else {
-                "Couldn’t receive copied files"
-            },
-        ));
-        self.status
-            .setStringValue(&NSString::from_str(&format!("{error}\nCopy the files again to retry.")));
-        self.status.setToolTip(Some(&NSString::from_str(error)));
-        self.bar.setHidden(true);
-        self.button.setTitle(&NSString::from_str("Close"));
-        self.window.orderFrontRegardless();
-    }
+    });
 }
-fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
-    NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
-}
-fn size(bytes: u64) -> String {
-    if bytes < 1000 {
-        format!("{bytes} bytes")
-    } else if bytes < 1_000_000 {
-        format!("{:.1} KB", bytes as f64 / 1000.)
-    } else if bytes < 1_000_000_000 {
-        format!("{:.1} MB", bytes as f64 / 1e6)
-    } else {
-        format!("{:.1} GB", bytes as f64 / 1e9)
-    }
-}
-
-struct NoticeIvars {
-    message: String,
-    id: OfferId,
-}
-define_class!(
-    // SAFETY: immutable notice data; presentation is dispatched to main.
-    #[unsafe(super = NSObject)]
-    #[thread_kind = AnyThread]
-    #[ivars = NoticeIvars]
-    struct Notice;
-    unsafe impl NSObjectProtocol for Notice {}
-    impl Notice {
-        #[unsafe(method(showFileFailure))]
-        fn present(&self) {
-            let Some(mtm) = MainThreadMarker::new() else { return; };
-            let panel = Panel::with_progress(mtm, Arc::new(Progress::default()), self.ivars().id, 0);
-            panel.failure(&self.ivars().message);
-            panel.title.setStringValue(&NSString::from_str("Couldn’t share copied files"));
-            PANELS.with(|panels| { panels.borrow_mut().insert(self.ivars().id, panel); });
-        }
-    }
-);
-
-pub fn offer_failed(message: String) {
-    let mut id = [0; 16];
-    if getrandom::fill(&mut id).is_err() {
-        return;
-    }
-    let allocated = Notice::alloc().set_ivars(NoticeIvars { message, id });
-    // SAFETY: NSObject's initializer completes this immutable subclass.
-    let notice: Retained<Notice> = unsafe { msg_send![super(allocated), init] };
-    // SAFETY: the selector takes no argument. Foundation retains its target
-    // until the queued main-thread invocation completes.
-    unsafe {
-        notice.performSelectorOnMainThread_withObject_waitUntilDone(sel!(showFileFailure), None, false);
-    }
-}
-thread_local! { static PANELS: RefCell<BTreeMap<OfferId,Panel>> = const { RefCell::new(BTreeMap::new()) }; }
-
 struct Clipboard {
     id: OfferId,
     count: i64,
@@ -421,14 +255,19 @@ fn clipboard() -> &'static Mutex<Option<Clipboard>> {
     CLIPBOARD.get_or_init(|| Mutex::new(None))
 }
 pub fn count() -> i64 {
-    NSPasteboard::generalPasteboard().changeCount() as i64
+    super::pasteboard::on_main(|| NSPasteboard::generalPasteboard().changeCount() as i64)
 }
 pub fn holds(id: OfferId) -> bool {
-    lock(clipboard())
-        .as_ref()
-        .is_some_and(|p| p.id == id && p.count == count())
+    super::pasteboard::on_main(move || {
+        lock(clipboard())
+            .as_ref()
+            .is_some_and(|p| p.id == id && p.count == count())
+    })
 }
 pub fn clear(id: OfferId) {
+    super::pasteboard::on_main(move || clear_native(id));
+}
+fn clear_native(id: OfferId) {
     let mut current = lock(clipboard());
     if current.as_ref().is_some_and(|p| p.id == id) {
         if current.as_ref().is_some_and(|p| p.count == count()) {
@@ -438,6 +277,9 @@ pub fn clear(id: OfferId) {
     }
 }
 pub fn copied_paths() -> Result<Vec<PathBuf>> {
+    super::pasteboard::on_main(copied_paths_native)
+}
+fn copied_paths_native() -> Result<Vec<PathBuf>> {
     let board = NSPasteboard::generalPasteboard();
     if board.types().is_some_and(|types| {
         types.iter().any(|t| {
@@ -467,14 +309,16 @@ pub fn copied_paths() -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 pub fn install(hub: Arc<Hub>, remote: Arc<Remote>) -> Result<()> {
+    super::pasteboard::on_main(move || install_native(hub, remote))
+}
+fn install_native(hub: Arc<Hub>, remote: Arc<Remote>) -> Result<()> {
     let job = Arc::new(Job {
         hub,
         remote: remote.clone(),
         progress: Arc::new(Progress::default()),
         state: Mutex::new(State::Pending),
-        ui_tick: Mutex::new(std::time::Instant::now()),
-        finished_ui: std::sync::atomic::AtomicBool::new(false),
-        ui_queued: std::sync::atomic::AtomicBool::new(false),
+        finished_notice: std::sync::atomic::AtomicBool::new(false),
+        notice_queued: std::sync::atomic::AtomicBool::new(false),
         installed: std::sync::atomic::AtomicBool::new(false),
     });
     let mut providers = Vec::new();
@@ -573,9 +417,8 @@ mod tests {
             remote,
             progress,
             state: Mutex::new(State::Ready(Ok(folder.clone()))),
-            ui_tick: Mutex::new(std::time::Instant::now()),
-            finished_ui: std::sync::atomic::AtomicBool::new(false),
-            ui_queued: std::sync::atomic::AtomicBool::new(false),
+            finished_notice: std::sync::atomic::AtomicBool::new(false),
+            notice_queued: std::sync::atomic::AtomicBool::new(false),
             installed: std::sync::atomic::AtomicBool::new(true),
         });
         // The native publication entry point must reject a queued success before
