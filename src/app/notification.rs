@@ -38,21 +38,26 @@ pub fn pairing_request(peer: &str) {
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&NSString::from_str(ID), &content, None);
     let center = UNUserNotificationCenter::currentNotificationCenter();
     let authorized = center.clone();
-    let callback = RcBlock::new(move |granted: objc2::runtime::Bool, error| {
-        if !granted.as_bool() {
-            tracing::warn!(?error, "pairing notification was not authorized");
-        } else if GENERATION.load(std::sync::atomic::Ordering::Acquire) == generation {
-            let completed_center = authorized.clone();
-            let completed = RcBlock::new(move |error: *mut objc2_foundation::NSError| {
-                if !error.is_null() {
-                    tracing::warn!(?error, "pairing notification could not be delivered");
-                }
-                if GENERATION.load(std::sync::atomic::Ordering::Acquire) != generation {
-                    remove_request(&completed_center);
-                }
-            });
-            authorized.addNotificationRequest_withCompletionHandler(&request, Some(&completed));
-        }
-    });
+    let callback = RcBlock::new(
+        move |granted: objc2::runtime::Bool, error: *mut objc2_foundation::NSError| {
+            if !granted.as_bool() {
+                // SAFETY: Foundation passes null or a valid NSError for this callback.
+                let error = unsafe { error.as_ref() };
+                tracing::warn!(?error, "pairing notification was not authorized");
+            } else if GENERATION.load(std::sync::atomic::Ordering::Acquire) == generation {
+                let completed_center = authorized.clone();
+                let completed = RcBlock::new(move |error: *mut objc2_foundation::NSError| {
+                    // SAFETY: Foundation passes null or a valid NSError for this callback.
+                    if let Some(error) = unsafe { error.as_ref() } {
+                        tracing::warn!(?error, "pairing notification could not be delivered");
+                    }
+                    if GENERATION.load(std::sync::atomic::Ordering::Acquire) != generation {
+                        remove_request(&completed_center);
+                    }
+                });
+                authorized.addNotificationRequest_withCompletionHandler(&request, Some(&completed));
+            }
+        },
+    );
     center.requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert, &callback);
 }

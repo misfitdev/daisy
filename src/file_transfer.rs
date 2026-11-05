@@ -302,6 +302,13 @@ impl Hub {
                 return Some(current);
             }
             let crossing = self.crossing.swap(false, Ordering::AcqRel);
+            let enabled = *self.enabled.borrow();
+            let (current, paths) = if crossing && enabled {
+                let (read_count, paths) = crate::macos::file_pasteboard::copied_paths_with_count();
+                (read_count, Some(paths))
+            } else {
+                (current, None)
+            };
             let clipboard_changed = *count != Some(current);
             let should_attempt = lock(&self.offer_retry).should_attempt(clipboard_changed, crossing, current);
             if clipboard_changed || crossing {
@@ -309,13 +316,8 @@ impl Hub {
                 if clipboard_changed {
                     lock(&self.local).take();
                 }
-                if crossing && *self.enabled.borrow() && should_attempt {
-                    let (read_count, paths) = crate::macos::file_pasteboard::copied_paths_with_count();
-                    if read_count != current {
-                        *count = Some(read_count);
-                        lock(&self.offer_retry).should_attempt(true, false, read_count);
-                    }
-                    match paths.and_then(|paths| {
+                if crossing && enabled && should_attempt {
+                    match paths.expect("a crossing captured the clipboard").and_then(|paths| {
                         if paths.is_empty() {
                             return Ok(false);
                         }
@@ -326,7 +328,7 @@ impl Hub {
                     }) {
                         Ok(true) => {
                             if let Some(id) = lock(&self.local).as_ref().map(|local| local.snapshot.offer.id) {
-                                lock(&self.offer_retry).offered(read_count, id);
+                                lock(&self.offer_retry).offered(current, id);
                             }
                         }
                         Ok(false) => {
@@ -339,9 +341,9 @@ impl Hub {
                             tracing::debug!("copied-file offer deferred until its queue has room");
                         }
                         Err(error) => {
-                            lock(&self.offer_retry).failed(read_count);
+                            lock(&self.offer_retry).failed(current);
                             tracing::warn!(error = ?error, "copied files could not be offered");
-                            crate::macos::file_pasteboard::offer_failed(read_count);
+                            crate::macos::file_pasteboard::offer_failed(current);
                         }
                     }
                 }

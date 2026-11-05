@@ -1011,7 +1011,7 @@ impl PairingFailure {
 
 impl std::fmt::Display for PairingFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.source.fmt(formatter)
+        formatter.write_str("Pairing failed")
     }
 }
 
