@@ -100,6 +100,7 @@ pub struct MainViews {
     pub arrange: Retained<ArrangeView>,
     title: Retained<NSTextField>,
     detail: Retained<NSTextField>,
+    remedy: Retained<NSButton>,
     peers_heading: Retained<NSTextField>,
     add_peer: Retained<NSButton>,
     peers: Retained<Panel>,
@@ -191,9 +192,14 @@ impl MainViews {
         let detail = label("", 12.0, false, mtm);
         detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
         detail.setAlignment(objc2_app_kit::NSTextAlignment::Center);
-        detail.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        detail.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        detail.setMaximumNumberOfLines(0);
         detail.setFrame(rect(MARGIN, STATUS_Y + 24.0, GROUP_WIDTH, 18.0));
         hero.addSubview(&detail);
+        let remedy = button("Reset Identity…", sel!(resetIdentity:), target, mtm);
+        remedy.setFrame(rect((WIDTH - 150.0) / 2.0, STATUS_Y + 48.0, 150.0, 28.0));
+        remedy.setHidden(true);
+        hero.addSubview(&remedy);
         let rule = NSBox::initWithFrame(NSBox::alloc(mtm), rect(0.0, HERO, WIDTH, 1.0));
         rule.setBoxType(NSBoxType::Separator);
         root.addSubview(&rule);
@@ -233,6 +239,7 @@ impl MainViews {
             arrange,
             title,
             detail,
+            remedy,
             peers_heading,
             add_peer,
             peers,
@@ -294,7 +301,22 @@ impl MainViews {
         self.detail.setStringValue(&NSString::from_str(detail));
         self.title.setHidden(title.is_empty());
         self.detail.setHidden(detail.is_empty());
+        let detail_height = self.detail.cell().map_or(18.0, |cell| {
+            cell.cellSizeForBounds(rect(0.0, 0.0, GROUP_WIDTH, 1000.0))
+                .height
+                .max(18.0)
+        });
+        self.detail.setFrameSize(NSSize::new(GROUP_WIDTH, detail_height));
         self.layout_hero();
+    }
+
+    /// The fix a problem offers, as a button under its detail.
+    pub fn show_remedy(&self, remedy: Option<crate::controller::Remedy>) {
+        let hidden = remedy.is_none();
+        if self.remedy.isHidden() != hidden {
+            self.remedy.setHidden(hidden);
+            self.layout_hero();
+        }
     }
 
     #[cfg(test)]
@@ -340,6 +362,25 @@ impl MainViews {
             }
         }
         self.show_check(false, false, false, &[]);
+        self.show_status(
+            "This system's identity is unavailable",
+            &"Reset Daisy on this system. ".repeat(12),
+        );
+        self.show_remedy(Some(crate::controller::Remedy::ResetIdentity));
+        let detail = self.detail.frame();
+        assert!(detail.size.height > 18.0, "a long detail wraps rather than truncating");
+        let remedy = self.remedy.frame();
+        assert!(!self.remedy.isHidden());
+        assert!(
+            remedy.origin.y >= detail.origin.y + detail.size.height,
+            "the remedy sits under the detail"
+        );
+        assert!(
+            remedy.origin.y + remedy.size.height <= self.hero.frame().size.height,
+            "the remedy stays inside the hero"
+        );
+        self.show_remedy(None);
+        assert!(self.remedy.isHidden());
         self.show_status("Not Sharing", "");
     }
 
@@ -361,7 +402,12 @@ impl MainViews {
         }
         if !self.detail.isHidden() {
             self.detail.setFrameOrigin(NSPoint::new(MARGIN, y));
-            y += 24.0;
+            y += self.detail.frame().size.height + 6.0;
+        }
+        if !self.remedy.isHidden() {
+            self.remedy
+                .setFrameOrigin(NSPoint::new((WIDTH - self.remedy.frame().size.width) / 2.0, y + 4.0));
+            y += 40.0;
         }
         let height = y + HERO - STATUS_Y;
         self.hero.setFrameSize(NSSize::new(WIDTH, height));
@@ -623,6 +669,23 @@ impl AdvancedViews {
         );
         let permission_rows = permission_rows.map(|(_, allowed, set_up)| (allowed, set_up));
         y += permissions.frame().size.height + MARGIN;
+
+        let identity_heading = label("Identity", 13.0, true, mtm);
+        identity_heading.setFrame(rect(MARGIN, y, width, 18.0));
+        root.addSubview(&identity_heading);
+        y += 18.0 + 6.0;
+        let identity = Panel::new(
+            mtm,
+            rect(MARGIN, y, width, ROW),
+            Some(NSColor::quaternarySystemFillColor()),
+            10.0,
+        );
+        root.addSubview(&identity);
+        let reset_identity = button("Reset…", sel!(resetIdentity:), target, mtm);
+        reset_identity.setAccessibilityLabel(Some(&NSString::from_str("Reset identity")));
+        reset_identity.setFrameSize(NSSize::new(84.0, 28.0));
+        rows(&identity, &[("Reset identity and peers", &**reset_identity)], mtm);
+        y += identity.frame().size.height + MARGIN;
 
         let done = button("Done", sel!(closeAdvanced:), target, mtm);
         done.setKeyEquivalent(&NSString::from_str("\r"));

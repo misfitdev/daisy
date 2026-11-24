@@ -46,10 +46,12 @@ struct Relaunch {
     launch: Launch,
 }
 
+pub(crate) const RELAUNCH_PREFIX: &str = "update-relaunch-";
+
 fn relaunch_path(directory: &Path, executable: &Path) -> PathBuf {
     use std::os::unix::ffi::OsStrExt;
     directory.join(format!(
-        "update-relaunch-{}.toml",
+        "{RELAUNCH_PREFIX}{}.toml",
         archive_sha256(executable.as_os_str().as_bytes())
     ))
 }
@@ -214,7 +216,7 @@ pub struct LastCheck {
     pub available: Option<String>,
 }
 
-const LAST_CHECK_FILE: &str = "last-update-check.toml";
+pub(crate) const LAST_CHECK_FILE: &str = "last-update-check.toml";
 
 /// The record of the last successful check in `home`, if there is one.
 pub fn load_last_check(home: &std::path::Path) -> Option<LastCheck> {

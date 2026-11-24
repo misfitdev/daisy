@@ -23,7 +23,7 @@ use crate::identity::PublicKey;
 
 pub const CAPACITY: usize = 256;
 pub const MAX_RECORD: usize = 4096;
-const SOCKET: &str = "developer-trace.sock";
+pub(crate) const SOCKET: &str = "developer-trace.sock";
 static HUB: OnceLock<Arc<Hub>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

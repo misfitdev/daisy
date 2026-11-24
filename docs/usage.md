@@ -277,6 +277,8 @@ daisy id
 daisy rotate-key
 ```
 
+To start over from the app, open **Advanced… → Identity** and click **Reset…**. After a confirmation, Daisy stops sharing, removes this system's keys, paired peers, saved arrangements and settings, then reopens. macOS permissions are kept. Pair each peer again to share.
+
 Unlock this system before rotating its device key. See [key protection](security-model.md#keys-at-rest) before copying or deleting identity files.
 
 ## Data

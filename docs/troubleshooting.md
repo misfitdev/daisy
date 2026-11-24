@@ -26,6 +26,12 @@ A `.local` name can follow address changes where local name resolution works. If
 
 If System Settings already shows a grant enabled but Daisy still reports it missing, use **Reset…** beside the permissions, then grant access again. This clears Daisy's permission entries. Granting access only to Terminal does not grant it to Daisy.
 
+## This system's identity is unavailable
+
+1. **Check:** Daisy reports "This system's identity is unavailable" after **Start Sharing**.
+2. **Try:** Click **Reset Identity…** under the message, or open **Advanced… → Identity** and click **Reset…**, then confirm. Daisy removes this system's keys, peers, arrangements and settings, then reopens.
+3. **Expect:** Daisy opens as on first use. Pair each peer again. Remove the old entry for this system on each peer.
+
 ## A new peer is refused
 
 1. **Check:** A member that already has peers normally accepts new systems only during an invitation.
