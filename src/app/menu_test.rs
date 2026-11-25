@@ -6,6 +6,7 @@ pub(super) fn run() {
     use objc2_foundation::{MainThreadMarker, NSString};
     let mtm = MainThreadMarker::new().expect("test runs on the main thread");
     let app = NSApplication::sharedApplication(mtm);
+    startup_problem_without_identity_is_visible(mtm);
     let home = tempfile::tempdir().unwrap();
     let controller = crate::controller::spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
     let target = super::AppDelegate::new(mtm, controller);
@@ -76,6 +77,37 @@ pub(super) fn run() {
     super::map::native_presentation(mtm, &target);
     form_sheets_wrap_and_grow(mtm, &target);
     retention_edits_keep_deadlines_explicit(mtm, &target);
+}
+
+fn startup_problem_without_identity_is_visible(mtm: objc2_foundation::MainThreadMarker) {
+    use crate::controller::{Remedy, Status};
+    use objc2::{DefinedClass, sel};
+
+    let home = tempfile::tempdir().unwrap();
+    let controller = crate::controller::spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
+    let target = super::AppDelegate::new(mtm, controller);
+    let views = super::window::MainViews::new(mtm, &target);
+    target.ivars().main.set(views).ok().unwrap();
+    let title = "Daisy's key could not be read";
+    let detail = "Reset Daisy on this system, then pair each peer again.";
+    *target.ivars().status.borrow_mut() = Status::Problem {
+        summary: title.to_owned(),
+        recovery: detail.to_owned(),
+        remedy: Some(Remedy::ResetIdentity),
+    };
+
+    assert!(target.ivars().me.get().is_none());
+    target.render_status();
+
+    let window = &target.ivars().main.get().unwrap().window;
+    let content = window.contentView().unwrap();
+    assert!(has_text(&content, title));
+    assert!(has_text(&content, detail));
+    let reset = with_action(&content, sel!(resetIdentity:)).unwrap();
+    assert!(!reset.isHidden());
+    assert!(reset.isEnabled());
+
+    target.ivars().controller.shutdown().unwrap();
 }
 
 fn incoming_pairing_dismissal(target: &super::AppDelegate) {

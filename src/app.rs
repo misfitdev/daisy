@@ -222,9 +222,14 @@ define_class!(
             }
 
         #[unsafe(method(pollController:))]
-        fn poll_controller(&self, _timer: &NSTimer) {
+        fn poll_controller(&self, timer: &NSTimer) {
             loop {
                 match self.ivars().controller.try_recv() {
+                    Ok(Some(Event::IdentityReset)) => {
+                        timer.invalidate();
+                        self.handle_event(Event::IdentityReset);
+                        return;
+                    }
                     Ok(Some(event)) => self.handle_event(event),
                     Ok(None) => break,
                     Err(_) => {
@@ -621,7 +626,7 @@ define_class!(
         #[unsafe(method(setupAction:))]
         fn setup_action(&self, _sender: Option<&AnyObject>) {
             match self.setup_step() {
-                Step::Reopen => match crate::macos::install::relaunch() {
+                Step::Reopen => match crate::macos::install::relaunch(None) {
                     Ok(()) => NSApplication::sharedApplication(self.mtm()).terminate(None),
                     Err(error) => self.show_alert(
                         "Daisy could not reopen itself",
@@ -1174,8 +1179,17 @@ impl AppDelegate {
             }
             Event::IdentityReset => {
                 let mtm = self.mtm();
-                if let Err(error) = crate::macos::install::relaunch() {
+                let launch = crate::update::Launch {
+                    home: self.ivars().update_home.borrow().clone(),
+                    name: self.ivars().local_name.borrow().clone(),
+                };
+                if let Err(error) = crate::macos::install::relaunch(Some(launch)) {
                     tracing::error!(error = ?error, "Daisy could not reopen after the reset");
+                    self.show_alert(
+                        "Daisy was reset",
+                        &format!("Daisy could not reopen. Open it again with the same data folder and name. {error:#}"),
+                        NSAlertStyle::Warning,
+                    );
                 }
                 crate::macos::close_sheets_then(mtm, || NSApplication::sharedApplication(mtm).terminate(None));
             }
@@ -1223,6 +1237,10 @@ impl AppDelegate {
         if self.ivars().adding.get() && matches!(*status, Status::Connected { .. }) {
             copy.detail = "Waiting for a new system. Click Start Sharing on it.".to_owned();
         }
+        if let Some(views) = self.ivars().main.get() {
+            views.show_status(if copy.connected { "" } else { &copy.title }, &copy.detail);
+            views.show_remedy(copy.remedy);
+        }
         if let Some(views) = self.ivars().main.get()
             && let Some(me) = self.ivars().me.get()
         {
@@ -1264,8 +1282,6 @@ impl AppDelegate {
                 arranged.as_ref().is_some_and(|view| view.applicable),
                 &unreachable,
             );
-            views.show_status(if copy.connected { "" } else { &copy.title }, &copy.detail);
-            views.show_remedy(copy.remedy);
             views.arrange.show(shown);
         }
         if let Some(item) = self.ivars().status_item.get()

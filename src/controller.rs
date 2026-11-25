@@ -499,7 +499,23 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let me = match Identity::load_or_create(&home.join("identity")) {
         Ok(identity) => identity.public_key(),
         Err(error) => {
-            let _ = send_problem(&events, "Daisy's key could not be read", format!("{error:#}"));
+            if events
+                .send(Event::Status(Status::Problem {
+                    summary: "Daisy's key could not be read".to_owned(),
+                    recovery: format!("{error:#}. Reset Daisy on this system, then pair each peer again."),
+                    remedy: Some(Remedy::ResetIdentity),
+                }))
+                .is_err()
+            {
+                return;
+            }
+            while let Some(command) = commands.recv().await {
+                match command {
+                    Command::ResetIdentity if reset_and_report(&home, &events) => break,
+                    Command::Shutdown => break,
+                    _ => {}
+                }
+            }
             return;
         }
     };
@@ -738,19 +754,9 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     let _ = running.await;
                 }
                 let _ = events.send(Event::Status(Status::Idle));
-                match reset_local_state(&home) {
-                    Ok(()) => {
-                        let _ = events.send(Event::IdentityReset);
-                        // nothing may write the old settings back
-                        break;
-                    }
-                    Err(error) => {
-                        tracing::error!(error = ?error, "local identity could not be reset");
-                        let _ = events.send(Event::Notice {
-                            title: "Daisy could not be reset".to_owned(),
-                            detail: format!("{error:#}. Unlock this system and try again."),
-                        });
-                    }
+                if reset_and_report(&home, &events) {
+                    // nothing may write the old settings back
+                    break;
                 }
             }
         }
@@ -1134,6 +1140,23 @@ fn list_peers(home: &Path) -> Result<Vec<Peer>> {
     PeerStore::open(home)?.list(trust::now())
 }
 
+fn reset_and_report(home: &Path, events: &Sender<Event>) -> bool {
+    match reset_local_state(home) {
+        Ok(()) => {
+            let _ = events.send(Event::IdentityReset);
+            true
+        }
+        Err(error) => {
+            tracing::error!(error = ?error, "local identity could not be reset");
+            let _ = events.send(Event::Notice {
+                title: "Daisy could not be reset".to_owned(),
+                detail: format!("{error:#}. Unlock this system and try again."),
+            });
+            false
+        }
+    }
+}
+
 /// Removes this system's keys, peers, arrangements and settings from `home`.
 /// Only Daisy's own entries go: `home` can be any folder `--home` names. The
 /// device key goes first, so a key macOS still holds keeps its reference and
@@ -1157,11 +1180,7 @@ fn reset_local_state(home: &Path) -> Result<()> {
     remove_if_present(&home.join("trust-v5"), |path| fs::remove_dir_all(path))?;
     for entry in fs::read_dir(home).with_context(|| format!("reading {}", home.display()))? {
         let entry = entry?;
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(crate::update::RELAUNCH_PREFIX)
-        {
+        if crate::update::is_relaunch_filename(&entry.file_name()) {
             remove_if_present(&entry.path(), |path| fs::remove_file(path))?;
         }
     }
@@ -1347,13 +1366,32 @@ mod tests {
             crate::latency::STATS_FILE,
             crate::update::LAST_CHECK_FILE,
             "signing",
-            "update-relaunch-0123.toml",
             "trust-v5/peers.toml",
             "trust-v5/layouts.toml",
         ] {
             fs::write(path.join(name), "x").unwrap();
         }
-        fs::write(path.join("notes.txt"), "kept").unwrap();
+        crate::update::save_relaunch(
+            path,
+            Path::new("/Applications/Daisy.app/Contents/MacOS/daisy"),
+            "1.2.3",
+            &crate::update::Launch {
+                home: path.to_owned(),
+                name: "Local system".to_owned(),
+            },
+            100,
+        )
+        .unwrap();
+        let unrelated = [
+            "notes.txt".to_owned(),
+            "update-relaunch-0123.toml".to_owned(),
+            "update-relaunch-notes.txt".to_owned(),
+            format!("update-relaunch-{}.toml", "g".repeat(64)),
+            format!("update-relaunch-{}.txt", "a".repeat(64)),
+        ];
+        for name in &unrelated {
+            fs::write(path.join(name), "kept").unwrap();
+        }
         fs::create_dir(path.join("projects")).unwrap();
 
         reset_local_state(path).unwrap();
@@ -1363,7 +1401,10 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         left.sort();
-        assert_eq!(left, ["notes.txt", "projects"]);
+        let mut expected = Vec::from(unrelated);
+        expected.push("projects".to_owned());
+        expected.sort();
+        assert_eq!(left, expected);
         let fresh = Identity::load_or_create(&path.join("identity")).unwrap().public_key();
         assert_ne!(fresh, me, "the next launch makes a new identity");
         reset_local_state(path).unwrap();
@@ -1413,6 +1454,28 @@ mod tests {
             )
         });
         handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_startup_key_can_be_reset_without_a_ready_event() {
+        let home = tempfile::tempdir().unwrap();
+        let identity = home.path().join("identity");
+        crate::state_file::write(&identity, b"corrupt identity").unwrap();
+        let handle = spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
+
+        let status = handle.events.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            status,
+            Event::Status(Status::Problem {
+                remedy: Some(Remedy::ResetIdentity),
+                ..
+            })
+        ));
+        handle.send(Command::ResetIdentity).unwrap();
+        let reset = handle.events.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(matches!(reset, Event::IdentityReset));
+        assert!(!identity.exists());
+        handle.stopped.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
     }
 
     #[test]

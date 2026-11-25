@@ -113,8 +113,8 @@ impl Signer {
         Self::save_reference(&self.reference, path)
     }
 
-    /// Deletes the key `path` refers to, then the reference. A key already
-    /// gone from the Keychain still lets the reference go.
+    /// Deletes the Secure Enclave key `path` refers to, then the reference.
+    /// A reference that does not resolve to a Daisy key is removed on its own.
     pub fn forget(path: &Path) -> Result<()> {
         Self::forget_with_delete(path, backend::delete)
     }
