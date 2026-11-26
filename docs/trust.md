@@ -44,4 +44,4 @@ An organization can [disable this setting](administration.md). See the [pairing 
 
 The CLI can set a fixed term in days that connections do not extend. See [trust commands](usage.md#change-trust-from-the-command-line).
 
-`daisy rotate-key` replaces both local identities and requires every peer to pair again. Unlock this system before rotating its device key. See [identity commands](usage.md#inspect-or-replace-identity) and [key protection](security-model.md#keys-at-rest).
+`daisy rotate-key` replaces both local identities and requires every peer to pair again. **Advanced… → Identity → Reset…** also removes this system's paired peers, saved arrangements and settings, then reopens Daisy. Unlock this system before rotating its device key. See [identity commands](usage.md#inspect-or-replace-identity) and [key protection](security-model.md#keys-at-rest).

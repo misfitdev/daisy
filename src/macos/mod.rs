@@ -25,6 +25,18 @@ pub use pointer::{main_run_loop_starting, restore as restore_pointer};
 
 use crate::input::Rect;
 
+/// Closes every sheet, then runs `quit`. macOS refuses to quit an app while a
+/// sheet is open, so an update's relaunch or Reset and Quit from the Advanced
+/// sheet would do nothing until someone closed it.
+pub fn close_sheets_then(mtm: objc2::MainThreadMarker, quit: impl FnOnce()) {
+    for window in objc2_app_kit::NSApplication::sharedApplication(mtm).windows() {
+        while let Some(sheet) = window.attachedSheet() {
+            window.endSheet(&sheet);
+        }
+    }
+    quit();
+}
+
 /// Where macOS has the cursor now, in global points. A WindowServer round
 /// trip: never call it from the event tap, which has the event's own location.
 pub(crate) fn pointer_location() -> Option<(f64, f64)> {

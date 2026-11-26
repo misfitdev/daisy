@@ -72,8 +72,7 @@ impl Signer {
                 if fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
                     bail!("device identity is readable by other users; restrict it with chmod 600");
                 }
-                Self::from_reference(reference)
-                    .context("device identity is unavailable on this system; reset the identity and pair again")
+                Self::from_reference(reference).context(Unavailable)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let signer = Self::generate()?;
@@ -114,6 +113,23 @@ impl Signer {
         Self::save_reference(&self.reference, path)
     }
 
+    /// Deletes the Secure Enclave key `path` refers to, then the reference.
+    /// A reference that does not resolve to a Daisy key is removed on its own.
+    pub fn forget(path: &Path) -> Result<()> {
+        Self::forget_with_delete(path, backend::delete)
+    }
+
+    fn forget_with_delete(path: &Path, delete: impl Fn(&[u8]) -> Result<()>) -> Result<()> {
+        let _lock = crate::identity::lock(path)?;
+        let reference = match fs::read(path) {
+            Ok(reference) => reference,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).context("reading device identity"),
+        };
+        delete(&reference).context("removing device identity")?;
+        fs::remove_file(path).context("removing device identity reference")
+    }
+
     fn save_reference(reference: &[u8], path: &Path) -> Result<()> {
         crate::state_file::write(path, reference).context("saving device identity")
     }
@@ -124,6 +140,24 @@ impl Signer {
 
     pub fn sign_bytes(&self, message: &[u8]) -> Result<Vec<u8>> {
         backend::sign(&self.reference, message)
+    }
+}
+
+/// The saved device key cannot be used here, typically because the Keychain
+/// no longer holds it. Only resetting this system's identity recovers.
+#[derive(Debug)]
+pub struct Unavailable;
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("device identity is unavailable on this system; reset the identity and pair again")
+    }
+}
+
+impl Unavailable {
+    /// Whether `error`, however wrapped, began as an unusable device key.
+    pub fn caused(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<Self>().is_some()
     }
 }
 
@@ -159,6 +193,46 @@ mod tests {
         assert_eq!(deleted.len(), 2);
         assert_eq!(deleted[0], original.reference);
         assert_ne!(deleted[1], original.reference);
+    }
+
+    #[test]
+    fn an_unusable_key_is_recognized_however_wrapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device-identity");
+        crate::state_file::write(&path, b"not a key reference").unwrap();
+        let error = Signer::load_or_create(&path)
+            .err()
+            .unwrap()
+            .context("starting the session");
+        assert!(Unavailable::caused(&error));
+        assert!(!Unavailable::caused(&anyhow::anyhow!("connecting failed")));
+    }
+
+    #[test]
+    fn forgetting_deletes_the_key_before_its_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device-identity");
+        let original = Signer::load_or_create(&path).unwrap();
+
+        let error = Signer::forget_with_delete(&path, |_| bail!("injected deletion failure"))
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains("injected deletion failure"));
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original.reference,
+            "a key still held keeps its reference"
+        );
+
+        let deleted = RefCell::new(Vec::new());
+        Signer::forget_with_delete(&path, |reference| {
+            deleted.borrow_mut().push(reference.to_vec());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(*deleted.borrow(), [original.reference]);
+        assert!(!path.exists());
+        Signer::forget_with_delete(&path, |_| panic!("nothing left to delete")).unwrap();
     }
 }
 

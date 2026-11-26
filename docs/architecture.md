@@ -136,6 +136,8 @@ The command-line `connect` command runs `service::connect` as a loop. Once a ses
 - `settings.toml`: the menu-bar app's last connection, control and trust choices, written atomically with mode `0600`.
 - `last-update-check.toml`: when the last successful update check ran and the newer release it found, if any, written atomically with mode `0600`.
 
+**Advanced… → Identity → Reset…** stops sharing, deletes the Secure Enclave key, then removes every file above and any pending update relaunch record, and reopens Daisy. It removes only these names, so a custom `--home` folder keeps anything else. If the Keychain refuses to delete the key, `device-identity` stays so the reset can be retried.
+
 `trust-v5/peers.toml` is the trust authority. Every change locks it, rereads it and writes it atomically. An active session watches the paired key, so a change from the menu-bar app or another process revokes control promptly. The UI aborts its current task immediately when its **Forget** action is used; the file watcher remains the external-edit backstop.
 
 `--home` or `DAISY_HOME` points all of these somewhere else and can be used to run two identities on one system for testing.

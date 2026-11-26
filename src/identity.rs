@@ -3,7 +3,7 @@
 use std::fmt;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -55,6 +55,10 @@ impl fmt::Display for PublicKey {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{} is not a daisy identity", .0.display())]
+pub(crate) struct CorruptIdentity(PathBuf);
+
 /// This system's long-term key pair.
 #[derive(Clone)]
 pub struct Identity {
@@ -78,7 +82,10 @@ impl Identity {
     /// Load the identity at `path`, creating and saving a new one if absent.
     pub fn load_or_create(path: &Path) -> Result<Self> {
         let _lock = lock(path)?;
-        if path.exists() {
+        if path
+            .try_exists()
+            .with_context(|| format!("checking {}", path.display()))?
+        {
             return Self::load(path);
         }
         let identity = Self::generate()?;
@@ -109,7 +116,7 @@ impl Identity {
 
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         if bytes.len() != 2 * KEY_LEN {
-            bail!("{} is not a daisy identity", path.display());
+            return Err(CorruptIdentity(path.to_owned()).into());
         }
         let (private, public) = bytes.split_at(KEY_LEN);
         Ok(Self {

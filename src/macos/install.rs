@@ -83,20 +83,23 @@ pub fn carry_out(planned: &Move, bundle_id: &str) -> Result<()> {
         .args(["-dr", "com.apple.quarantine"])
         .arg(&planned.destination)
         .status();
-    relaunch_from(&planned.destination, planned.eject.as_deref())
+    relaunch_from(&planned.destination, planned.eject.as_deref(), None)
 }
 
 /// Arranges for Daisy to open again from where it really lives once this
 /// process exits. The caller then quits.
-pub fn relaunch() -> Result<()> {
+pub fn relaunch(mut launch: Option<crate::update::Launch>) -> Result<()> {
     let bundle = running_bundle().context("Daisy is not running from an app bundle")?;
     let original = original_path(&bundle).unwrap_or(bundle);
-    relaunch_from(&original, None)
+    if let Some(launch) = launch.as_mut() {
+        launch.home = std::path::absolute(&launch.home)?;
+    }
+    relaunch_from(&original, None, launch.as_ref())
 }
 
-fn relaunch_from(bundle: &Path, eject: Option<&Path>) -> Result<()> {
+fn relaunch_from(bundle: &Path, eject: Option<&Path>, launch: Option<&crate::update::Launch>) -> Result<()> {
     std::process::Command::new("/bin/sh")
-        .args(install::relaunch_command(std::process::id(), bundle, eject))
+        .args(install::relaunch_command(std::process::id(), bundle, eject, launch))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

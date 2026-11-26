@@ -222,15 +222,21 @@ define_class!(
             }
 
         #[unsafe(method(pollController:))]
-        fn poll_controller(&self, _timer: &NSTimer) {
+        fn poll_controller(&self, timer: &NSTimer) {
             loop {
                 match self.ivars().controller.try_recv() {
+                    Ok(Some(Event::IdentityReset)) => {
+                        timer.invalidate();
+                        self.handle_event(Event::IdentityReset);
+                        return;
+                    }
                     Ok(Some(event)) => self.handle_event(event),
                     Ok(None) => break,
                     Err(_) => {
                         self.apply_status(Status::Problem {
                             summary: "Daisy's background controller stopped".to_owned(),
                             recovery: "Quit and reopen Daisy.".to_owned(),
+                            remedy: None,
                         });
                         break;
                     }
@@ -409,6 +415,29 @@ define_class!(
             let _ = self.ivars().controller.send(Command::Stop);
         }
 
+        #[unsafe(method(resetIdentity:))]
+        fn reset_identity(&self, _sender: Option<&AnyObject>) {
+            let alert = NSAlert::new(self.mtm());
+            alert.setAlertStyle(NSAlertStyle::Critical);
+            alert.setMessageText(&NSString::from_str("Reset Daisy on this system?"));
+            alert.setInformativeText(&NSString::from_str(
+                "Use this when Daisy reports that this system's identity is unavailable, or to \
+                 start over. Daisy stops sharing, then removes this system's keys, its paired \
+                 peers, saved arrangements and settings. Your peers keep their copy of this \
+                 system until you remove it there. To share again, pair each peer with this \
+                 system again. macOS permissions are kept. Daisy then reopens.",
+            ));
+            alert.addButtonWithTitle(&NSString::from_str("Reset and Reopen"));
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            if let Some(reset) = alert.buttons().firstObject() {
+                reset.setHasDestructiveAction(true);
+            }
+            if alert.runModal() != NSAlertFirstButtonReturn {
+                return;
+            }
+            let _ = self.ivars().controller.send(Command::ResetIdentity);
+        }
+
         #[unsafe(method(resetPermissions:))]
         fn reset_permissions(&self, _sender: Option<&AnyObject>) {
             let alert = NSAlert::new(self.mtm());
@@ -424,17 +453,11 @@ define_class!(
             if alert.runModal() != NSAlertFirstButtonReturn {
                 return;
             }
-            match permissions::reset(BUNDLE_ID) {
-                Ok(()) => NSApplication::sharedApplication(self.mtm()).terminate(None),
-                Err(error) => self.show_alert(
-                    "Permissions could not be reset",
-                    &format!(
-                        "Remove Daisy from Accessibility and Input Monitoring in System Settings → \
-                         Privacy & Security, then reopen Daisy. ({error})"
-                    ),
-                    NSAlertStyle::Warning,
-                ),
-            }
+            let mtm = self.mtm();
+            self.reset_permissions_then_quit(
+                || permissions::reset(BUNDLE_ID),
+                || NSApplication::sharedApplication(mtm).terminate(None),
+            );
         }
 
         #[unsafe(method(requestAccessibility:))]
@@ -603,7 +626,7 @@ define_class!(
         #[unsafe(method(setupAction:))]
         fn setup_action(&self, _sender: Option<&AnyObject>) {
             match self.setup_step() {
-                Step::Reopen => match crate::macos::install::relaunch() {
+                Step::Reopen => match crate::macos::install::relaunch(None) {
                     Ok(()) => NSApplication::sharedApplication(self.mtm()).terminate(None),
                     Err(error) => self.show_alert(
                         "Daisy could not reopen itself",
@@ -700,6 +723,20 @@ define_class!(
 );
 
 impl AppDelegate {
+    fn reset_permissions_then_quit(&self, reset: impl FnOnce() -> std::io::Result<()>, quit: impl FnOnce()) {
+        match reset() {
+            Ok(()) => crate::macos::close_sheets_then(self.mtm(), quit),
+            Err(error) => self.show_alert(
+                "Permissions could not be reset",
+                &format!(
+                    "Remove Daisy from Accessibility and Input Monitoring in System Settings → \
+                     Privacy & Security, then reopen Daisy. ({error})"
+                ),
+                NSAlertStyle::Warning,
+            ),
+        }
+    }
+
     fn new(mtm: MainThreadMarker, controller: Handle) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(AppDelegateIvars {
             preview: Cell::new(false),
@@ -1136,6 +1173,26 @@ impl AppDelegate {
             Event::Notice { title, detail } => {
                 self.show_alert(&title, &detail, NSAlertStyle::Informational);
             }
+            Event::Me(me) => {
+                self.ivars().me.set(Some(me));
+                self.render_status();
+            }
+            Event::IdentityReset => {
+                let mtm = self.mtm();
+                let launch = crate::update::Launch {
+                    home: self.ivars().update_home.borrow().clone(),
+                    name: self.ivars().local_name.borrow().clone(),
+                };
+                if let Err(error) = crate::macos::install::relaunch(Some(launch)) {
+                    tracing::error!(error = ?error, "Daisy could not reopen after the reset");
+                    self.show_alert(
+                        "Daisy was reset",
+                        &format!("Daisy could not reopen. Open it again with the same data folder and name. {error:#}"),
+                        NSAlertStyle::Warning,
+                    );
+                }
+                crate::macos::close_sheets_then(mtm, || NSApplication::sharedApplication(mtm).terminate(None));
+            }
         }
     }
 
@@ -1180,6 +1237,10 @@ impl AppDelegate {
         if self.ivars().adding.get() && matches!(*status, Status::Connected { .. }) {
             copy.detail = "Waiting for a new system. Click Start Sharing on it.".to_owned();
         }
+        if let Some(views) = self.ivars().main.get() {
+            views.show_status(if copy.connected { "" } else { &copy.title }, &copy.detail);
+            views.show_remedy(copy.remedy);
+        }
         if let Some(views) = self.ivars().main.get()
             && let Some(me) = self.ivars().me.get()
         {
@@ -1221,7 +1282,6 @@ impl AppDelegate {
                 arranged.as_ref().is_some_and(|view| view.applicable),
                 &unreachable,
             );
-            views.show_status(if copy.connected { "" } else { &copy.title }, &copy.detail);
             views.arrange.show(shown);
         }
         if let Some(item) = self.ivars().status_item.get()
@@ -1820,6 +1880,7 @@ struct StatusCopy {
     /// The menu's status line: the title, with latency once measured.
     menu: String,
     connected: bool,
+    remedy: Option<crate::controller::Remedy>,
 }
 
 /// `links` is each running link's latest report.
@@ -1829,6 +1890,7 @@ fn status_copy(status: &Status, links: &std::collections::BTreeMap<crate::identi
         title,
         detail,
         connected: false,
+        remedy: None,
     };
     match status {
         Status::Idle => plain(
@@ -1902,9 +1964,17 @@ fn status_copy(status: &Status, links: &std::collections::BTreeMap<crate::identi
                 detail,
                 menu,
                 connected: true,
+                remedy: None,
             }
         }
-        Status::Problem { summary, recovery } => plain(summary.clone(), recovery.clone()),
+        Status::Problem {
+            summary,
+            recovery,
+            remedy,
+        } => StatusCopy {
+            remedy: *remedy,
+            ..plain(summary.clone(), recovery.clone())
+        },
     }
 }
 
@@ -2019,6 +2089,23 @@ mod tests {
         assert_eq!(copy.menu, "Connected to Studio and Desk · Studio 4 ms, Desk 12 ms");
         let copy = status_copy(&connected(&["Studio", "Desk", "Den"]), &Default::default());
         assert_eq!(copy.title, "Connected to Studio and 2 others");
+    }
+
+    #[test]
+    fn a_problem_offers_its_remedy() {
+        let problem = |remedy| Status::Problem {
+            summary: "This system's identity is unavailable".to_owned(),
+            recovery: "Reset Daisy on this system, then pair each peer again.".to_owned(),
+            remedy,
+        };
+        let copy = status_copy(
+            &problem(Some(crate::controller::Remedy::ResetIdentity)),
+            &Default::default(),
+        );
+        assert_eq!(copy.remedy, Some(crate::controller::Remedy::ResetIdentity));
+        assert_eq!(copy.title, "This system's identity is unavailable");
+        assert_eq!(status_copy(&problem(None), &Default::default()).remedy, None);
+        assert_eq!(status_copy(&Status::Idle, &Default::default()).remedy, None);
     }
 
     #[test]

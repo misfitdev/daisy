@@ -1,6 +1,6 @@
 //! Secure Enclave keys persisted in the Data Protection Keychain.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use security_framework::access_control::{ProtectionMode, SecAccessControl};
 use security_framework::item::{ItemSearchOptions, KeyClass, Location, Reference, SearchResult};
 use security_framework::key::{Algorithm, GenerateKeyOptions, KeyType, SecKey, Token};
@@ -29,10 +29,18 @@ pub fn create() -> Result<Vec<u8>> {
     Ok(label.into_bytes())
 }
 
+#[derive(Debug, thiserror::Error)]
+enum UnresolvedReference {
+    #[error("invalid device identity reference")]
+    Invalid,
+    #[error("device identity is not a Secure Enclave key")]
+    NotEnclave,
+}
+
 fn load(reference: &[u8]) -> Result<SecKey> {
-    let label = std::str::from_utf8(reference).context("invalid device identity reference")?;
+    let label = std::str::from_utf8(reference).context(UnresolvedReference::Invalid)?;
     if !label.starts_with("dev.misfit.daisy.device.") {
-        bail!("invalid device identity reference");
+        return Err(UnresolvedReference::Invalid.into());
     }
     let results = ItemSearchOptions::new()
         .key_class(KeyClass::private())
@@ -57,7 +65,7 @@ fn load(reference: &[u8]) -> Result<SecKey> {
                 })
             };
             if !enclave {
-                bail!("device identity is not a Secure Enclave key");
+                return Err(UnresolvedReference::NotEnclave.into());
             }
             Ok(key)
         }
@@ -82,13 +90,36 @@ pub fn sign(reference: &[u8], message: &[u8]) -> Result<Vec<u8>> {
 pub fn delete(reference: &[u8]) -> Result<()> {
     match load(reference) {
         Ok(key) => key.delete().context("removing Secure Enclave identity"),
-        Err(error)
-            if error
-                .downcast_ref::<security_framework::base::Error>()
-                .is_some_and(|source| source.code() == security_framework_sys::base::errSecItemNotFound) =>
-        {
-            Ok(())
-        }
+        Err(error) if unresolved_reference(&error) => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+fn unresolved_reference(error: &anyhow::Error) -> bool {
+    error.is::<UnresolvedReference>()
+        || error
+            .downcast_ref::<security_framework::base::Error>()
+            .is_some_and(|source| source.code() == security_framework_sys::base::errSecItemNotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use security_framework::base::Error;
+    use security_framework_sys::base::{errSecAuthFailed, errSecItemNotFound};
+
+    #[test]
+    fn malformed_references_require_no_keychain_deletion() {
+        delete(&[0xff]).unwrap();
+        delete(b"not a Daisy key label").unwrap();
+    }
+
+    #[test]
+    fn deletion_only_ignores_lookup_errors_for_unresolved_keys() {
+        assert!(unresolved_reference(&UnresolvedReference::NotEnclave.into()));
+        assert!(unresolved_reference(&Error::from_code(errSecItemNotFound).into()));
+        assert!(!unresolved_reference(
+            &anyhow::Error::new(Error::from_code(errSecAuthFailed)).context("looking up Secure Enclave identity")
+        ));
     }
 }

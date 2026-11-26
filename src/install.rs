@@ -91,16 +91,35 @@ pub fn replace(
 /// `/bin/sh` arguments that wait for process `pid` to exit, open `bundle`,
 /// then eject `eject` if given. Paths travel as positional parameters, never
 /// as script text.
-pub fn relaunch_command(pid: u32, bundle: &Path, eject: Option<&Path>) -> Vec<String> {
-    vec![
-        "-c".to_owned(),
-        r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; /usr/bin/open "$2"; [ -z "$3" ] || /usr/bin/hdiutil detach -quiet "$3""#
-            .to_owned(),
-        "daisy-relaunch".to_owned(),
-        pid.to_string(),
-        bundle.display().to_string(),
-        eject.map(|path| path.display().to_string()).unwrap_or_default(),
-    ]
+pub fn relaunch_command(
+    pid: u32,
+    bundle: &Path,
+    eject: Option<&Path>,
+    launch: Option<&crate::update::Launch>,
+) -> Vec<std::ffi::OsString> {
+    let script = r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
+bundle=$2
+eject=$3
+shift 3
+/usr/bin/open "$bundle" "$@"
+[ -z "$eject" ] || /usr/bin/hdiutil detach -quiet "$eject""#;
+    let mut command = vec![
+        "-c".into(),
+        script.into(),
+        "daisy-relaunch".into(),
+        pid.to_string().into(),
+        bundle.as_os_str().to_owned(),
+        eject.map(|path| path.as_os_str().to_owned()).unwrap_or_default(),
+    ];
+    if let Some(launch) = launch {
+        command.extend([
+            "--args".into(),
+            "--home".into(),
+            launch.home.as_os_str().to_owned(),
+            format!("--name={}", launch.name).into(),
+        ]);
+    }
+    command
 }
 
 #[cfg(test)]
@@ -263,10 +282,30 @@ mod tests {
     #[test]
     fn relaunch_passes_paths_as_arguments() {
         let hostile = Path::new("/Volumes/x\"; rm -rf ~; \"/Daisy.app");
-        let command = relaunch_command(42, hostile, Some(Path::new("/Volumes/x")));
-        assert!(!command[1].contains("rm -rf"));
-        assert_eq!(&command[3..], ["42", &hostile.display().to_string(), "/Volumes/x"]);
-        assert_eq!(relaunch_command(42, hostile, None)[5], "");
+        let command = relaunch_command(42, hostile, Some(Path::new("/Volumes/x")), None);
+        assert!(!command[1].to_str().unwrap().contains("rm -rf"));
+        assert_eq!(&command[3..], ["42", hostile.to_str().unwrap(), "/Volumes/x"]);
+        assert_eq!(relaunch_command(42, hostile, None, None)[5], "");
+    }
+
+    #[test]
+    fn reset_relaunch_passes_the_selected_profile_to_open() {
+        let launch = crate::update::Launch {
+            home: PathBuf::from("/tmp/a custom profile"),
+            name: "-Local system".to_owned(),
+        };
+        let mut command = relaunch_command(u32::MAX, Path::new("/Applications/Daisy.app"), None, Some(&launch));
+        command[1] = command[1]
+            .to_str()
+            .unwrap()
+            .replace("/usr/bin/open", r#"printf '%s\n'"#)
+            .into();
+        let output = std::process::Command::new("/bin/sh").args(command).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "/Applications/Daisy.app\n--args\n--home\n/tmp/a custom profile\n--name=-Local system\n"
+        );
     }
 
     #[test]
@@ -277,10 +316,14 @@ mod tests {
             u32::MAX,
             Path::new("/Applications/Daisy.app"),
             Some(Path::new("/Volumes/Daisy")),
+            None,
         );
         command[1] = command[1]
+            .to_str()
+            .unwrap()
             .replace("/usr/bin/open", &format!("echo open >> {}; echo", log.display()))
-            .replace("/usr/bin/hdiutil", &format!("echo eject >> {}; echo", log.display()));
+            .replace("/usr/bin/hdiutil", &format!("echo eject >> {}; echo", log.display()))
+            .into();
         let status = std::process::Command::new("/bin/sh")
             .args(&command)
             .stdout(std::process::Stdio::null())

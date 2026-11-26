@@ -6,9 +6,17 @@ pub(super) fn run() {
     use objc2_foundation::{MainThreadMarker, NSString};
     let mtm = MainThreadMarker::new().expect("test runs on the main thread");
     let app = NSApplication::sharedApplication(mtm);
+    startup_problem_without_identity_is_visible(mtm);
     let home = tempfile::tempdir().unwrap();
     let controller = crate::controller::spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
     let target = super::AppDelegate::new(mtm, controller);
+    let rotated = crate::identity::PublicKey::from_bytes(&[9; 32]).unwrap();
+    target.handle_event(crate::controller::Event::Me(rotated));
+    assert_eq!(
+        target.ivars().me.get(),
+        Some(rotated),
+        "the window follows the key the session runs with"
+    );
     let add = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -64,11 +72,42 @@ pub(super) fn run() {
     peer_row_dialogs_are_sheets(mtm, &target, home.path());
     incoming_pairing_dismissal(&target);
     update_controls_report_and_follow_the_switch(mtm, &target);
-    an_update_relaunch_closes_the_advanced_sheet(mtm, &target);
+    quitting_closes_the_advanced_sheet(mtm, &target);
     arrangement_confirmation(mtm);
     super::map::native_presentation(mtm, &target);
     form_sheets_wrap_and_grow(mtm, &target);
     retention_edits_keep_deadlines_explicit(mtm, &target);
+}
+
+fn startup_problem_without_identity_is_visible(mtm: objc2_foundation::MainThreadMarker) {
+    use crate::controller::{Remedy, Status};
+    use objc2::{DefinedClass, sel};
+
+    let home = tempfile::tempdir().unwrap();
+    let controller = crate::controller::spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
+    let target = super::AppDelegate::new(mtm, controller);
+    let views = super::window::MainViews::new(mtm, &target);
+    target.ivars().main.set(views).ok().unwrap();
+    let title = "Daisy's key could not be read";
+    let detail = "Reset Daisy on this system, then pair each peer again.";
+    *target.ivars().status.borrow_mut() = Status::Problem {
+        summary: title.to_owned(),
+        recovery: detail.to_owned(),
+        remedy: Some(Remedy::ResetIdentity),
+    };
+
+    assert!(target.ivars().me.get().is_none());
+    target.render_status();
+
+    let window = &target.ivars().main.get().unwrap().window;
+    let content = window.contentView().unwrap();
+    assert!(has_text(&content, title));
+    assert!(has_text(&content, detail));
+    let reset = with_action(&content, sel!(resetIdentity:)).unwrap();
+    assert!(!reset.isHidden());
+    assert!(reset.isEnabled());
+
+    target.ivars().controller.shutdown().unwrap();
 }
 
 fn incoming_pairing_dismissal(target: &super::AppDelegate) {
@@ -143,14 +182,19 @@ fn incoming_pairing_dismissal(target: &super::AppDelegate) {
     panel.close();
 }
 
-/// macOS refuses to quit an app with a sheet open, so an update's relaunch
-/// waited while Advanced, where Check Now lives, was still showing.
-fn an_update_relaunch_closes_the_advanced_sheet(mtm: objc2_foundation::MainThreadMarker, target: &super::AppDelegate) {
+/// macOS refuses to quit an app with a sheet open, so an update's relaunch,
+/// and Reset and Quit on the Advanced sheet, did nothing while it showed.
+fn quitting_closes_the_advanced_sheet(mtm: objc2_foundation::MainThreadMarker, target: &super::AppDelegate) {
     use objc2::{DefinedClass, MainThreadOnly};
     use objc2_app_kit::{NSBackingStoreType, NSWindow, NSWindowStyleMask};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
     let advanced = &target.ivars().advanced.get().expect("Advanced was built above").window;
+    with_action(&advanced.contentView().unwrap(), objc2::sel!(resetIdentity:)).expect("Advanced offers Reset identity");
+    assert!(objc2_foundation::NSObjectProtocol::respondsToSelector(
+        target,
+        objc2::sel!(resetIdentity:)
+    ));
     // SAFETY: a plain titled window, retained for the rest of the check.
     let main = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -163,15 +207,29 @@ fn an_update_relaunch_closes_the_advanced_sheet(mtm: objc2_foundation::MainThrea
     };
     // SAFETY: the window stays retained by `main` until the check ends.
     unsafe { main.setReleasedWhenClosed(false) };
-    main.beginSheet_completionHandler(advanced, None);
-    wait_for("the Advanced sheet to attach", || main.attachedSheet().is_some());
+    let attach = || {
+        main.beginSheet_completionHandler(advanced, None);
+        wait_for("the Advanced sheet to attach", || main.attachedSheet().is_some());
+    };
 
-    let resumed = std::cell::Cell::new(false);
-    crate::macos::update::relaunch(mtm, || {
+    attach();
+    let relaunched = std::cell::Cell::new(false);
+    crate::macos::close_sheets_then(mtm, || {
         assert!(main.attachedSheet().is_none(), "no sheet may hold up the relaunch");
-        resumed.set(true);
+        relaunched.set(true);
     });
-    assert!(resumed.get(), "the relaunch goes ahead");
+    assert!(relaunched.get(), "the relaunch goes ahead");
+
+    attach();
+    let quit = std::cell::Cell::new(false);
+    target.reset_permissions_then_quit(
+        || Ok(()),
+        || {
+            assert!(main.attachedSheet().is_none(), "no sheet may hold up Reset and Quit");
+            quit.set(true);
+        },
+    );
+    assert!(quit.get(), "Reset and Quit goes ahead");
     main.close();
 }
 
@@ -241,7 +299,8 @@ fn arrangement_confirmation(mtm: objc2_foundation::MainThreadMarker) {
         let arranged = target.ivars().arranged.borrow();
         let Some(view) = arranged.as_ref() else { return false };
         let setup = view.snapshot.as_ref().unwrap().members.clone();
-        store.layouts().unwrap().get(&setup).is_some()
+        // the controller saves before it reports the view, so wait for both
+        store.layouts().unwrap().get(&setup).is_some() && view.applicable
     });
     assert!(views.apply_arrangement.isEnabled());
     let saved_offset = target
@@ -566,6 +625,20 @@ fn retention_edits_keep_deadlines_explicit(mtm: objc2_foundation::MainThreadMark
         "explicitly choosing idle trust changes even an equal-length deadline"
     );
     parent.window.close();
+}
+
+fn with_action(
+    view: &objc2_app_kit::NSView,
+    action: objc2::runtime::Sel,
+) -> Option<objc2::rc::Retained<objc2_app_kit::NSButton>> {
+    use objc2::Message;
+    view.subviews().iter().find_map(|child| {
+        child
+            .downcast_ref::<objc2_app_kit::NSButton>()
+            .filter(|button| button.action() == Some(action))
+            .map(|button| button.retain())
+            .or_else(|| with_action(&child, action))
+    })
 }
 
 fn click(sheet: &objc2_app_kit::NSWindow, title: &str) {

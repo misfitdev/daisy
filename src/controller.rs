@@ -137,6 +137,8 @@ pub enum Command {
     SaveArrangement(crate::share::Confirmation),
     ApplyArrangement(crate::share::Confirmation),
     Shutdown,
+    /// Stop sharing, then remove this system's keys, peers and settings.
+    ResetIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,7 +168,14 @@ pub enum Status {
     Problem {
         summary: String,
         recovery: String,
+        /// A fix the window can offer as a button.
+        remedy: Option<Remedy>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remedy {
+    ResetIdentity,
 }
 
 pub enum Event {
@@ -216,6 +225,10 @@ pub enum Event {
     },
     /// Where every member's displays sit, while the group runs.
     Arranged(crate::share::ArrangementView),
+    /// `ResetIdentity` finished; the controller has stopped.
+    IdentityReset,
+    /// The key a session started with.
+    Me(PublicKey),
 }
 
 pub struct Handle {
@@ -263,6 +276,7 @@ pub fn spawn(home: PathBuf, name: String) -> Result<Handle> {
                     let _ = event_tx.send(Event::Status(Status::Problem {
                         summary: "Daisy could not start".to_owned(),
                         recovery: format!("Restart Daisy. {error}"),
+                        remedy: None,
                     }));
                 }
             }
@@ -485,7 +499,29 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let me = match Identity::load_or_create(&home.join("identity")) {
         Ok(identity) => identity.public_key(),
         Err(error) => {
-            let _ = send_problem(&events, "Daisy's key could not be read", format!("{error:#}"));
+            let corrupt = error.is::<crate::identity::CorruptIdentity>();
+            let next_step = if corrupt {
+                "Reset Daisy on this system, then pair each peer again."
+            } else {
+                "Check that Daisy can read and write its data folder, then reopen Daisy."
+            };
+            if events
+                .send(Event::Status(Status::Problem {
+                    summary: "Daisy's key could not be read".to_owned(),
+                    recovery: format!("{error:#}. {next_step}"),
+                    remedy: corrupt.then_some(Remedy::ResetIdentity),
+                }))
+                .is_err()
+            {
+                return;
+            }
+            while let Some(command) = commands.recv().await {
+                match command {
+                    Command::ResetIdentity if reset_and_report(&home, &events) => break,
+                    Command::Shutdown => break,
+                    _ => {}
+                }
+            }
             return;
         }
     };
@@ -557,6 +593,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             Command::Start { settings, side_chosen } => {
                 if let Some(running) = session.take() {
                     running.abort();
+                    let _ = running.await;
                 }
                 stored.last_session = settings.clone();
                 stored.sharing = true;
@@ -596,6 +633,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             Command::Stop => {
                 if let Some(running) = session.take() {
                     running.abort();
+                    let _ = running.await;
                 }
                 stored.sharing = false;
                 if let Err(error) = save_settings(&home, &stored) {
@@ -718,6 +756,18 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                 }
                 break;
             }
+            Command::ResetIdentity => {
+                if let Some(running) = session.take() {
+                    running.abort();
+                    let _ = running.await;
+                }
+                stored.sharing = false;
+                let _ = events.send(Event::Status(Status::Idle));
+                if reset_and_report(&home, &events) {
+                    // nothing may write the old settings back
+                    break;
+                }
+            }
         }
     }
 }
@@ -818,6 +868,8 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
     let Start { settings, side_chosen } = start;
     let result = async {
         let identity = Identity::load_or_create(&home.join("identity"))?;
+        // `daisy rotate-key` can replace the key while the app runs
+        let _ = events.send(Event::Me(identity.public_key()));
         let signer = crate::introduce::Signer::load_or_create(&home.join("device-identity"))?;
         let peers = PeerStore::open(&home)?;
         let choose_side = AtomicBool::new(side_chosen);
@@ -856,10 +908,7 @@ async fn run_session(home: PathBuf, name: String, start: Start, live: Live, even
         }
         Err(error) => {
             tracing::error!(error = ?error, "connection session stopped");
-            let _ = match version_copy(&home, &error) {
-                Some((title, detail)) => send_problem(&events, &title, detail),
-                None => send_problem(&events, "Connection stopped", recovery_for(&error)),
-            };
+            let _ = events.send(Event::Status(session_problem(&home, &error)));
         }
     }
 }
@@ -1100,6 +1149,70 @@ fn list_peers(home: &Path) -> Result<Vec<Peer>> {
     PeerStore::open(home)?.list(trust::now())
 }
 
+fn reset_and_report(home: &Path, events: &Sender<Event>) -> bool {
+    match reset_local_state(home) {
+        Ok(()) => {
+            let _ = events.send(Event::IdentityReset);
+            true
+        }
+        Err(error) => {
+            tracing::error!(error = ?error, "local identity could not be reset");
+            let mut detail = format!("{error:#}. Unlock this system and try again.");
+            if let Err(error) = disable_saved_sharing(home) {
+                tracing::error!(error = ?error, "sharing state could not be saved after failed reset");
+                detail.push_str(&format!(
+                    "\n\nDaisy could not save that sharing was stopped. It may resume on the next launch. {error:#}"
+                ));
+            }
+            let _ = events.send(Event::Notice {
+                title: "Daisy could not be reset".to_owned(),
+                detail,
+            });
+            false
+        }
+    }
+}
+
+/// Removes this system's keys, peers, arrangements and settings from `home`.
+/// Only Daisy's own entries go: `home` can be any folder `--home` names. The
+/// device key goes first, so a key macOS still holds keeps its reference and
+/// the reset can be retried.
+fn reset_local_state(home: &Path) -> Result<()> {
+    let identity = home.join("identity");
+    // Keep both lock files so other processes continue to lock the same inodes.
+    let _identity_lock = crate::identity::lock(&identity)?;
+    crate::device::Signer::forget(&home.join("device-identity"))?;
+    remove_if_present(&identity, |path| fs::remove_file(path))?;
+    let files = [
+        "signing",
+        "peers.lock",
+        SETTINGS_FILE,
+        crate::latency::STATS_FILE,
+        crate::update::LAST_CHECK_FILE,
+        crate::diagnostics::SOCKET,
+    ];
+    for name in files {
+        remove_if_present(&home.join(name), |path| fs::remove_file(path))?;
+    }
+    remove_if_present(&home.join("trust-v5"), |path| fs::remove_dir_all(path))?;
+    for entry in fs::read_dir(home).with_context(|| format!("reading {}", home.display()))? {
+        let entry = entry?;
+        if crate::update::is_relaunch_filename(&entry.file_name()) {
+            remove_if_present(&entry.path(), |path| fs::remove_file(path))?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_if_present(path: &Path, remove: impl FnOnce(&Path) -> std::io::Result<()>) -> Result<()> {
+    match remove(path) {
+        Err(error) if error.kind() != ErrorKind::NotFound => {
+            Err(error).with_context(|| format!("removing {}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Forgets the peer `selector` names here and, through a signed
 /// revocation, across the group.
 fn forget_peer(home: &Path, selector: &str) -> Result<Vec<Peer>> {
@@ -1162,6 +1275,26 @@ fn mismatch_copy(mismatch: &Mismatch, name: Option<&str>) -> (String, String) {
     )
 }
 
+/// What the window shows when a session ends with `error`.
+fn session_problem(home: &Path, error: &anyhow::Error) -> Status {
+    let (summary, recovery, remedy) = if crate::device::Unavailable::caused(error) {
+        (
+            "This system's identity is unavailable".to_owned(),
+            "Reset Daisy on this system, then pair each peer again.".to_owned(),
+            Some(Remedy::ResetIdentity),
+        )
+    } else if let Some((title, detail)) = version_copy(home, error) {
+        (title, detail, None)
+    } else {
+        ("Connection stopped".to_owned(), recovery_for(error), None)
+    };
+    Status::Problem {
+        summary,
+        recovery,
+        remedy,
+    }
+}
+
 fn recovery_for(error: &anyhow::Error) -> String {
     let message = format!("{error:#}");
     if message.contains("different system answered") {
@@ -1175,7 +1308,14 @@ fn recovery_for(error: &anyhow::Error) -> String {
     } else if message.contains("connecting") {
         "Check that the other system is awake, waiting, and on the same network.".to_owned()
     } else {
-        "Review the setup and try again.".to_owned()
+        let mut chars = error.to_string().chars().collect::<Vec<_>>();
+        if let Some(first) = chars.first_mut() {
+            *first = first.to_ascii_uppercase();
+        }
+        format!(
+            "{}. Review the setup and try again.",
+            chars.into_iter().collect::<String>()
+        )
     }
 }
 
@@ -1184,6 +1324,7 @@ fn send_problem(events: &Sender<Event>, summary: &str, recovery: String) -> Resu
         .send(Event::Status(Status::Problem {
             summary: summary.to_owned(),
             recovery,
+            remedy: None,
         }))
         .map_err(|_| anyhow::anyhow!("Daisy's interface closed"))
 }
@@ -1206,12 +1347,28 @@ pub fn computer_name() -> String {
 }
 
 pub fn load_settings(home: &Path) -> Result<AppSettings> {
+    Ok(load_saved_settings(home)?.unwrap_or_default())
+}
+
+fn load_saved_settings(home: &Path) -> Result<Option<AppSettings>> {
     let path = home.join(SETTINGS_FILE);
     match fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).with_context(|| format!("reading {}", path.display())),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(AppSettings::default()),
+        Ok(text) => toml::from_str(&text)
+            .map(Some)
+            .with_context(|| format!("reading {}", path.display())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
+}
+
+fn disable_saved_sharing(home: &Path) -> Result<()> {
+    if let Some(mut settings) = load_saved_settings(home)?
+        && settings.sharing
+    {
+        settings.sharing = false;
+        save_settings(home, &settings)?;
+    }
+    Ok(())
 }
 
 fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
@@ -1228,6 +1385,253 @@ fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_reset_removes_daisy_state_and_nothing_else() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path();
+        let me = Identity::load_or_create(&path.join("identity")).unwrap().public_key();
+        crate::device::Signer::load_or_create(&path.join("device-identity")).unwrap();
+        let store = PeerStore::open(path).unwrap();
+        store.layouts().unwrap();
+        for name in [
+            SETTINGS_FILE,
+            crate::latency::STATS_FILE,
+            crate::update::LAST_CHECK_FILE,
+            "signing",
+            "trust-v5/peers.toml",
+            "trust-v5/layouts.toml",
+        ] {
+            fs::write(path.join(name), "x").unwrap();
+        }
+        crate::update::save_relaunch(
+            path,
+            Path::new("/Applications/Daisy.app/Contents/MacOS/daisy"),
+            "1.2.3",
+            &crate::update::Launch {
+                home: path.to_owned(),
+                name: "Local system".to_owned(),
+            },
+            100,
+        )
+        .unwrap();
+        let unrelated = [
+            "notes.txt".to_owned(),
+            "update-relaunch-0123.toml".to_owned(),
+            "update-relaunch-notes.txt".to_owned(),
+            format!("update-relaunch-{}.toml", "g".repeat(64)),
+            format!("update-relaunch-{}.txt", "a".repeat(64)),
+        ];
+        for name in &unrelated {
+            fs::write(path.join(name), "kept").unwrap();
+        }
+        fs::create_dir(path.join("projects")).unwrap();
+
+        reset_local_state(path).unwrap();
+
+        let mut left: Vec<_> = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let mut expected = Vec::from(unrelated);
+        expected.extend(["projects", "device-identity.lock", "identity.lock"].map(str::to_owned));
+        expected.sort();
+        assert_eq!(left, expected);
+        let fresh = Identity::load_or_create(&path.join("identity")).unwrap().public_key();
+        assert_ne!(fresh, me, "the next launch makes a new identity");
+        reset_local_state(path).unwrap();
+    }
+
+    #[test]
+    fn a_session_reports_its_key_and_offers_a_reset_for_an_unusable_one() {
+        let home = tempfile::tempdir().unwrap();
+        let handle = spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
+        let wait_for = |what: &str, found: &mut dyn FnMut(Event) -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Ok(event) = handle.events.recv_timeout(std::time::Duration::from_millis(100))
+                    && found(event)
+                {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "never saw {what}");
+            }
+        };
+        let mut launched = None;
+        wait_for("Ready", &mut |event| match event {
+            Event::Ready { me, .. } => launched.replace(me).is_none(),
+            _ => false,
+        });
+        let rotated = Identity::rotate(&home.path().join("identity")).unwrap().public_key();
+        assert_ne!(Some(rotated), launched);
+        crate::state_file::write(&home.path().join("device-identity"), b"not a key reference").unwrap();
+
+        handle
+            .send(Command::Start {
+                settings: SessionSettings::default(),
+                side_chosen: false,
+            })
+            .unwrap();
+        wait_for(
+            "the session's key",
+            &mut |event| matches!(event, Event::Me(me) if me == rotated),
+        );
+        wait_for("the reset offer", &mut |event| {
+            matches!(
+                event,
+                Event::Status(Status::Problem {
+                    remedy: Some(Remedy::ResetIdentity),
+                    ..
+                })
+            )
+        });
+        handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_startup_key_with_loose_permissions_offers_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().unwrap();
+        let identity = home.path().join("identity");
+        let original = Identity::load_or_create(&identity).unwrap().public_key();
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o644)).unwrap();
+        let handle = spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
+
+        let status = handle.events.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            status,
+            Event::Status(Status::Problem { remedy: None, recovery, .. })
+                if recovery.contains("chmod 600")
+        ));
+        handle.shutdown().unwrap();
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(Identity::load_or_create(&identity).unwrap().public_key(), original);
+    }
+
+    #[test]
+    fn a_failed_reset_keeps_sharing_off_when_settings_survive() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path();
+        let mut settings = AppSettings {
+            sharing: true,
+            share_clipboard: false,
+            ..AppSettings::default()
+        };
+        save_settings(path, &settings).unwrap();
+        fs::create_dir(path.join("device-identity")).unwrap();
+
+        let handle = spawn(path.to_owned(), "Local system".to_owned()).unwrap();
+        let recv = || handle.events.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(matches!(recv(), Event::Ready { .. }));
+        handle.send(Command::ResetIdentity).unwrap();
+        assert!(matches!(recv(), Event::Status(Status::Idle)));
+        assert!(matches!(recv(), Event::Notice { .. }));
+
+        settings.sharing = false;
+        assert_eq!(load_settings(path).unwrap(), settings);
+        handle.send(Command::SetClipboard(true)).unwrap();
+        handle.shutdown().unwrap();
+        settings.share_clipboard = true;
+        assert_eq!(load_settings(path).unwrap(), settings);
+    }
+
+    #[test]
+    fn a_failed_reset_does_not_recreate_removed_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path();
+        save_settings(
+            path,
+            &AppSettings {
+                sharing: true,
+                ..AppSettings::default()
+            },
+        )
+        .unwrap();
+        fs::create_dir(path.join(crate::update::LAST_CHECK_FILE)).unwrap();
+
+        assert!(!reset_and_report(path, &mpsc::channel().0));
+
+        assert!(!path.join(SETTINGS_FILE).exists());
+    }
+
+    #[test]
+    fn a_reset_waits_for_the_identity_lock_and_keeps_its_inode() {
+        use std::os::unix::fs::MetadataExt;
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().unwrap();
+        let identity = home.path().join("identity");
+        Identity::load_or_create(&identity).unwrap();
+        let lock = crate::identity::lock(&identity).unwrap();
+        let inode = lock.metadata().unwrap().ino();
+        let (completed, result) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let path = home.path();
+            scope.spawn(move || completed.send(reset_local_state(path)).unwrap());
+            let early = result.recv_timeout(Duration::from_millis(250));
+            drop(lock);
+            assert!(matches!(early, Err(mpsc::RecvTimeoutError::Timeout)));
+            result.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        });
+
+        assert!(!identity.exists());
+        assert_eq!(fs::metadata(identity.with_extension("lock")).unwrap().ino(), inode);
+    }
+
+    #[test]
+    fn a_corrupt_startup_key_can_be_reset_without_a_ready_event() {
+        let home = tempfile::tempdir().unwrap();
+        let identity = home.path().join("identity");
+        crate::state_file::write(&identity, b"corrupt identity").unwrap();
+        let handle = spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
+
+        let status = handle.events.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            status,
+            Event::Status(Status::Problem {
+                remedy: Some(Remedy::ResetIdentity),
+                ..
+            })
+        ));
+        handle.send(Command::ResetIdentity).unwrap();
+        let reset = handle.events.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(matches!(reset, Event::IdentityReset));
+        assert!(!identity.exists());
+        handle.stopped.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn identity_reset_stops_the_controller_and_reports_it() {
+        let home = tempfile::tempdir().unwrap();
+        let handle = spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
+        let ready = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !matches!(
+            handle.events.recv_timeout(std::time::Duration::from_millis(100)),
+            Ok(Event::Ready { .. })
+        ) {
+            assert!(std::time::Instant::now() < ready, "the controller never became ready");
+        }
+        assert!(home.path().join("identity").exists());
+
+        handle.send(Command::ResetIdentity).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match handle.events.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(Event::IdentityReset) => break,
+                Ok(Event::Notice { title, detail }) => panic!("{title}: {detail}"),
+                _ => assert!(std::time::Instant::now() < deadline, "the reset never finished"),
+            }
+        }
+        assert!(!home.path().join("identity").exists());
+        assert!(!home.path().join(SETTINGS_FILE).exists());
+        handle
+            .stopped
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the controller stops after a reset");
+    }
 
     #[test]
     fn arrangement_commands_report_when_no_core_is_listening() {
@@ -1578,6 +1982,38 @@ mod tests {
 
         let tap = anyhow::anyhow!("macOS refused the input tap: Daisy needs Accessibility and Input Monitoring");
         assert!(recovery_for(&tap).starts_with("Quit and reopen Daisy"));
+    }
+
+    #[test]
+    fn only_an_unusable_device_key_offers_a_reset() {
+        let home = tempfile::tempdir().unwrap();
+        let unusable = anyhow::anyhow!("The specified item could not be found in the keychain.")
+            .context(crate::device::Unavailable)
+            .context("starting the session");
+        assert!(matches!(
+            session_problem(home.path(), &unusable),
+            Status::Problem {
+                remedy: Some(Remedy::ResetIdentity),
+                ..
+            }
+        ));
+        let network = anyhow::anyhow!("connecting to studio.local failed");
+        assert!(matches!(
+            session_problem(home.path(), &network),
+            Status::Problem { remedy: None, .. }
+        ));
+    }
+
+    #[test]
+    fn unrecognized_failures_name_the_cause() {
+        let identity = anyhow::anyhow!("The specified item could not be found in the keychain.")
+            .context("looking up Secure Enclave identity")
+            .context("device identity is unavailable on this system; reset the identity and pair again");
+        assert_eq!(
+            recovery_for(&identity),
+            "Device identity is unavailable on this system; reset the identity and pair again. \
+             Review the setup and try again."
+        );
     }
 
     #[tokio::test]
