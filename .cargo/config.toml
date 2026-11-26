@@ -1,2 +1,4 @@
 [env]
 SPARKLE_FRAMEWORK_PATH = { value = "target/sparkle", relative = true }
+# Cargo may run tests from its intermediate build directory.
+DYLD_FRAMEWORK_PATH = { value = "target/sparkle", relative = true }
