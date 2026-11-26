@@ -1,17 +1,17 @@
 [tools]
-rust = { version = "1.99.1", components = "clippy,rustfmt" }
+rust = { version = "1.100.0", components = "clippy,rustfmt" }
 just = "1.59.0"
 # release notes from conventional commits
 git-cliff = "2.14.2"
 
 # local security review tools
-"cargo:cargo-audit" = "0.22.2"
+"cargo:cargo-audit" = "0.23.0"
 # ReachSec delegates reachability analysis to call-cg4rs, which uses rustc-private APIs.
-"cargo:https://github.com/xizheyin/reachsec" = { version = "rev:548b228ba35774664d4d691b6fddf537aa6225db", bin = "reachsec", postinstall = "rustup toolchain install nightly-2025-08-09 --component rust-src --component rustc-dev --component llvm-tools-preview && RUSTUP_TOOLCHAIN=nightly-2025-08-09 cargo install --git=https://github.com/xizheyin/callgraph4rs --rev=3898d83e715df1d56004761738a2db24d2c36628 --locked cg4rs --root \"$MISE_TOOL_INSTALL_PATH\"" }
-cargo-deny = "0.20.2"
-zizmor = "1.32.0"
+"cargo:https://github.com/xizheyin/reachsec" = { version = "rev:fa1bc7c42bb427d3de916a003d4433eebc88f452", bin = "reachsec", postinstall = "rustup toolchain install nightly-2025-08-09 --component rust-src --component rustc-dev --component llvm-tools-preview && RUSTUP_TOOLCHAIN=nightly-2025-08-09 cargo install --git=https://github.com/xizheyin/callgraph4rs --rev=c9e8c05e42f22c7ca50620e619b017587642a7d7 --locked cg4rs --root \"$MISE_TOOL_INSTALL_PATH\"" }
+cargo-deny = "0.22.1"
+zizmor = "1.33.1"
 actionlint = "1.7.12"
 pinact = "5.0.2"
 
 # site/ (Astro, GitHub Pages)
-node = "26.13.0"
+node = "26.13.1"

@@ -23,6 +23,12 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# The vendored Zstandard legacy decoders include BSD-2-Clause code.
+[[licenses.exceptions]]
+name = "zstd-sys"
+version = "=2.2.0"
+allow = ["BSD-2-Clause"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
