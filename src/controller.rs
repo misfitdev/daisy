@@ -587,6 +587,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             Command::Start { settings, side_chosen } => {
                 if let Some(running) = session.take() {
                     running.abort();
+                    let _ = running.await;
                 }
                 stored.last_session = settings.clone();
                 stored.sharing = true;
@@ -626,6 +627,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
             Command::Stop => {
                 if let Some(running) = session.take() {
                     running.abort();
+                    let _ = running.await;
                 }
                 stored.sharing = false;
                 if let Err(error) = save_settings(&home, &stored) {
