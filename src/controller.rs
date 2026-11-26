@@ -499,11 +499,17 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
     let me = match Identity::load_or_create(&home.join("identity")) {
         Ok(identity) => identity.public_key(),
         Err(error) => {
+            let corrupt = error.is::<crate::identity::CorruptIdentity>();
+            let next_step = if corrupt {
+                "Reset Daisy on this system, then pair each peer again."
+            } else {
+                "Check that Daisy can read and write its data folder, then reopen Daisy."
+            };
             if events
                 .send(Event::Status(Status::Problem {
                     summary: "Daisy's key could not be read".to_owned(),
-                    recovery: format!("{error:#}. Reset Daisy on this system, then pair each peer again."),
-                    remedy: Some(Remedy::ResetIdentity),
+                    recovery: format!("{error:#}. {next_step}"),
+                    remedy: corrupt.then_some(Remedy::ResetIdentity),
                 }))
                 .is_err()
             {
@@ -755,6 +761,7 @@ async fn run(home: PathBuf, name: String, mut commands: tokio_mpsc::UnboundedRec
                     running.abort();
                     let _ = running.await;
                 }
+                stored.sharing = false;
                 let _ = events.send(Event::Status(Status::Idle));
                 if reset_and_report(&home, &events) {
                     // nothing may write the old settings back
@@ -1150,9 +1157,16 @@ fn reset_and_report(home: &Path, events: &Sender<Event>) -> bool {
         }
         Err(error) => {
             tracing::error!(error = ?error, "local identity could not be reset");
+            let mut detail = format!("{error:#}. Unlock this system and try again.");
+            if let Err(error) = disable_saved_sharing(home) {
+                tracing::error!(error = ?error, "sharing state could not be saved after failed reset");
+                detail.push_str(&format!(
+                    "\n\nDaisy could not save that sharing was stopped. It may resume on the next launch. {error:#}"
+                ));
+            }
             let _ = events.send(Event::Notice {
                 title: "Daisy could not be reset".to_owned(),
-                detail: format!("{error:#}. Unlock this system and try again."),
+                detail,
             });
             false
         }
@@ -1164,11 +1178,12 @@ fn reset_and_report(home: &Path, events: &Sender<Event>) -> bool {
 /// device key goes first, so a key macOS still holds keeps its reference and
 /// the reset can be retried.
 fn reset_local_state(home: &Path) -> Result<()> {
+    let identity = home.join("identity");
+    // Keep both lock files so other processes continue to lock the same inodes.
+    let _identity_lock = crate::identity::lock(&identity)?;
     crate::device::Signer::forget(&home.join("device-identity"))?;
+    remove_if_present(&identity, |path| fs::remove_file(path))?;
     let files = [
-        "device-identity.lock",
-        "identity",
-        "identity.lock",
         "signing",
         "peers.lock",
         SETTINGS_FILE,
@@ -1332,12 +1347,28 @@ pub fn computer_name() -> String {
 }
 
 pub fn load_settings(home: &Path) -> Result<AppSettings> {
+    Ok(load_saved_settings(home)?.unwrap_or_default())
+}
+
+fn load_saved_settings(home: &Path) -> Result<Option<AppSettings>> {
     let path = home.join(SETTINGS_FILE);
     match fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).with_context(|| format!("reading {}", path.display())),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(AppSettings::default()),
+        Ok(text) => toml::from_str(&text)
+            .map(Some)
+            .with_context(|| format!("reading {}", path.display())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
+}
+
+fn disable_saved_sharing(home: &Path) -> Result<()> {
+    if let Some(mut settings) = load_saved_settings(home)?
+        && settings.sharing
+    {
+        settings.sharing = false;
+        save_settings(home, &settings)?;
+    }
+    Ok(())
 }
 
 fn save_settings(home: &Path, settings: &AppSettings) -> Result<()> {
@@ -1404,7 +1435,7 @@ mod tests {
             .collect();
         left.sort();
         let mut expected = Vec::from(unrelated);
-        expected.push("projects".to_owned());
+        expected.extend(["projects", "device-identity.lock", "identity.lock"].map(str::to_owned));
         expected.sort();
         assert_eq!(left, expected);
         let fresh = Identity::load_or_create(&path.join("identity")).unwrap().public_key();
@@ -1456,6 +1487,98 @@ mod tests {
             )
         });
         handle.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_startup_key_with_loose_permissions_offers_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().unwrap();
+        let identity = home.path().join("identity");
+        let original = Identity::load_or_create(&identity).unwrap().public_key();
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o644)).unwrap();
+        let handle = spawn(home.path().to_owned(), "Local system".to_owned()).unwrap();
+
+        let status = handle.events.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            status,
+            Event::Status(Status::Problem { remedy: None, recovery, .. })
+                if recovery.contains("chmod 600")
+        ));
+        handle.shutdown().unwrap();
+        fs::set_permissions(&identity, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(Identity::load_or_create(&identity).unwrap().public_key(), original);
+    }
+
+    #[test]
+    fn a_failed_reset_keeps_sharing_off_when_settings_survive() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path();
+        let mut settings = AppSettings {
+            sharing: true,
+            share_clipboard: false,
+            ..AppSettings::default()
+        };
+        save_settings(path, &settings).unwrap();
+        fs::create_dir(path.join("device-identity")).unwrap();
+
+        let handle = spawn(path.to_owned(), "Local system".to_owned()).unwrap();
+        let recv = || handle.events.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(matches!(recv(), Event::Ready { .. }));
+        handle.send(Command::ResetIdentity).unwrap();
+        assert!(matches!(recv(), Event::Status(Status::Idle)));
+        assert!(matches!(recv(), Event::Notice { .. }));
+
+        settings.sharing = false;
+        assert_eq!(load_settings(path).unwrap(), settings);
+        handle.send(Command::SetClipboard(true)).unwrap();
+        handle.shutdown().unwrap();
+        settings.share_clipboard = true;
+        assert_eq!(load_settings(path).unwrap(), settings);
+    }
+
+    #[test]
+    fn a_failed_reset_does_not_recreate_removed_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path();
+        save_settings(
+            path,
+            &AppSettings {
+                sharing: true,
+                ..AppSettings::default()
+            },
+        )
+        .unwrap();
+        fs::create_dir(path.join(crate::update::LAST_CHECK_FILE)).unwrap();
+
+        assert!(!reset_and_report(path, &mpsc::channel().0));
+
+        assert!(!path.join(SETTINGS_FILE).exists());
+    }
+
+    #[test]
+    fn a_reset_waits_for_the_identity_lock_and_keeps_its_inode() {
+        use std::os::unix::fs::MetadataExt;
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().unwrap();
+        let identity = home.path().join("identity");
+        Identity::load_or_create(&identity).unwrap();
+        let lock = crate::identity::lock(&identity).unwrap();
+        let inode = lock.metadata().unwrap().ino();
+        let (completed, result) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let path = home.path();
+            scope.spawn(move || completed.send(reset_local_state(path)).unwrap());
+            let early = result.recv_timeout(Duration::from_millis(250));
+            drop(lock);
+            assert!(matches!(early, Err(mpsc::RecvTimeoutError::Timeout)));
+            result.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        });
+
+        assert!(!identity.exists());
+        assert_eq!(fs::metadata(identity.with_extension("lock")).unwrap().ino(), inode);
     }
 
     #[test]
